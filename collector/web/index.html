@@ -122,6 +122,25 @@ canvas{display:block;width:100%}
 .chart-tabs button{border:1px solid #d7dbe3;background:#fff;border-radius:6px;padding:3px 12px;
   font-size:12px;color:#6b7280;cursor:pointer}
 .chart-tabs button.on{background:#eef2ff;border-color:#c7d2fe;color:#3730a3}
+/* ---------- 数据状态条 + 板块 ---------- */
+.freshness{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 12px;margin-bottom:10px;
+  font-size:12px;color:var(--muted)}
+.freshness .fi{display:flex;gap:4px;align-items:center}
+.freshness b{color:var(--text);font-weight:600}
+.badge{border-radius:99px;padding:1px 7px;font-size:11px;border:1px solid transparent}
+.badge.live{background:#e7f7ee;color:#0f7a45;border-color:#bfe8d2}
+.badge.today{background:#eef2ff;color:#3949ab;border-color:#d5dcfb}
+.badge.stale{background:#fff4e5;color:#a35a00;border-color:#ffd9a8}
+.block-head{display:flex;align-items:center;gap:8px;margin:18px 2px 6px;font-size:13px;color:var(--muted)}
+.block-head h2{margin:0;font-size:13px;font-weight:600;color:var(--text);letter-spacing:.02em}
+.block-head .line{flex:1;height:1px;background:var(--line, #e6e8ee)}
+.quotebar{display:flex;flex-wrap:wrap;gap:16px;align-items:baseline;padding:10px 12px}
+.quotebar .px{font-size:22px;font-weight:600}
+.quotebar .chg{font-size:14px}
+.quotebar .kv{font-size:12px;color:var(--muted)}
+.quotebar .spacer{flex:1}
+.quotebar .up{color:#e2453c}
+.quotebar .down{color:#12a05c}
   .tip{position:absolute;pointer-events:none;background:rgba(31,36,48,.94);color:#fff;font-size:12px;
        padding:7px 9px;border-radius:var(--r-sm);line-height:1.6;white-space:nowrap;display:none;z-index:5;
        font-variant-numeric:tabular-nums}
@@ -217,6 +236,9 @@ canvas{display:block;width:100%}
 
   <main>
     <div class="card panel" id="banner" hidden></div>
+    <div class="card freshness" id="freshness">
+      <div class="fresh-items" id="freshItems">数据状态读取中…</div>
+    </div>
     <nav class="tabs" id="viewTabs">
       <button data-view="stock" class="on">自选标的</button>
       <button data-view="market">全市场</button>
@@ -224,6 +246,9 @@ canvas{display:block;width:100%}
 
     <!-- ===================== 单只标的 ===================== -->
     <section id="viewStock" class="view">
+      <div class="block-head"><h2>① 盯盘 · 实时</h2><span class="badge live" id="quoteBadge">实时</span><span class="line"></span><span id="quoteTime"></span><button class="ghost" id="quoteRefresh" style="padding:1px 8px">刷新</button></div>
+      <div class="card quotebar" id="quotebar"><span class="kv">加载中…</span></div>
+      <div class="block-head"><h2>② 行情与结论 · 日终</h2><span class="badge today" id="dailyBadge">日线</span><span class="line"></span><span id="dailyTime"></span></div>
       <div class="card head">
         <div class="head-main">
           <h1 id="title">请选择标的 <small id="subtitle"></small></h1>
@@ -296,6 +321,7 @@ canvas{display:block;width:100%}
 
     <!-- ===================== 全市场 ===================== -->
     <section id="viewMarket" class="view" hidden>
+      <div class="block-head"><h2>① 任务 · 按需</h2><span class="line"></span><span class="kv">跑完会自动刷新上面的数据状态</span></div>
       <div class="card panel">
         <h3>任务 <span id="jobStatus"></span>
           <span class="jobbtns">
@@ -310,6 +336,7 @@ canvas{display:block;width:100%}
         <pre class="joblog" id="jobLog" hidden></pre>
       </div>
 
+      <div class="block-head"><h2>② 市场概览 · 日终</h2><span class="badge today" id="marketBadge">日线</span><span class="line"></span><span id="marketTime"></span></div>
       <div class="card panel">
         <h3>市场概览 <span id="marketDate"></span></h3>
         <div class="stats" id="marketStats"></div>
@@ -317,11 +344,13 @@ canvas{display:block;width:100%}
         <div class="hint" id="marketNote"></div>
       </div>
 
+      <div class="block-head"><h2>③ 涨跌榜 · 日终</h2><span class="line"></span></div>
       <div class="panels two">
         <div class="card panel"><h3>涨幅榜</h3><div id="gainers"></div></div>
         <div class="card panel"><h3>跌幅榜</h3><div id="losers"></div></div>
       </div>
 
+      <div class="block-head"><h2>④ 形态筛选 · 按需</h2><span class="line"></span></div>
       <div class="card panel">
         <h3>形态筛选 <span id="screenDate"></span></h3>
         <div class="seg" id="critSeg"></div>
@@ -342,7 +371,9 @@ const C = {
   resistance:'rgba(226,69,60,.10)', resistanceEdge:'rgba(226,69,60,.45)'
 };
 const STATE_NAME = {up:'上升趋势', range:'震荡', down:'下跌趋势'};
-const state = {items:[], code:null, days:250, data:null, hover:null, chart:'kline', intraday:null};
+const state = {items:[], code:null, days:250, data:null, hover:null, chart:'kline', intraday:null,
+               freshness:null, quotes:null};
+let liveTimer = null;          // 交易时段的实时刷新（报价 + 分时）
 let meta = {}, help = {};
 
 /* ---------- 指标说明（阈值全部取自 config，改了配置说明跟着变） ---------- */
@@ -631,12 +662,83 @@ function drawIntraday(){
   }
 }
 
+/* ---------- 数据状态条：哪些是实时、哪些是日终 ---------- */
+function badge(text, kind){ return `<span class="badge ${kind}">${text}</span>`; }
+
+function freshBadge(value, reference){
+  if (!value) return badge('无数据', 'stale');
+  const day = String(value).slice(0, 10);
+  const ref = String(reference || '').slice(0, 10);
+  if (ref && day < ref) return badge(day.slice(5) + ' 陈旧', 'stale');
+  return badge('当日', 'today');
+}
+
+async function loadFreshness(){
+  let d;
+  try { d = await api('/api/freshness'); } catch(e){ return; }
+  state.freshness = d;
+  const ref = d.daily;
+  const items = [
+    `<span class="fi">日线 <b>${d.daily || '—'}</b> ${freshBadge(d.daily, ref)}</span>`,
+    `<span class="fi">特征 <b>${d.features || '—'}</b> ${freshBadge(d.features, ref)}</span>`,
+    `<span class="fi">广度 <b>${d.breadth || '—'}</b> ${freshBadge(d.breadth, ref)}</span>`,
+    d.intraday ? `<span class="fi">分时 <b>${String(d.intraday).slice(11)}</b> ${badge(d.trading ? '盘中' : '已收盘', d.trading ? 'live' : 'today')}</span>` : '',
+    `<span class="fi">筛选 <b>${d.screen || '—'}</b></span>`,
+    `<span class="fi">时段 <b>${d.session || '—'}</b></span>`,
+    d.last_daily_run ? `<span class="fi">上次日终 <b>${String(d.last_daily_run).slice(5, 16)}</b></span>` : '',
+  ];
+  $('freshItems').innerHTML = items.filter(Boolean).join('');
+  if ($('dailyTime')) $('dailyTime').textContent = d.daily ? `数据截至 ${d.daily}` : '还没有日线数据';
+  if ($('marketTime')) $('marketTime').textContent = d.daily ? `数据截至 ${d.daily}` : '';
+}
+
+/* ---------- 实时报价：只给盯盘用，不参与任何结论 ---------- */
+function renderQuotes(d){
+  const box = $('quotebar');
+  if (!box) return;
+  if (!d || d.error || !d.items || !d.items.length){
+    box.innerHTML = `<span class="kv">${(d && d.error) || '暂时拿不到实时报价'}</span>`;
+    if ($('quoteTime')) $('quoteTime').textContent = '';
+    return;
+  }
+  const q = d.items.find(i => i.code === state.code) || d.items[0];
+  const chg = q.pct_chg;
+  const cls = chg > 0 ? 'up' : (chg < 0 ? 'down' : '');
+  const f2 = v => (v == null ? '—' : v.toFixed(2));
+  box.innerHTML =
+    `<span class="px ${cls}">${f2(q.close)}</span>` +
+    `<span class="chg ${cls}">${chg == null ? '' : (chg > 0 ? '+' : '') + chg.toFixed(2) + '%'}</span>` +
+    `<span class="kv">${q.code} ${q.name || ''}</span>` +
+    `<span class="kv">昨收 ${f2(q.pre_close)}</span>` +
+    `<span class="kv">最高 ${f2(q.high)} 最低 ${f2(q.low)}</span>` +
+    `<span class="kv">成交额 ${q.amount == null ? '—' : (q.amount / 1e8).toFixed(2) + ' 亿'}</span>` +
+    `<span class="spacer"></span>` +
+    `<span class="kv">${d.trading ? '交易中 · 每 30 秒自动刷新' : (d.session || '')}</span>`;
+  if ($('quoteTime')) $('quoteTime').textContent = q.quote_time ? `报价时间 ${q.quote_time.slice(11)}` : '';
+}
+
+async function loadQuotes(){
+  const code = state.code ? '?codes=' + encodeURIComponent(state.code) : '';
+  try { state.quotes = await api('/api/quotes' + code); renderQuotes(state.quotes); }
+  catch(e){ renderQuotes({ error: e.message }); }
+}
+
+function startLiveRefresh(){
+  if (liveTimer) return;
+  liveTimer = setInterval(async () => {
+    if (!(state.freshness && state.freshness.trading)) return;   // 非交易时段不假装实时
+    await loadQuotes();
+    if (state.chart === 'intraday'){ await loadIntraday(); draw(); }
+  }, 30000);
+}
+
 async function selectItem(code){
   state.code = code;
   highlightCurrent();
   $('title').firstChild.nodeValue = code + ' ';
   await loadKline();
   if (state.chart === 'intraday'){ await loadIntraday(); draw(); }
+  loadQuotes();                 // 盯盘区跟着切到这只标的
 }
 
 /* 高亮当前标的：认 data-code，不再依赖模板里的类名——改文案不会再点不动 */
@@ -935,6 +1037,7 @@ function afterJob(last){
   if (!last) return;
   toast(last.status === 'done' ? `${last.title}完成` : `${last.title}失败，看下方日志`, 4000);
   if (last.status !== 'done') return;
+  loadFreshness(); loadQuotes();     // 任务跑完，数据状态跟着变
   if (last.key === 'daily'){
     screenData = null;
     loadWatchlist().then(() => { if (state.code) loadKline(); });
@@ -1191,12 +1294,27 @@ canvas.addEventListener('mousemove', ev=>{
 canvas.addEventListener('mouseleave', ()=>{ state.hover = null; draw(); });
 window.addEventListener('resize', draw);
 
+/* 盯盘区：手动刷新 + 切回前台时补一次（切到后台就不刷，省得白跑） */
+const quoteBtn = $('quoteRefresh');
+if (quoteBtn) quoteBtn.onclick = async () => {
+  await loadQuotes();
+  if (state.chart === 'intraday'){ await loadIntraday(); draw(); }
+};
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) return;
+  await loadFreshness();
+  await loadQuotes();
+});
+
 (async function init(){
   try{
     await checkHealth();
     await loadMeta();
     await loadWatchlist();
     await loadRecentAlerts();
+    await loadFreshness();
+    await loadQuotes();
+    startLiveRefresh();
     pollJobs();                  // 显示上一次任务的状态
     if (state.items.length) await loadKline();
   }catch(e){ toast('初始化失败：' + e.message); }

@@ -204,11 +204,19 @@ class FixtureSource(BaseSource):
             if not bars:
                 continue
             base = bars[-1]["close"]
+            price = round(base * (1 + rng.uniform(-0.006, 0.006)), 4)
             rows.append(
                 {
                     "code": code,
                     "dt": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "close": round(base * (1 + rng.uniform(-0.006, 0.006)), 4),
+                    "close": price,
+                    "pre_close": base,
+                    "high": round(price * 1.004, 4),
+                    "low": round(price * 0.996, 4),
+                    "pct_chg": round((price / base - 1) * 100, 3),
+                    "volume": round(rng.uniform(1e5, 5e6)),
+                    "amount": round(price * rng.uniform(1e5, 5e6), 2),
+                    "quote_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
         return rows

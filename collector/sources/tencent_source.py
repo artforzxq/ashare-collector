@@ -196,7 +196,11 @@ class TencentSource(BaseSource):
         return [row for row in rows if start <= row["trade_date"] <= end]
 
     def intraday_snapshot(self, codes) -> list[dict]:
-        """一次请求拿多只最新价（腾讯的 q= 接口支持逗号拼接）。"""
+        """一次请求拿多只最新价（腾讯的 q= 接口支持逗号拼接）。
+
+        顺带把报价里本来就有的字段也带出来：涨跌幅、最高最低、成交量、**成交额**。
+        成交额在这里是真值（万元），不用像日线那样估算。
+        """
         requests = self._requests()
         symbols = [_symbol(code) for code in codes]
         if not symbols:
@@ -221,8 +225,24 @@ class TencentSource(BaseSource):
                 continue
             price = _to_float(fields[3])
             code = f"{symbol[:2].upper()}{symbol[2:]}"
-            if price:
-                rows.append({"code": code, "close": price, "dt": stamp})
+            if not price:
+                continue
+            when = str(fields[30]) if len(fields) > 30 and fields[30] else ""
+            rows.append({
+                "code": code,
+                "name": fields[1] if len(fields) > 1 else "",
+                "close": price,
+                "pre_close": _to_float(fields[4]) if len(fields) > 4 else None,
+                "open": _to_float(fields[5]) if len(fields) > 5 else None,
+                "high": _to_float(fields[33]) if len(fields) > 33 else None,
+                "low": _to_float(fields[34]) if len(fields) > 34 else None,
+                "pct_chg": _to_float(fields[32]) if len(fields) > 32 else None,
+                "volume": (_to_float(fields[36]) or 0.0) * 100 if len(fields) > 36 else None,
+                "amount": (_to_float(fields[37]) or 0.0) * 1e4 if len(fields) > 37 else None,
+                "quote_time": (f"{when[:4]}-{when[4:6]}-{when[6:8]} {when[8:10]}:{when[10:12]}:{when[12:14]}"
+                               if len(when) >= 14 else None),
+                "dt": stamp,
+            })
         return rows
 
     def intraday_bars(self, code: str, period: int = 1) -> list[dict]:

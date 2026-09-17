@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, tasks
+from . import db, market_time, tasks
 from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
@@ -118,11 +118,95 @@ def _prev_close(conn, code: str, day: str) -> float | None:
     return float(row["close"]) if row and row["close"] else None
 
 
+def _freshness_payload(cfg: dict) -> dict:
+    """数据有多新：日线到哪天、分时到几点、上次日终/筛选是什么时候。
+
+    页面顶部的状态条读它。判断"这条数据能不能用"第一步就是看它有多新，
+    所以这里把各档数据分别给出来，而不是揉成一句话。
+    """
+    conn = db.connect(cfg["_db_path"])
+    try:
+        def latest(table: str, column: str = "trade_date"):
+            row = db.query_one(conn, f"SELECT MAX({column}) AS v FROM {table}")
+            return row["v"] if row and row["v"] else None
+
+        intraday = db.query_one(conn, "SELECT MAX(dt) AS v FROM bars_intraday")
+        last_daily = db.query_one(
+            conn,
+            "SELECT MAX(created_at) AS v FROM data_health WHERE task LIKE 'daily%'",
+        )
+        last_screen = db.query_one(
+            conn,
+            "SELECT MAX(created_at) AS v FROM data_health WHERE task='screen'",
+        )
+        return {
+            "server_time": db.now_iso(),
+            "session": market_time.describe(conn),
+            "trading": market_time.is_trading_now(conn),
+            "daily": latest("bars_daily"),
+            "features": latest("features_daily"),
+            "breadth": latest("market_breadth"),
+            "alerts": latest("alerts"),
+            "screen": latest("screen_results"),
+            "intraday": intraday["v"] if intraday else None,
+            "last_daily_run": last_daily["v"] if last_daily else None,
+            "last_screen_run": last_screen["v"] if last_screen else None,
+        }
+    finally:
+        conn.close()
+
+
 class App:
+    QUOTE_TTL = 20.0        # 报价缓存秒数：防止多个标签页把免费源刷爆
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lock = threading.Lock()
         self.jobs = jobs_mod.JobManager()
+        self._quote_cache: dict = {}
+
+    def quotes(self, codes: list | None = None) -> dict:
+        """批量实时报价。只给盯盘用：不落库、不参与任何结论、失败也不影响别的。
+
+        免费源有请求间隔的规矩，所以 20 秒内重复问同一批代码直接给缓存。
+        """
+        want = [str(code).strip().upper() for code in (codes or []) if str(code).strip()]
+        if not want:
+            want = [item["code"] for item in watchlist_codes(self.cfg)]
+
+        cached = self._quote_cache
+        now = time.time()
+        if cached and cached.get("codes") == want and now - cached.get("at", 0) < self.QUOTE_TTL:
+            payload = dict(cached["payload"])
+            payload["cached"] = True
+            return payload
+
+        payload = {"items": [], "fetched_at": db.now_iso(), "cached": False, "error": None}
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            payload["session"] = market_time.describe(conn)
+            payload["trading"] = market_time.is_trading_now(conn)
+        finally:
+            conn.close()
+
+        try:
+            source = tasks.quote_source(self.cfg)
+        except Exception as exc:            # 适配器导入失败之类，别把页面带崩
+            payload["error"] = f"数据源不可用：{exc}"
+            return payload
+        if source is None:
+            payload["error"] = "没有支持实时报价的数据源（检查 config.yaml 的 sources）"
+            return payload
+        try:
+            payload["items"] = source.intraday_snapshot(want)
+        except Exception as exc:
+            payload["error"] = str(exc)
+            return payload
+        self._quote_cache = {"codes": want, "at": now, "payload": payload}
+        return payload
+
+    def freshness(self) -> dict:
+        return _freshness_payload(self.cfg)
 
     # ---- 页面上的任务按钮 ----
 
@@ -570,8 +654,8 @@ def _health_payload(cfg: dict) -> dict:
         "process_started_at": PROCESS_STARTED_AT,
         "code_mtime": datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S"),
         "stale": newest > PROCESS_STARTED_TS,
-        "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/meta", "/api/market",
-                   "/api/screen", "/api/alerts", "/api/search", "/api/jobs"],
+        "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
+                   "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search", "/api/jobs"],
     }
 
 
@@ -653,6 +737,11 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes(app.kline(query.get("code", ""), query.get("days", 250)))
             if path == "/api/intraday":
                 return _payload_bytes(app.intraday(query.get("code", "")))
+            if path == "/api/quotes":
+                codes = [c for c in (query.get("codes", "") or "").split(",") if c.strip()]
+                return _payload_bytes(app.quotes(codes))
+            if path == "/api/freshness":
+                return _payload_bytes(app.freshness())
             if path == "/api/alerts":
                 return _payload_bytes({"items": app.recent_alerts()})
             if path == "/api/screen":

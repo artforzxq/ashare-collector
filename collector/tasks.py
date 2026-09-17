@@ -733,6 +733,11 @@ def intraday_source(cfg: dict):
     return _source_for(_source_pool(cfg), "intraday_bars")
 
 
+def quote_source(cfg: dict):
+    """支持实时报价的数据源（盯盘区用）。"""
+    return _source_for(_source_pool(cfg), "intraday_snapshot")
+
+
 def prune_intraday(conn, cfg: dict) -> int:
     """分钟线只留最近 keep_intraday_days 个交易日（默认 250 天）。"""
     keep = int((cfg.get("collection") or {}).get("keep_intraday_days", 250) or 0)
