@@ -41,6 +41,17 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "risk_reward": "REAL",
         "candle_pattern": "TEXT",
         "risk_note": "TEXT",
+        "avg_amount_20d": "REAL",
+        "avg_amount_60d": "REAL",
+    },
+    # 筛选结果也要能回填真实表现，才能回答"筛出来的票后来怎么样了"
+    "screen_results": {
+        "outcome_5d": "REAL",
+        "outcome_20d": "REAL",
+    },
+    # 市场广度：记下参与统计的个股数，样本太少时不能当全市场广度看
+    "market_breadth": {
+        "coverage": "INTEGER",
     },
 }
 

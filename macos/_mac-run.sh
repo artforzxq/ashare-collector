@@ -10,9 +10,11 @@
 #  想换位置：export ASHARE_VENV=/你的/路径
 # ============================================================
 
-cd "$(dirname "$0")" || exit 1
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE/.." || exit 1
 
 VENV="${ASHARE_VENV:-$HOME/ashare-env}"
+PYNOTE="$HOME/ashare-python.txt"
 PY="$VENV/bin/python"
 STEP="${1:-}"
 shift 2>/dev/null || true
@@ -42,8 +44,16 @@ setup_python() {
 }
 
 ensure_python() {
-  if [ -x "$PY" ] && "$PY" -c "import yaml, baostock" >/dev/null 2>&1; then
+  if [ -x "$PY" ] && "$PY" -c "import yaml" >/dev/null 2>&1; then
     return 0
+  fi
+  # 记住上次选定的解释器（环境不在项目里，笔记也放用户目录）
+  if [ -s "$PYNOTE" ]; then
+    candidate="$(cat "$PYNOTE" 2>/dev/null)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c "import yaml" >/dev/null 2>&1; then
+      PY="$candidate"
+      return 0
+    fi
   fi
   setup_python
 }
@@ -52,7 +62,7 @@ run_py() { "$PY" run.py "$@"; }
 
 case "$STEP" in
   setup)
-    if [ -x "$PY" ] && "$PY" -c "import yaml, baostock" >/dev/null 2>&1; then
+    if [ -x "$PY" ] && "$PY" -c "import yaml" >/dev/null 2>&1; then
       echo "运行环境已经装好了：$VENV"
       echo "（想重装就先把这个文件夹删掉，再双击本文件）"
     else
@@ -101,7 +111,7 @@ case "$STEP" in
     ;;
   dashboard)
     ensure_python || { pause; exit 1; }
-    run_py dashboard "$@" && { [ -f dashboard.html ] && open dashboard.html; }
+    run_py dashboard "$@" && "$PY" run.py open dashboard
     ;;
   tables)
     ensure_python || { pause; exit 1; }
@@ -109,7 +119,7 @@ case "$STEP" in
     "$PY" sql.py tables
     echo
     echo "=== 生成浏览页面 db_view.html ==="
-    "$PY" sql.py browser && { [ -f db_view.html ] && open db_view.html; }
+    "$PY" sql.py browser && "$PY" run.py open db_view
     ;;
   sql)
     if command -v sqlite3 >/dev/null 2>&1; then
@@ -130,7 +140,7 @@ TIP
     ;;
   dictionary)
     ensure_python || { pause; exit 1; }
-    run_py dictionary && { [ -f 字段说明.md ] && open 字段说明.md; }
+    run_py dictionary && "$PY" run.py open dictionary
     ;;
   auto)
     ensure_python || exit 1
@@ -141,7 +151,7 @@ TIP
   shortcut)
     target="$HOME/Desktop/每日任务.command"
     project="$(pwd)"
-    printf '#!/bin/bash\ncd "%s" || exit 1\nexec bash _mac-run.sh daily\n' "$project" > "$target"
+    printf '#!/bin/bash\ncd "%s" || exit 1\nexec bash "%s/macos/_mac-run.sh" daily\n' "$project" "$project" > "$target"
     chmod +x "$target"
     echo "已在桌面创建「每日任务.command」，双击即抓当日数据。"
     echo "（想固定到程序坞：右键该文件 → 选项 → 留在程序坞）"
@@ -158,9 +168,7 @@ TIP
     echo "正在为自选里的每个标的生成看板图…"
     echo
     run_py share "$@"
-    if [ -d 分享图 ]; then
-      open 分享图
-    fi
+    "$PY" run.py open share
     ;;
   review)
     ensure_python || { pause; exit 1; }
@@ -171,9 +179,7 @@ TIP
     echo "正在把状态机的参数放到历史数据上重跑（几秒钟）…"
     echo
     run_py backtest "$@"
-    if [ -d 回测 ]; then
-      open 回测
-    fi
+    "$PY" run.py open backtest
     ;;
   sync)
     ensure_python || { pause; exit 1; }
@@ -191,18 +197,14 @@ TIP
     echo "扫本地全部标的（有几只算几只，取决于 18-全市场同步 补了多少）…"
     echo
     run_py screen "$@"
-    if [ -d 筛选 ]; then
-      open 筛选
-    fi
+    "$PY" run.py open screen
     ;;
   pack)
     ensure_python || { pause; exit 1; }
     echo "打包数据库（先确认没有程序正在用它；压缩 480MB 大约要一分钟）…"
     echo
     run_py pack "$@"
-    if [ -d 备份 ]; then
-      open 备份
-    fi
+    "$PY" run.py open pack
     ;;
   *)
     echo "未知步骤：$STEP"

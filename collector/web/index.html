@@ -117,7 +117,11 @@
 
   /* ============ 图表 ============ */
   .chart-wrap{position:relative;padding:6px 4px 0}
-  canvas{display:block;width:100%}
+canvas{display:block;width:100%}
+.chart-tabs{display:flex;gap:6px;padding:8px 10px 0}
+.chart-tabs button{border:1px solid #d7dbe3;background:#fff;border-radius:6px;padding:3px 12px;
+  font-size:12px;color:#6b7280;cursor:pointer}
+.chart-tabs button.on{background:#eef2ff;border-color:#c7d2fe;color:#3730a3}
   .tip{position:absolute;pointer-events:none;background:rgba(31,36,48,.94);color:#fff;font-size:12px;
        padding:7px 9px;border-radius:var(--r-sm);line-height:1.6;white-space:nowrap;display:none;z-index:5;
        font-variant-numeric:tabular-nums}
@@ -266,6 +270,10 @@
       </div>
 
       <div class="card chart-wrap">
+        <div class="chart-tabs" id="chartTabs">
+          <button type="button" data-chart="kline" class="on">日K</button>
+          <button type="button" data-chart="intraday">分时</button>
+        </div>
         <canvas id="chart"></canvas>
         <div class="tip" id="tip"></div>
         <div class="legend">
@@ -294,6 +302,7 @@
             <button class="ghost" data-job="sync">同步全市场</button>
             <button class="ghost" data-job="screen">跑筛选</button>
             <button class="ghost" data-job="snapshot">补当日快照</button>
+            <button class="ghost" data-job="intraday">抓当日分时</button>
           </span>
         </h3>
         <div class="hint">点一下就在本机跑，日志实时显示在这里；同一时刻只允许一个任务。
@@ -333,7 +342,7 @@ const C = {
   resistance:'rgba(226,69,60,.10)', resistanceEdge:'rgba(226,69,60,.45)'
 };
 const STATE_NAME = {up:'上升趋势', range:'震荡', down:'下跌趋势'};
-const state = {items:[], code:null, days:250, data:null, hover:null};
+const state = {items:[], code:null, days:250, data:null, hover:null, chart:'kline', intraday:null};
 let meta = {}, help = {};
 
 /* ---------- 指标说明（阈值全部取自 config，改了配置说明跟着变） ---------- */
@@ -531,11 +540,103 @@ async function loadRecentAlerts(){
 }
 
 /* ---------- 单只标的 ---------- */
+async function switchChart(name){
+  state.chart = name;
+  document.querySelectorAll('#chartTabs button')
+    .forEach(b => b.classList.toggle('on', b.dataset.chart === name));
+  if (name === 'intraday') await loadIntraday();
+  draw();
+}
+
+async function loadIntraday(){
+  if (!state.code) return;
+  try{
+    state.intraday = await api(`/api/intraday?code=${encodeURIComponent(state.code)}`);
+  }catch(e){
+    toast('分时读取失败：' + e.message);
+    state.intraday = null;
+  }
+}
+
+/* ---------- 分时线绘制：价格线 + 均价线 + 昨收基准 ---------- */
+function drawIntraday(){
+  const canvas = $('chart'), wrap = canvas.parentElement;
+  const W = Math.max(360, wrap.clientWidth - 8), H = 430;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.height = H + 'px';
+  canvas.width = Math.round(W*dpr); canvas.height = Math.round(H*dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  $('tip').textContent = '';
+
+  const d = state.intraday;
+  ctx.font = '13px sans-serif'; ctx.fillStyle = C.text; ctx.textAlign = 'left';
+  if (!d || !d.points || !d.points.length){
+    ctx.fillText('还没有分时数据：盘中点这里会现抓一次（只给当天）', 16, 30);
+    return;
+  }
+  const pts = d.points, n = pts.length;
+  const padL = 6, padR = 62, padT = 12, padB = 20, gapV = 12, volH = 66;
+  const priceH = H - padT - padB - volH - gapV;
+  const priceTop = padT, priceBottom = priceTop + priceH;
+  const volTop = priceBottom + gapV, volBottom = volTop + volH;
+  const plotW = W - padL - padR;
+  const xs = i => padL + plotW * (n === 1 ? 0.5 : i / (n - 1));
+
+  let lo = Infinity, hi = -Infinity;
+  pts.forEach(p=>{ lo = Math.min(lo, p.p, p.avg || p.p); hi = Math.max(hi, p.p, p.avg || p.p); });
+  if (d.prev_close){ lo = Math.min(lo, d.prev_close); hi = Math.max(hi, d.prev_close); }
+  const pad = (hi - lo) * 0.08 || 0.01; lo -= pad; hi += pad;
+  const yOf = v => priceTop + priceH * (1 - (v - lo) / (hi - lo));
+
+  ctx.font = '11px sans-serif'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++){
+    const v = lo + (hi - lo) * i / 4, y = Math.round(yOf(v)) + .5;
+    ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
+    ctx.fillStyle = C.axis; ctx.fillText(v.toFixed(2), padL + plotW + 6, y);
+  }
+  if (d.prev_close){
+    const y = Math.round(yOf(d.prev_close)) + .5;
+    ctx.save(); ctx.setLineDash([4,4]); ctx.strokeStyle = C.axis;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); ctx.restore();
+  }
+  const vMax = Math.max(...pts.map(p => p.v || 0), 1);
+  pts.forEach((p, i)=>{
+    const h = volH * (p.v || 0) / vMax;
+    ctx.fillStyle = (i && p.p >= pts[i-1].p) ? C.up : C.down;
+    ctx.fillRect(xs(i) - 1, volBottom - h, 2, h);
+  });
+  const line = (key, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+    pts.forEach((p, i)=>{ const y = yOf(p[key]); i ? ctx.lineTo(xs(i), y) : ctx.moveTo(xs(i), y); });
+    ctx.stroke();
+  };
+  line('avg', C.ma20);
+  line('p', (d.prev_close && pts[n-1].p < d.prev_close) ? C.down : C.up);
+
+  const last = pts[n-1];
+  const total = pts.reduce((s, p)=>s + (p.v || 0), 0);
+  const chg = d.prev_close ? (last.p / d.prev_close - 1) * 100 : null;
+  ctx.font = '12px sans-serif'; ctx.fillStyle = C.text;
+  ctx.fillText(`${d.date}  最新 ${last.p}  均价 ${last.avg}  `
+    + (chg === null ? '' : `涨跌 ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%  `)
+    + `成交量 ${(total / 1e6).toFixed(1)} 百万股`, padL + 4, H - 6);
+  if (n > 2){
+    ctx.fillStyle = C.axis;
+    [0, Math.floor(n/2), n-1].forEach(i=>{
+      const x = Math.max(padL, Math.min(xs(i) - 14, padL + plotW - 30));
+      ctx.fillText(pts[i].t, x, volBottom + 14);
+    });
+  }
+}
+
 async function selectItem(code){
   state.code = code;
   highlightCurrent();
   $('title').firstChild.nodeValue = code + ' ';
   await loadKline();
+  if (state.chart === 'intraday'){ await loadIntraday(); draw(); }
 }
 
 /* 高亮当前标的：认 data-code，不再依赖模板里的类名——改文案不会再点不动 */
@@ -583,6 +684,7 @@ function renderHeader(){
 
 /* ---------- K 线绘制 ---------- */
 function draw(){
+  if (state.chart === 'intraday'){ drawIntraday(); return; }
   const d = state.data; if (!d) return;
   const canvas = $('chart'), wrap = canvas.parentElement;
   const W = Math.max(360, wrap.clientWidth - 8), H = 430;
@@ -1037,6 +1139,9 @@ $('q').onkeydown = ev => { if (ev.key === 'Enter') doSearch(); };
 document.querySelectorAll('#viewTabs button').forEach(btn => {
   btn.onclick = () => switchView(btn.dataset.view);
 });
+document.querySelectorAll('#chartTabs button').forEach(btn => {
+  btn.onclick = () => switchChart(btn.dataset.chart);
+});
 document.querySelectorAll('[data-job]').forEach(btn => {
   btn.onclick = () => runJob(btn.dataset.job);
 });
@@ -1073,6 +1178,7 @@ document.querySelectorAll('#rangeSeg button').forEach(btn=>{
 
 const canvas = $('chart');
 canvas.addEventListener('mousemove', ev=>{
+  if (state.chart === 'intraday'){ $('tip').textContent = ''; return; }
   const d = state.data; if (!d || !d.bars.length) return;
   const rect = canvas.getBoundingClientRect();
   const padL = 6, padR = 62;

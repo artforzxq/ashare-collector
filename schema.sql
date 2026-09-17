@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS bars_intraday (
 );
 
 CREATE TABLE IF NOT EXISTS market_breadth (
+  coverage        INTEGER,          -- 参与统计的个股数：样本太少时这一行不能当全市场广度看
   trade_date         TEXT PRIMARY KEY, -- 交易日
   up_count           INTEGER,          -- 上涨家数
   down_count         INTEGER,          -- 下跌家数
@@ -123,6 +124,8 @@ CREATE TABLE IF NOT EXISTS margin (
 -- ---------- 特征与决策 ----------
 
 CREATE TABLE IF NOT EXISTS features_daily (
+  avg_amount_20d     REAL,          -- 近 20 个交易日日均成交额（元）：窗口不含当日
+  avg_amount_60d     REAL,          -- 近 60 个交易日日均成交额（元）：小票过滤用这一列
   code               TEXT NOT NULL, -- 标的代码
   trade_date         TEXT NOT NULL, -- 交易日
   ma20               REAL,          -- 20 日前复权收盘均线
@@ -283,6 +286,8 @@ CREATE TABLE IF NOT EXISTS screen_criteria (
 );
 
 CREATE TABLE IF NOT EXISTS screen_results (
+  outcome_5d  REAL,             -- 筛选日之后 5 个交易日的真实涨跌（%，次日收盘建仓口径）
+  outcome_20d REAL,             -- 之后 20 个交易日；用来回答"筛出来的票后来怎么样"
   trade_date  TEXT NOT NULL,    -- 交易日
   criterion   TEXT NOT NULL,    -- 条件：蓄势 / 突破 / 异动 / 趋势 / 回踩
   rank_no     INTEGER NOT NULL, -- 该条件下的名次

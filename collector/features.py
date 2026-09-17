@@ -147,9 +147,14 @@ def compute_feature_series(
         raw["adx14"] = round(adx14[index], 4) if adx14[index] is not None else None
 
         mean20, std20 = _prior_stats(amounts, index, 20)
+        mean60_amount, _ = _prior_stats(amounts, index, 60)
         amount_z = round((amounts[index] - mean20) / std20, 4) if (mean20 and std20) else None
         raw["amount_zscore"] = amount_z
         raw["vol_ratio_20"] = round(amounts[index] / mean20, 4) if mean20 else None
+        # 成交额的绝对水平（元）：小票过滤和仓位上限都要用，所以单独留一列。
+        # 注意窗口不含当日，与文件内其它指标口径一致。
+        raw["avg_amount_20d"] = round(mean20, 2) if mean20 else None
+        raw["avg_amount_60d"] = round(mean60_amount, 2) if mean60_amount else None
         raw["vol_confirm"] = (
             round(max(-2.0, min(2.0, amount_z)) * _sign(pcts[index]), 4) if amount_z is not None else None
         )
@@ -217,6 +222,8 @@ def compute_feature_series(
                 "atr_pct": raw["atr_pct"],
                 "vol_ratio_20": raw["vol_ratio_20"],
                 "amount_zscore": raw["amount_zscore"],
+                "avg_amount_20d": raw["avg_amount_20d"],
+                "avg_amount_60d": raw["avg_amount_60d"],
                 "dist_to_high_250": raw["dist_to_high_250"],
                 "donchian_break": raw["donchian_break"],
                 "consolidation_days": consolidation_days,

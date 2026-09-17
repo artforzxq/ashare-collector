@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import time
 
-from . import candles as candles_mod, db, features as features_mod, rules
+from . import candles as candles_mod, db, features as features_mod, review, rules, universe
 from .names import display_name
 from .registry import FactorRegistry
 
 DEFAULT_MIN_BARS = 80
 DEFAULT_TOP = 30
+# 筛出来的票后来怎么样，拿沪深300 同期涨跌做参照——没有参照的"平均涨了 3%"
+# 说明不了任何事，可能只是那段时间大盘在涨。
+BENCHMARK_CODE = "SH000300"
 
 # config 里没配 criteria 时的兜底（与仓库里的 config.yaml 保持一致）
 DEFAULT_CRITERIA = (
@@ -115,19 +118,14 @@ def scan(conn, cfg: dict, min_bars: int | None = None, limit: int | None = None,
         return {"ok": False, "message": "config.yaml 的 screen.criteria 是空的，没有可用的筛选条件"}
 
     registry = FactorRegistry(cfg.get("factors", []), "screen")
-    codes = [
-        row["code"]
-        for row in db.query(
-            conn,
-            """SELECT code, COUNT(*) AS n FROM bars_daily WHERE COALESCE(quality_flag,'ok')!='blocked'
-               GROUP BY code HAVING n >= ? ORDER BY code""",
-            (min_bars,),
-        )
-    ]
+    # 标的池统一走 universe：历史够长 + 近 60 日均成交额过门槛，和回测用同一套口径。
+    # 小票不是"机会"，是成交不了、数据也经不起看的噪声，不该出现在筛选结果里。
+    picked = universe.select_codes(conn, cfg, min_bars=min_bars, verbose=verbose)
+    codes = picked["codes"]
     if limit:
         codes = codes[:limit]
     if not codes:
-        return {"ok": False, "message": f"本地没有够 {min_bars} 根日线的标的，先跑 18-全市场同步"}
+        return {"ok": False, "message": f"本地没有够 {min_bars} 根日线、且成交额过门槛的标的，先跑 18-全市场同步"}
 
     started = time.time()
     rows: list[dict] = []
@@ -163,6 +161,7 @@ def scan(conn, cfg: dict, min_bars: int | None = None, limit: int | None = None,
                 "consolidation_days": last.get("consolidation_days"),
                 "vol_shrink_ratio": last.get("vol_shrink_ratio"),
                 "breakout_confirmed": last.get("breakout_confirmed"),
+                "avg_amount_60d": last.get("avg_amount_60d"),
                 "ma20": last.get("ma20"),
                 "ma60": last.get("ma60"),
                 "raw_values": last.get("raw_values") or {},
@@ -192,6 +191,7 @@ def scan(conn, cfg: dict, min_bars: int | None = None, limit: int | None = None,
         "groups": grouped,
         "criteria": conditions,
         "seconds": round(time.time() - started, 1),
+        "universe": picked,
     }
     if verbose:
         counts = "、".join(f"{item['key']} {len(grouped[item['key']])}" for item in conditions)
@@ -284,6 +284,11 @@ def report(result: dict, top: int = 15) -> str:
     lines.append(f"扫描 {result['scanned']} 只，有效 {result['with_data']} 只，"
                  f"用时 {result['seconds']} 秒，数据截至 {result['trade_date']}")
     lines.append("说明：这里只列出现了什么形态，不是买入建议；形态之后怎么走，得看行情。")
+    info = result.get("universe") or {}
+    if info.get("dropped_liquidity"):
+        lines.append(f"标的池：{info.get('total', 0)} 只可用，已剔除 {info['dropped_liquidity']} 只"
+                     f"近 60 日均成交额低于 {(info.get('threshold') or 0) / 1e4:,.0f} 万的小票"
+                     f"（门槛在 config.yaml 的 universe.min_avg_amount_60d）")
     for item in result["criteria"]:
         rows = result["groups"].get(item["key"], [])
         lines.append("")
@@ -298,8 +303,117 @@ def report(result: dict, top: int = 15) -> str:
         for rank, row in enumerate(rows[:top], 1):
             trend = f"{row['trend_score']:.0f}" if row.get("trend_score") is not None else "—"
             vol = f"{row['vol_ratio_20']:.2f}" if row.get("vol_ratio_20") is not None else "—"
+            amount = row.get("avg_amount_60d")
+            amt = f"{amount / 1e4:,.0f}" if amount else "—"
             lines.append(
                 f"  {rank:>2}. {row['name']:<10} {row['code']:<9} 收 {row['close']:>8.2f} "
-                f"涨跌 {(row['pct_chg'] or 0):+6.2f}%  趋势 {trend:>4}  量比 {vol:>5}"
+                f"涨跌 {(row['pct_chg'] or 0):+6.2f}%  趋势 {trend:>4}  量比 {vol:>5}  均额万 {amt:>7}"
             )
+    return "\n".join(lines)
+
+
+def backfill_outcomes(conn, verbose: bool = False) -> dict:
+    """回填筛选结果之后 5/20 个交易日的真实表现。
+
+    口径与提醒复盘完全一致（信号日收盘确认、次日收盘建仓、持有 N 个交易日），
+    这样"筛出来的票"和"提醒过的票"可以直接比。
+    """
+    cache: dict = {}
+    updated = 0
+    for row in db.query(
+        conn,
+        "SELECT trade_date, criterion, code, outcome_5d, outcome_20d FROM screen_results",
+    ):
+        dates, bars = review.load_series(conn, row["code"], cache)
+        sets: list[str] = []
+        params: list = []
+        for horizon, column in zip(review.HORIZONS, ("outcome_5d", "outcome_20d")):
+            value = review.forward_return(bars, dates, row["trade_date"], horizon)
+            if value is not None and row[column] != value:
+                sets.append(f"{column}=?")
+                params.append(value)
+        if sets:
+            params.extend([row["trade_date"], row["criterion"], row["code"]])
+            conn.execute(
+                f"UPDATE screen_results SET {', '.join(sets)} "
+                "WHERE trade_date=? AND criterion=? AND code=?",
+                params,
+            )
+            updated += 1
+    conn.commit()
+    if verbose and updated:
+        print(f"      筛选结果回填：{updated} 条")
+    return {"screen": updated}
+
+
+def outcome_stats(conn) -> list[dict]:
+    """每种形态筛出来的票，后来 5/20 个交易日表现如何。"""
+    return [
+        dict(row)
+        for row in db.query(
+            conn,
+            """
+            SELECT criterion,
+                   COUNT(*)                                                 AS n,
+                   SUM(CASE WHEN outcome_5d IS NOT NULL THEN 1 ELSE 0 END)  AS done5,
+                   SUM(CASE WHEN outcome_5d > 0 THEN 1 ELSE 0 END)          AS win5,
+                   ROUND(AVG(outcome_5d), 2)                                AS avg5,
+                   SUM(CASE WHEN outcome_20d IS NOT NULL THEN 1 ELSE 0 END) AS done20,
+                   SUM(CASE WHEN outcome_20d > 0 THEN 1 ELSE 0 END)         AS win20,
+                   ROUND(AVG(outcome_20d), 2)                               AS avg20
+            FROM screen_results
+            GROUP BY criterion
+            ORDER BY n DESC
+            """,
+        )
+    ]
+
+
+def _benchmark_returns(conn, dates, horizon: int) -> dict:
+    """基准（沪深300）在这些日期上持有 horizon 个交易日的收益。"""
+    try:
+        series, bars = review.load_series(conn, BENCHMARK_CODE, {})
+    except Exception:
+        return {}
+    out = {}
+    for day in dates:
+        value = review.forward_return(bars, series, day, horizon)
+        if value is not None:
+            out[day] = value
+    return out
+
+
+def performance_report(conn, min_sample: int = 20) -> str:
+    """给人看的"筛出来的票后来怎么样"。没有样本就明说，不硬凑结论。"""
+    stats = outcome_stats(conn)
+    if not stats:
+        return ""
+    all_dates = [row["trade_date"] for row in db.query(conn, "SELECT DISTINCT trade_date FROM screen_results")]
+    base20 = _benchmark_returns(conn, all_dates, 20)
+    lines = ["", "筛选结果回填（筛出来的票后来怎么样了）"]
+    lines.append(f"{'形态':<10}{'条数':>5}{'5日胜率':>9}{'5日均值':>9}{'20日胜率':>9}{'20日均值':>9}{'20日超额':>10}")
+    for row in stats:
+        win5 = f"{row['win5'] / row['done5'] * 100:.0f}%" if row["done5"] else "—"
+        win20 = f"{row['win20'] / row['done20'] * 100:.0f}%" if row["done20"] else "—"
+        avg5 = f"{row['avg5']:+.2f}%" if row["avg5"] is not None else "—"
+        avg20 = f"{row['avg20']:+.2f}%" if row["avg20"] is not None else "—"
+        # 参照取"这个形态自己那几天的基准均值"，而不是全表最新一天——形态之间的日期不一样
+        own_dates = [item["trade_date"] for item in db.query(
+            conn, "SELECT DISTINCT trade_date FROM screen_results WHERE criterion=?", (row["criterion"],))]
+        bench_values = [base20[day] for day in own_dates if day in base20]
+        bench = sum(bench_values) / len(bench_values) if bench_values else None
+        excess = f"{row['avg20'] - bench:+.2f}%" if (row["avg20"] is not None and bench is not None) else "—"
+        lines.append(f"{row['criterion']:<10}{row['n']:>5}{win5:>9}{avg5:>9}{win20:>9}{avg20:>9}"
+                     f"{excess:>10}")
+    if base20:
+        lines.append("")
+        lines.append("超额 = 该形态 20 日均值 − 同期沪深300（按各自的筛选日期取基准）；"
+                     "正数才说明形态本身有信息量。")
+    waiting = [row for row in stats if not row["done20"]]
+    if waiting:
+        lines.append(f"（{len(waiting)} 个形态还一条结果都算不出来——筛选日之后的交易日不够。"
+                     "这是正常的，等数据长出来会自动回填）")
+    thin = [row for row in stats if row["done20"] and row["done20"] < min_sample]
+    if thin:
+        lines.append(f"（另有 {len(thin)} 个形态的 20 日样本不足 {min_sample} 条，只能当方向看）")
     return "\n".join(lines)

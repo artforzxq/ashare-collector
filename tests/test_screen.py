@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 from collector import db, screen
@@ -90,14 +91,14 @@ class ScanTests(unittest.TestCase):
             bars.append({
                 "code": "SH600000", "trade_date": f"2026-{1 + index // 28:02d}-{index % 28 + 1:02d}",
                 "open": price, "high": round(price * 1.004, 3), "low": round(price * 0.996, 3),
-                "close": price, "volume": 100000, "amount": 1000000, "pct_chg": 0.1,
+                "close": price, "volume": 100000, "amount": 80000000, "pct_chg": 0.1,
                 "source": "baostock",
             })
         last = bars[-1]["trade_date"]                          # 最后一根：放量突破
         bars.append({
             "code": "SH600000", "trade_date": "2026-06-01",
             "open": 10.2, "high": 10.9, "low": 10.1, "close": 10.8,
-            "volume": 600000, "amount": 6000000, "pct_chg": 7.0, "source": "baostock",
+            "volume": 600000, "amount": 480000000, "pct_chg": 7.0, "source": "baostock",
         })
         db.upsert_rows(cls.conn, "bars_daily", bars, ["code", "trade_date"])
         db.upsert_rows(cls.conn, "instruments",
@@ -140,6 +141,117 @@ class ScanTests(unittest.TestCase):
             conn.close()
             self.assertFalse(result["ok"])
             self.assertIn("先跑", result["message"])
+
+
+class OutcomeBackfillTests(unittest.TestCase):
+    """筛出来的票后来怎么样了：回填口径必须和提醒复盘一致（信号日收盘 → 次日收盘建仓）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=root)
+        cls.cfg["_db_path"] = str(root / "t.db")
+        cls.conn = db.connect(cls.cfg["_db_path"])
+        db.init_db(cls.conn, PROJECT_ROOT / "schema.sql")
+
+        bars = []
+        for index in range(40):
+            close = 100.0 + index                       # 每天涨 1 元，方便手算
+            bars.append({
+                "code": "SH600000",
+                "trade_date": (date(2026, 1, 1) + timedelta(days=index)).isoformat(),
+                "open": close, "high": close, "low": close, "close": close,
+                "volume": 1000, "amount": 200_000_000, "pct_chg": 1.0,
+            })
+        db.upsert_rows(cls.conn, "bars_daily", bars, ["code", "trade_date"])
+        db.upsert_rows(cls.conn, "screen_results", [
+            {"trade_date": bars[10]["trade_date"], "criterion": "突破", "rank_no": 1,
+             "code": "SH600000", "name": "测试股", "close": 110.0, "created_at": "2026-01-11 15:00:00"},
+            {"trade_date": bars[-1]["trade_date"], "criterion": "蓄势", "rank_no": 1,
+             "code": "SH600000", "name": "测试股", "close": 139.0, "created_at": "2026-02-09 15:00:00"},
+        ], ["trade_date", "criterion", "code"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.conn.close()
+        cls.tmp.cleanup()
+
+    def test_outcome_uses_next_day_close_entry(self):
+        # 用例之间共用同一个库，先把自己关心的两列清空，免得依赖执行顺序
+        self.conn.execute("UPDATE screen_results SET outcome_5d=NULL, outcome_20d=NULL")
+        self.conn.commit()
+        info = screen.backfill_outcomes(self.conn)
+        self.assertEqual(info["screen"], 1)              # 最后一天那条还不满持有期，不写
+        row = db.query_one(
+            self.conn,
+            "SELECT outcome_5d, outcome_20d FROM screen_results WHERE criterion='突破'",
+        )
+        # 信号在 11 日 → 次日（12 日，收 111）建仓 → 第 5 个交易日收 116 / 第 20 个收 131
+        self.assertAlmostEqual(row["outcome_5d"], (116 / 111 - 1) * 100, places=3)
+        self.assertAlmostEqual(row["outcome_20d"], (131 / 111 - 1) * 100, places=3)
+        pending = db.query_one(
+            self.conn,
+            "SELECT outcome_20d FROM screen_results WHERE criterion='蓄势'",
+        )
+        self.assertIsNone(pending["outcome_20d"])         # 还看不出结果，不硬填
+
+    def test_backfill_is_idempotent(self):
+        screen.backfill_outcomes(self.conn)
+        again = screen.backfill_outcomes(self.conn)
+        self.assertEqual(again["screen"], 0)             # 值没变就不再写
+
+    def test_performance_report_reads_the_backfilled_rows(self):
+        screen.backfill_outcomes(self.conn)
+        text = screen.performance_report(self.conn)
+        self.assertIn("筛选结果回填", text)
+        self.assertIn("突破", text)
+
+
+class LiquidityFilterTests(unittest.TestCase):
+    """小票过滤：成交额不够的票根本不进筛选，而不是排在后面。
+
+    "幽灵票"在回测里最危险——它们没有资金参与，形态是噪声，却常常在事后涨得最猛，
+    一旦进样本就会把结论往乐观的方向拉。
+    """
+
+    def _scan_with_amounts(self, big: float, small: float):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=root)
+        cfg["_db_path"] = str(root / "t.db")
+        conn = db.connect(cfg["_db_path"])
+        db.init_db(conn, PROJECT_ROOT / "schema.sql")
+        bars = []
+        for code, amount in (("SH600000", big), ("SZ300001", small)):
+            for index in range(140):
+                price = 10.0 + (0.05 if index % 2 else -0.05)
+                bars.append({
+                    "code": code, "trade_date": f"2026-{1 + index // 28:02d}-{index % 28 + 1:02d}",
+                    "open": price, "high": round(price * 1.004, 3), "low": round(price * 0.996, 3),
+                    "close": price, "volume": 100000, "amount": amount, "pct_chg": 0.1,
+                })
+        db.upsert_rows(conn, "bars_daily", bars, ["code", "trade_date"])
+        db.upsert_rows(conn, "instruments", [
+            {"code": "SH600000", "name": "大票", "type": "stock"},
+            {"code": "SZ300001", "name": "小票", "type": "stock"},
+        ], ["code"])
+        result = screen.scan(conn, cfg, verbose=False)
+        conn.close()
+        tmp.cleanup()
+        return result
+
+    def test_small_cap_is_dropped_from_the_scan(self):
+        result = self._scan_with_amounts(big=200_000_000, small=5_000_000)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["scanned"], 1)
+        self.assertEqual(result["universe"]["dropped_liquidity"], 1)
+
+    def test_threshold_from_config_can_be_disabled(self):
+        result = self._scan_with_amounts(big=2_000_000, small=1_000_000)
+        # 两只都没过 3000 万门槛 → 一个都不剩
+        self.assertFalse(result["ok"])
+        self.assertIn("成交额", result["message"])
 
 
 if __name__ == "__main__":

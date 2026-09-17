@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+cd /d "%~dp0.."
 echo === Backtest: which thresholds actually work ===
-call "win-run.bat" backtest
+call "%~dp0win-run.bat" backtest
 echo.
 pause

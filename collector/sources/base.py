@@ -112,6 +112,10 @@ class BaseSource:
     def intraday_snapshot(self, codes: Iterable[str]) -> list[dict]:
         self._missing("intraday_snapshot")
 
+    def intraday_bars(self, code: str, period: int = 1) -> list[dict]:
+        """当日分时线：一分钟一个点（period=1）。不支持的源在这里报错。"""
+        self._missing("intraday_bars")
+
     def etf_shares(self, codes: Iterable[str], trade_date: str) -> list[dict]:
         self._missing("etf_shares")
 

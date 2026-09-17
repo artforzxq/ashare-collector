@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import os
+import platform
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import (
     backtest as backtest_mod,
+    breadth as breadth_mod,
     dashboard as dashboard_mod,
     db,
     dictionary as dictionary_mod,
+    intraday as intraday_mod,
     promotion as promotion_mod,
     report as report_mod,
     review as review_mod,
@@ -23,6 +28,39 @@ from . import (
 )
 from .config import load_config, use_fixture_sources
 from .sources import SOURCE_REGISTRY, build_source
+
+# 让启动脚本保持纯 ASCII 的一张表：批处理里写不出中文路径，就交给 Python 打开。
+# 键名固定用英文，两端的启动器（windows\*.bat / macos\*.command）都能用同一套。
+OPEN_TARGETS: dict[str, str] = {
+    "dictionary": "字段说明.md",
+    "dashboard": "dashboard.html",
+    "db_view": "db_view.html",
+    "backtest": "回测",
+    "screen": "筛选",
+    "pack": "备份",
+    "share": "分享图",
+}
+
+
+def open_target(name: str, root: str | Path) -> tuple[bool, str]:
+    """用系统默认程序打开项目里的文件或文件夹（跨平台）。"""
+    key = (name or "").strip().lower()
+    rel = OPEN_TARGETS.get(key)
+    if not rel:
+        return False, f"不知道要打开什么：{name}"
+    target = Path(root) / rel
+    if not target.exists():
+        return False, f"还没生成：{target}"
+    try:
+        if platform.system() == "Windows":
+            os.startfile(str(target))            # noqa: S606 - 打开本地文件，路径可控
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", str(target)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(target)], check=False)
+    except OSError as exc:
+        return False, f"打开失败：{exc}"
+    return True, str(target)
 
 
 def _prepare(args) -> dict:
@@ -112,6 +150,12 @@ def cmd_daily(args) -> int:
 def cmd_intraday(args) -> int:
     cfg = _prepare(args)
     conn = _connect(cfg)
+    if getattr(args, "aggregate", False):
+        # 只重建聚合（离线可用）：1 分钟数据已经在库里时，不用再联网抓一遍
+        info = intraday_mod.aggregate_missing(conn, verbose=True)
+        conn.close()
+        print(f"聚合完成：{info}")
+        return 0
     results = tasks.run_intraday(conn, cfg, verbose=not args.quiet)
     if not results:
         print("盘中无触发信号。")
@@ -222,7 +266,8 @@ def cmd_share(args) -> int:
     if result["skipped"]:
         print("没有数据、跳过的标的：" + "、".join(result["skipped"]))
     if not result["ok"]:
-        print("没有可生成的标的。先双击 3-每日任务 把数据抓下来。")
+        print("没有可生成的标的。先跑一次每日任务把数据抓下来"
+              "（windows\\3-每日任务.bat / macos/3-每日任务.command）。")
         return 1
     if result["renderer"]:
         print(f"渲染方式：{result['renderer']}，共 {len(result['images'])} 张")
@@ -230,7 +275,8 @@ def cmd_share(args) -> int:
     else:
         print("没找到可用的浏览器（Chrome / Edge / Playwright），已经把卡片留成 HTML：")
         print("  - 用浏览器打开这些 HTML，页面就是 1080×1720 的整图，直接截图即可")
-        print("  - 或双击 0-安装环境 之后重试（会自动带上 Playwright）")
+        print("  - 或跑一次 windows\\0-安装环境.bat（macos/0-安装环境.command）之后重试"
+              "（会自动带上 Playwright）")
     return 0
 
 
@@ -241,8 +287,14 @@ def cmd_review(args) -> int:
     if not args.no_backfill:
         info = review_mod.backfill_outcomes(conn, verbose=False)
         print(f"回填：提醒 {info['alerts']} 条、被压制信号 {info['conflicts']} 条")
+        screen_info = screen_mod.backfill_outcomes(conn, verbose=False)
+        if screen_info["screen"]:
+            print(f"回填：筛选结果 {screen_info['screen']} 条")
     print("")
     print(review_mod.report(conn))
+    screen_text = screen_mod.performance_report(conn)
+    if screen_text:
+        print(screen_text)
     conn.close()
     return 0
 
@@ -262,7 +314,7 @@ def cmd_backtest(args) -> int:
         grid = grid or dict(backtest_mod.DEFAULT_GRID)
         grid["min_state_days"] = tuple(int(v) for v in args.min_days.split(","))
 
-    result = backtest_mod.run_grid(conn, cfg, grid=grid)
+    result = backtest_mod.run_grid(conn, cfg, grid=grid, mode=args.universe, limit=args.sample)
     conn.close()
     if not result.get("ok"):
         print(result.get("message", "回测失败"))
@@ -335,6 +387,37 @@ def cmd_shadow(args) -> int:
     return 0
 
 
+def cmd_breadth(args) -> int:
+    """用本地 K 线补市场广度：涨跌家数 / 涨跌停 / 中位数涨跌幅 / 成交额。
+
+    不联网。本地仓库里有多少只票，就覆盖多少只——比那个时常连不上的快照接口靠谱。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    info = breadth_mod.backfill(conn, days=args.days, verbose=True,
+                                min_coverage=breadth_mod.min_coverage(cfg))
+    conn.close()
+    if not info.get("ok"):
+        print(info.get("message", "市场广度补齐失败"))
+        return 1
+    return 0
+
+
+def cmd_open(args) -> int:
+    """打开生成结果（字段说明 / 回测 / 筛选 / 备份 / 看板…）。
+
+    启动脚本保持纯 ASCII——cmd 读含中文的 .bat 会错位——中文路径统一从这里走，
+    Windows 和 macOS 的启动器因此可以共用同一套键名。
+    """
+    cfg = _prepare(args)
+    ok, message = open_target(args.target, cfg["_project_root"])
+    if not ok:
+        print(message)
+        return 1
+    print(f"已打开：{message}")
+    return 0
+
+
 def cmd_pack(args) -> int:
     """把数据库打包成一个可以拷到另一台电脑的文件。"""
     cfg = _prepare(args)
@@ -344,7 +427,8 @@ def cmd_pack(args) -> int:
         return 1
     print("")
     print("拷到另一台电脑后：把 market.db 放回项目的 data/ 目录（覆盖同名文件），")
-    print("然后双击 14-看盘页面 就能看；想继续抓数据就双击 3-每日任务。")
+    print("然后跑 windows\\14-看盘页面.bat 就能看（macos/14-看盘页面.command）；"
+          "想继续抓数据就再跑一次每日任务。")
     return 0
 
 
@@ -421,6 +505,10 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.choices["init-db"]
     init.add_argument("--rebuild", action="store_true", help="备份旧库并重建（让新的建表注释生效）")
 
+    sub.choices["intraday"].add_argument(
+        "--aggregate", action="store_true",
+        help="只把已有的 1 分钟数据聚成 5/30/60 分钟（不联网）")
+
     daily = sub.add_parser("daily", help="跑一次日终任务")
     daily.add_argument("--date", help="交易日 YYYY-MM-DD")
     daily.add_argument("--db", help="数据库路径")
@@ -470,9 +558,22 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--enter-up", help="进入上升的阈值，逗号分隔，例如 60,65,70,75")
     backtest.add_argument("--confirm", help="确认天数，例如 1,2,3")
     backtest.add_argument("--min-days", help="最短持续期，例如 1,3,5")
+    backtest.add_argument("--universe", choices=("market", "watchlist"),
+                          help="样本口径：market 全市场抽样（默认取配置）/ watchlist 只看观察池")
+    backtest.add_argument("--sample", type=int, help="全市场抽样时抽多少只（默认取配置 backtest.sample）")
     backtest.add_argument("--no-save", action="store_true", help="不写报告文件")
     backtest.add_argument("--db", help="数据库路径")
     backtest.set_defaults(func=cmd_backtest)
+
+    opener = sub.add_parser("open", help="用系统默认程序打开生成结果（启动脚本用，键名固定）")
+    opener.add_argument("target",
+                        help="dictionary / dashboard / db_view / backtest / screen / pack / share")
+    opener.set_defaults(func=cmd_open)
+
+    breadth = sub.add_parser("breadth", help="用本地 K 线补市场广度（涨跌家数 / 涨跌停 / 成交额）")
+    breadth.add_argument("--days", type=int, help="只补最近 N 个交易日（默认全部）")
+    breadth.add_argument("--db", help="数据库路径")
+    breadth.set_defaults(func=cmd_breadth)
 
     sync = sub.add_parser("sync", help="全市场本地化：代码表 + 分批补历史（可反复跑）")
     sync.add_argument("--limit", type=int, help="本次最多补多少只，默认取配置 warehouse.batch_size")

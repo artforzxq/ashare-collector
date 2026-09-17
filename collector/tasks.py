@@ -7,7 +7,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Iterable
 
-from . import candles as candles_mod, db, features as features_mod, review as review_mod, risk as risk_mod, validate, warehouse
+from . import (breadth as breadth_mod, candles as candles_mod, db, features as features_mod,
+               intraday as intraday_mod, review as review_mod, risk as risk_mod,
+               screen as screen_mod, validate, warehouse)
 from .names import display_name
 from .alerts import apply_budget, apply_cooldown, build_candidates, persist
 from .arbitrate import DecisionContext, arbitrate
@@ -204,6 +206,11 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
         review_mod.backfill_outcomes(conn, verbose=verbose)
     except Exception as exc:
         _log(f"      ! 回填提醒表现失败：{exc}", verbose)
+    # 筛选结果也要回填：不然只能回答"筛出来了什么"，回答不了"筛出来的后来怎么样"
+    try:
+        screen_mod.backfill_outcomes(conn, verbose=verbose)
+    except Exception as exc:
+        _log(f"      ! 回填筛选结果失败：{exc}", verbose)
     return summary
 
 
@@ -216,42 +223,43 @@ def _fetch(source, code: str, start: str, end: str, kind: str, summary: dict) ->
 
 
 def _collect_breadth(conn, source, cfg: dict, trade_date: str, verbose: bool) -> dict | None:
-    if source is None:
-        _log("      ! 没有支持全市场快照的数据源，市场广度跳过", verbose)
-        db.log_health(conn, trade_date, "none", "breadth", "failed", 0, 1.0, 0, "无支持 market_snapshot 的数据源")
-        return None
-    try:
-        snapshot = source.market_snapshot(trade_date)
-    except Exception as exc:
-        _log(f"      ! 广度数据不可用：{exc}", verbose)
-        db.log_health(conn, trade_date, source.name, "breadth", "failed", 0, 1.0, 0, str(exc))
-        return None
+    """市场广度：先问数据源要全市场快照，拿不到就用本地 K 线自己数。
 
-    pcts = [float(row["pct_chg"]) for row in snapshot if row.get("pct_chg") is not None]
-    if not pcts:
+    本地这条路不会因为接口断连而空着——本地有 5500 多只票时，它就是真实的全市场广度。
+    """
+    record = None
+    if source is None:
+        _log("      · 没有支持全市场快照的数据源，改用本地 K 线算广度", verbose)
+    else:
+        try:
+            snapshot = source.market_snapshot(trade_date)
+            record = breadth_mod.from_snapshot(snapshot, trade_date, source.name)
+        except Exception as exc:
+            _log(f"      · 快照不可用（{exc}），改用本地 K 线算广度", verbose)
+            db.log_health(conn, trade_date, source.name, "breadth", "failed", 0, 1.0, 0, str(exc))
+
+    if record is None:
+        record = breadth_mod.from_local(conn, trade_date)
+        if record is None:
+            _log("      ! 本地也没有当日 K 线，市场广度跳过", verbose)
+            db.log_health(conn, trade_date, "local", "breadth", "failed", 0, 1.0, 0, "本地无当日 K 线")
+            return None
+        covered = record["up_count"] + record["down_count"] + record["flat_count"]
+        db.log_health(conn, trade_date, "local", "breadth", "ok", covered, 0.0, 0, record["source"])
+
+    covered = record["up_count"] + record["down_count"] + record["flat_count"]
+    limit = breadth_mod.min_coverage(cfg)
+    if limit and covered < limit:
+        # 99 只票算出来的"涨跌家数"不是市场广度，是噪声。宁可空着。
+        _log(f"      ! 广度样本只有 {covered} 只（少于 {limit}），不写入"
+             f"——当天本地/快照都没覆盖到全市场", verbose)
+        db.log_health(conn, trade_date, record["source"], "breadth", "suspect", covered, 0.0, 0,
+                      f"样本只有 {covered} 只，少于 {limit}，未写入")
         return None
-    up = sum(1 for p in pcts if p > 0)
-    down = sum(1 for p in pcts if p < 0)
-    flat = len(pcts) - up - down
-    record = {
-        "trade_date": trade_date,
-        "up_count": up,
-        "down_count": down,
-        "flat_count": flat,
-        "limit_up_count": sum(1 for p in pcts if p >= 9.8),
-        "limit_down_count": sum(1 for p in pcts if p <= -9.8),
-        "broken_limit_count": None,   # 需要连板数据，第二阶段补
-        "max_boards": None,           # 同上
-        "up_ratio": round(up / max(1, up + down), 4),
-        "median_pct_chg": round(statistics.median(pcts), 4),
-        "total_amount": sum(float(row.get("amount") or 0) for row in snapshot),
-        "sh_amount": sum(float(row.get("amount") or 0) for row in snapshot if str(row.get("code", "")).startswith("SH")),
-        "sz_amount": sum(float(row.get("amount") or 0) for row in snapshot if str(row.get("code", "")).startswith("SZ")),
-        "source": source.name,
-        "updated_at": db.now_iso(),
-    }
     db.upsert_rows(conn, "market_breadth", [record], ["trade_date"])
-    _log(f"      上涨 {up} / 下跌 {down}，涨停 {record['limit_up_count']}，中位数 {record['median_pct_chg']}%", verbose)
+    _log(f"      上涨 {record['up_count']} / 下跌 {record['down_count']}，"
+         f"涨停 {record['limit_up_count']}，中位数 {record['median_pct_chg']}%"
+         f"（{record['source']}，覆盖 {covered} 只）", verbose)
     return record
 
 
@@ -720,13 +728,83 @@ def collect_instrument(
         "notes": summary["issues"][:3],
     }
 
+def intraday_source(cfg: dict):
+    """支持当日分时线的数据源（页面上的"看分时"也走这里）。"""
+    return _source_for(_source_pool(cfg), "intraday_bars")
+
+
+def prune_intraday(conn, cfg: dict) -> int:
+    """分钟线只留最近 keep_intraday_days 个交易日（默认 250 天）。"""
+    keep = int((cfg.get("collection") or {}).get("keep_intraday_days", 250) or 0)
+    if keep <= 0:
+        return 0
+    days = [
+        row["day"]
+        for row in db.query(
+            conn,
+            "SELECT DISTINCT substr(dt, 1, 10) AS day FROM bars_intraday ORDER BY day DESC LIMIT ?",
+            (keep,),
+        )
+    ]
+    if len(days) < keep:
+        return 0
+    cursor = conn.execute("DELETE FROM bars_intraday WHERE substr(dt, 1, 10) < ?", (days[-1],))
+    conn.commit()
+    return cursor.rowcount
+
+
+def collect_intraday_bars(conn, cfg: dict, codes=None, verbose: bool = True) -> dict:
+    """把当日分时线写进 bars_intraday。
+
+    分时接口只给当天，所以这个动作本来就该在盘中反复跑——页面点一下、任务计划
+    每 5 分钟一次都行，攒下来的就是最近 250 个交易日的分钟线。
+    """
+    source = intraday_source(cfg)
+    if source is None:
+        _log("      ! 没有支持分时线的数据源，跳过", verbose)
+        return {"ok": False, "message": "没有支持分时线的数据源", "bars": 0, "failed": []}
+
+    codes = list(codes) if codes else [item["code"] for item in watchlist_codes(cfg)]
+    total = 0
+    failed: list[str] = []
+    touched: set[str] = set()
+    for index, code in enumerate(codes, 1):
+        try:
+            rows = source.intraday_bars(code)
+        except Exception as exc:
+            failed.append(code)
+            _log(f"      ! {code} 分时抓取失败：{exc}", verbose)
+            continue
+        if rows:
+            db.upsert_rows(conn, "bars_intraday", rows, ["code", "dt", "period"])
+            total += len(rows)
+            touched.update(str(row["dt"])[:10] for row in rows)
+        if verbose and index % 20 == 0:
+            _log(f"      分时已抓 {index}/{len(codes)}", verbose)
+
+    pruned = prune_intraday(conn, cfg)
+    # 顺手聚成 5 / 30 / 60 分钟：跨周期规则和分时图都要用
+    # 刚写进来的这些天要强制重算：分钟数据被修正过（比如解析口径变了）时，
+    # 旧的聚合结果会变成脏数据
+    aggregated = intraday_mod.aggregate_missing(conn, force_days=touched, verbose=verbose)
+    if verbose:
+        _log(f"      分时线：{len(codes) - len(failed)} 只、{total} 个点写库"
+             + (f"，聚合 {aggregated}" if any(aggregated.values()) else "")
+             + (f"，清理旧数据 {pruned} 行" if pruned else ""), verbose)
+    return {"ok": True, "codes": len(codes), "bars": total, "failed": failed,
+            "aggregated": aggregated, "pruned": pruned, "source": source.name}
+
+
 def run_intraday(conn, cfg: dict, verbose: bool = True) -> list[dict]:
-    """盘中只做两件事：是否跌破支撑带、是否进入支撑带。其余留给日终。"""
+    """盘中：先把当日分时线存下来，再判断是否跌破/进入支撑带。其余留给日终。"""
+    codes = [item["code"] for item in watchlist_codes(cfg)]
+    # 分时线只给当天，错过就补不回来了，所以先存
+    collect_intraday_bars(conn, cfg, codes, verbose)
+
     source = _source_for(_source_pool(cfg), "intraday_snapshot")
     if source is None:
         _log("盘中快照不可用：没有支持 intraday_snapshot 的数据源", verbose)
         return []
-    codes = [item["code"] for item in watchlist_codes(cfg)]
     try:
         snapshot = source.intraday_snapshot(codes)
     except Exception as exc:

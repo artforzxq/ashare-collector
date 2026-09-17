@@ -383,8 +383,9 @@ def pack_database(cfg: dict, out_dir: str | Path | None = None, compress: bool =
         f"规则版本：{version or '—'}\n"
         f"完整性检查：{check}\n\n"
         "怎么用：把 market.db 放到项目的 data/ 目录下（覆盖同名文件），\n"
-        "        然后双击 14-看盘页面 就能看；想继续抓数据就双击 3-每日任务。\n"
-        "注意：换到另一台电脑后，先双击 5-安装真实数据源 确认那边的网络能连上数据源。\n"
+        "        然后跑 windows\\14-看盘页面.bat 就能看（macos/14-看盘页面.command）；\n"
+        "        想继续抓数据就再跑一次每日任务。\n"
+        "注意：换到另一台电脑后，先跑一次 python run.py sources 确认那边的网络能连上数据源。\n"
     )
 
     if compress:

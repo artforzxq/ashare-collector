@@ -41,6 +41,15 @@ class _Rng:
         return low + (high - low) * self.next()
 
 
+def _session_minutes() -> list[str]:
+    """A 股交易时段：09:30–11:30、13:00–15:00（含两端）。"""
+    out: list[str] = []
+    for start, end in ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60)):
+        for minute in range(start, end + 1):
+            out.append(f"{minute // 60:02d}:{minute % 60:02d}")
+    return out
+
+
 def trading_days(end: str | date, count: int) -> list[str]:
     """从 end 往前取 count 个交易日（工作日，排除占位休市日）。"""
     end_date = datetime.strptime(str(end)[:10], "%Y-%m-%d").date() if not isinstance(end, date) else end
@@ -56,7 +65,8 @@ def trading_days(end: str | date, count: int) -> list[str]:
 
 class FixtureSource(BaseSource):
     name = "fixture"
-    capabilities = {"daily_bars", "market_snapshot", "intraday_snapshot", "etf_shares", "margin", "trade_calendar"}
+    capabilities = {"daily_bars", "market_snapshot", "intraday_snapshot", "intraday_bars",
+                    "etf_shares", "margin", "trade_calendar"}
 
     def __init__(self, cfg: dict | None = None, perturb: bool = False, days: int = 260):
         super().__init__(cfg)
@@ -201,6 +211,29 @@ class FixtureSource(BaseSource):
                     "close": round(base * (1 + rng.uniform(-0.006, 0.006)), 4),
                 }
             )
+        return rows
+
+    def intraday_bars(self, code: str, period: int = 1) -> list[dict]:
+        """离线夹具：造一条当日分时，价格从最后一根日线收盘价开始随机游走。"""
+        if period != 1:
+            raise DataSourceError(f"夹具只提供 1 分钟分时，不支持 period={period}")
+        last = self._dates[-1]
+        bars = self.daily_bars(code, self._dates[0], last)
+        if not bars:
+            return []
+        day = bars[-1]["trade_date"]
+        rng = _Rng(_seed("minute" + code + day))
+        price = float(bars[-1]["close"])
+        rows: list[dict] = []
+        for clock in _session_minutes():
+            price = round(price * (1 + rng.uniform(-0.0015, 0.0015)), 4)
+            volume = round(rng.uniform(2000, 40000))
+            rows.append({
+                "code": code, "dt": f"{day} {clock}", "period": 1,
+                "open": price, "high": price, "low": price, "close": price,
+                "volume": volume, "amount": round(price * volume, 2),
+                "source": self.name,
+            })
         return rows
 
     def etf_shares(self, codes, trade_date: str) -> list[dict]:

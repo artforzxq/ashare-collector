@@ -88,6 +88,36 @@ def _rewrite_watchlist(cfg_path: Path, cfg: dict) -> None:
 
 # ---------- 应用层 ----------
 
+def _latest_intraday_day(conn, code: str) -> str | None:
+    row = db.query_one(
+        conn,
+        "SELECT MAX(substr(dt, 1, 10)) AS day FROM bars_intraday WHERE code=?",
+        (code,),
+    )
+    return row["day"] if row and row["day"] else None
+
+
+def _intraday_rows(conn, code: str, day: str) -> list[dict]:
+    return [
+        dict(row)
+        for row in db.query(
+            conn,
+            """SELECT dt, close, volume, amount, source FROM bars_intraday
+               WHERE code=? AND dt LIKE ? ORDER BY dt""",
+            (code, f"{day}%"),
+        )
+    ]
+
+
+def _prev_close(conn, code: str, day: str) -> float | None:
+    row = db.query_one(
+        conn,
+        "SELECT close FROM bars_daily WHERE code=? AND trade_date < ? ORDER BY trade_date DESC LIMIT 1",
+        (code, day),
+    )
+    return float(row["close"]) if row and row["close"] else None
+
+
 class App:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -148,11 +178,22 @@ class App:
             finally:
                 conn.close()
 
+        def intraday():
+            conn = db.connect(cfg["_db_path"])
+            try:
+                info = tasks.collect_intraday_bars(conn, cfg, verbose=True)
+                if not info.get("ok"):
+                    raise RuntimeError(info.get("message", "分时采集失败"))
+                return f"当日分时：{info['codes']} 只、{info['bars']} 个点"
+            finally:
+                conn.close()
+
         table = {
             "daily": ("更新自选数据", daily),
             "sync": ("同步全市场", sync),
             "screen": ("跑全市场筛选", screen),
             "snapshot": ("补当日快照", snapshot),
+            "intraday": ("抓当日分时", intraday),
         }
         entry = table.get(key)
         if entry is None:
@@ -198,6 +239,43 @@ class App:
             conn.close()
 
     # ---- 单只标的的图与指标 ----
+
+    def intraday(self, code: str) -> dict:
+        """当日分时线。本地没有就现抓一次——分时接口只给当天，按需抓最省事。
+
+        返回的点里带累计均价（成交额 ÷ 成交量），页面画的就是"价格线 + 均价线"。
+        """
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            day = _latest_intraday_day(conn, code)
+            if not day:
+                tasks.collect_intraday_bars(conn, self.cfg, [code], verbose=False)
+                day = _latest_intraday_day(conn, code)
+            if not day:
+                return {"code": code, "date": None, "points": [], "prev_close": None,
+                        "message": "还没有分时数据：盘中跑一次盘中任务，或双击 0-安装环境 补齐数据源"}
+
+            points: list[dict] = []
+            cum_volume = cum_amount = 0.0
+            for row in _intraday_rows(conn, code, day):
+                volume = float(row["volume"] or 0)
+                cum_volume += volume
+                cum_amount += float(row["amount"] or 0)
+                points.append({
+                    "t": str(row["dt"])[11:16],
+                    "p": row["close"],
+                    "v": volume,
+                    "avg": round(cum_amount / cum_volume, 4) if cum_volume else row["close"],
+                })
+            return {
+                "code": code,
+                "date": day,
+                "points": points,
+                "prev_close": _prev_close(conn, code, day),
+                "source": points and "bars_intraday" or None,
+            }
+        finally:
+            conn.close()
 
     def kline(self, code: str, days: int = 250) -> dict:
         days = max(30, min(int(days or 250), 2000))
@@ -492,7 +570,7 @@ def _health_payload(cfg: dict) -> dict:
         "process_started_at": PROCESS_STARTED_AT,
         "code_mtime": datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S"),
         "stale": newest > PROCESS_STARTED_TS,
-        "routes": ["/api/watchlist", "/api/kline", "/api/meta", "/api/market",
+        "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/meta", "/api/market",
                    "/api/screen", "/api/alerts", "/api/search", "/api/jobs"],
     }
 
@@ -573,6 +651,8 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes({"items": app.watchlist(), "coverage": _coverage(app.cfg)})
             if path == "/api/kline":
                 return _payload_bytes(app.kline(query.get("code", ""), query.get("days", 250)))
+            if path == "/api/intraday":
+                return _payload_bytes(app.intraday(query.get("code", "")))
             if path == "/api/alerts":
                 return _payload_bytes({"items": app.recent_alerts()})
             if path == "/api/screen":

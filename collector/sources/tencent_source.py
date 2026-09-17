@@ -4,10 +4,12 @@
 且对匿名登录做 IP 限流（登录频繁会被拉黑）。腾讯这两个接口都走 443、支持前复权、
 实时报价还能一次问多只，是目前最稳的免费日线来源。
 
-两个必须知道的口径差异：
+三个必须知道的口径差异：
   1. 日线返回顺序是 (日期, 开盘, 收盘, 最高, 最低, 成交量)，**不是常见的 OHLC**；
-  2. 成交量单位是"手"，这里乘 100 换成股；接口不给成交额，用 成交量 × 均价 估算，
-     所以 amount 是估算值（做相对比较够用，当绝对金额看会失真）。
+  2. 成交量单位是"手"，这里乘 100 换成股；
+  3. **日线接口不返回成交额**（实测三种端点都只有 6 个字段），所以日线的 amount
+     是"成交量 × 均价"的估算值——做相对比较够用，当绝对金额看会失真。
+     （分时和实时报价接口是给真成交额的，见 intraday_bars / intraday_snapshot。）
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from .base import BaseSource, DataSourceError
 from . import split_code
 
 DAILY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+INTRADAY_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
 QUOTE_URL = "https://qt.gtimg.cn/q="
 HEADERS = {
     "User-Agent": (
@@ -41,9 +44,62 @@ def _to_float(value):
         return None
 
 
+def _parse_intraday(payload: dict, symbol: str, code: str) -> list[dict]:
+    """把 minute/query 的返回解析成分钟线。
+
+    每行形如 "0930 1257.98 140 17611720.00"，四个字段分别是
+    **时间、价格、累计成交量（手）、累计成交额（元）**——注意后两个是**当天累计**，
+    不是这一分钟的量（实测：最后一行累计成交额 12.39 亿，正好等于当天成交额）。
+    所以这里要逐行做差，还原出每分钟的成交量和成交额。
+
+    成交额是接口给的真值，不用估算；只有接口没给成交额时才退回 价 × 量。
+    """
+    node = (payload.get("data") or {}).get(symbol) or {}
+    block = node.get("data") if isinstance(node.get("data"), dict) else node
+    block = block or {}
+    lines = block.get("data") or []
+    stamp_date = str(block.get("date") or "")
+    if len(stamp_date) == 8 and stamp_date.isdigit():
+        day = f"{stamp_date[:4]}-{stamp_date[4:6]}-{stamp_date[6:]}"
+    else:
+        day = datetime.now().strftime("%Y-%m-%d")
+
+    rows: list[dict] = []
+    prev_volume = prev_amount = 0.0
+    for line in lines:
+        parts = str(line).split()
+        if len(parts) < 2:
+            continue
+        clock, price = parts[0], _to_float(parts[1])
+        if not price or len(clock) < 4:
+            continue
+        cum_volume = _to_float(parts[2]) or 0.0              # 累计成交量（手）
+        cum_amount = _to_float(parts[3]) if len(parts) > 3 else None
+        volume = max(0.0, cum_volume - prev_volume) * 100    # 手 → 股，差分出这一分钟
+        if cum_amount is None:
+            amount = round(price * volume, 2)                # 接口没给才估算
+        else:
+            amount = round(max(0.0, cum_amount - prev_amount), 2)
+            prev_amount = cum_amount
+        prev_volume = cum_volume
+        rows.append({
+            "code": code,
+            "dt": f"{day} {clock[:2]}:{clock[2:4]}",
+            "period": 1,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price,
+            "volume": volume,
+            "amount": amount,
+            "source": "tencent",
+        })
+    return rows
+
+
 class TencentSource(BaseSource):
     name = "tencent"
-    capabilities = {"daily_bars", "intraday_snapshot", "trade_calendar"}
+    capabilities = {"daily_bars", "intraday_snapshot", "intraday_bars", "trade_calendar"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -168,6 +224,28 @@ class TencentSource(BaseSource):
             if price:
                 rows.append({"code": code, "close": price, "dt": stamp})
         return rows
+
+    def intraday_bars(self, code: str, period: int = 1) -> list[dict]:
+        """当日分时线：一分钟一个点（09:30 起，含成交量和均价）。
+
+        这个接口只给**当天**，历史分钟线要另外付费/另找源，所以盘中多跑几次就多攒几天。
+        价格是未复权的成交价——同一天之内不涉及复权，和日线的前复权口径不冲突。
+        成交量单位是"手"，这里乘 100 换成股；接口不给成交额，按 价 × 量 估算，
+        和日线那条"腾讯不返回成交额"的处理保持一致。
+        """
+        if period != 1:
+            raise DataSourceError(f"腾讯分时只有 1 分钟粒度，不支持 period={period}")
+        symbol = _symbol(code)
+        requests = self._requests()
+        try:
+            self._throttle()
+            response = requests.get(INTRADAY_URL, params={"code": symbol},
+                                    headers=HEADERS, timeout=15)
+            payload = response.json()
+        except Exception as exc:
+            raise DataSourceError(f"腾讯分时请求失败：{exc}") from exc
+
+        return _parse_intraday(payload, symbol, code)
 
     def trade_calendar(self, start: str, end: str) -> list[dict]:
         """交易日历：指数有行情的日子就是交易日。

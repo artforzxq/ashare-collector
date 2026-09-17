@@ -18,7 +18,8 @@ from . import db
 HORIZONS = (5, 20)
 
 
-def _series(conn, code: str, cache: dict) -> tuple[list[str], list[dict]]:
+def load_series(conn, code: str, cache: dict) -> tuple[list[str], list[dict]]:
+    """某只标的的日期序列和日线（带缓存）。筛选回填也用它，口径必须一致。"""
     if code not in cache:
         rows = db.query(conn, "SELECT trade_date, close FROM bars_daily WHERE code=? ORDER BY trade_date", (code,))
         cache[code] = ([row["trade_date"] for row in rows], [dict(row) for row in rows])
@@ -45,7 +46,7 @@ def backfill_outcomes(conn, verbose: bool = False) -> dict:
     updated_conflicts = 0
 
     for row in db.query(conn, "SELECT id, code, trade_date, outcome_5d, outcome_20d FROM alerts"):
-        dates, bars = _series(conn, row["code"], cache)
+        dates, bars = load_series(conn, row["code"], cache)
         sets: list[str] = []
         params: list = []
         for horizon, column in zip(HORIZONS, ("outcome_5d", "outcome_20d")):
@@ -61,7 +62,7 @@ def backfill_outcomes(conn, verbose: bool = False) -> dict:
     for row in db.query(
         conn, "SELECT id, code, trade_date, outcome_20d FROM arbitration_log WHERE outcome_20d IS NULL"
     ):
-        dates, bars = _series(conn, row["code"], cache)
+        dates, bars = load_series(conn, row["code"], cache)
         value = forward_return(bars, dates, row["trade_date"], 20)
         if value is not None:
             conn.execute("UPDATE arbitration_log SET outcome_20d=? WHERE id=?", (value, row["id"]))
