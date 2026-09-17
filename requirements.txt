@@ -1,0 +1,8 @@
+# 核心链路只依赖 PyYAML，其余为数据源适配器所需，按需安装。
+PyYAML>=6.0
+
+# 数据源（至少装一个；免费源建议 adata + akshare 双活）
+# adata>=2.0
+# akshare>=1.12
+# baostock>=0.8.8
+# requests>=2.31

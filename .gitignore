@@ -1,0 +1,28 @@
+# ---- 数据与产物：体积大、可再生产，不进版本库 ----
+# 数据库（几百 MB，且每台电脑各跑各的；用 21-打包数据库 在两台机器之间搬）
+data/*.db
+data/*.db.bak-*
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# 打包出来的数据库压缩包
+备份/*.zip
+
+# 运行日志
+logs/
+*.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 编辑器与系统 ----
+.vscode/*.local.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

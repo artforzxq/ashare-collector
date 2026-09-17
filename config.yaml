@@ -1,0 +1,252 @@
+# A 股个人交易提醒系统 · 采集与决策配置
+# 免费源离线自检用 fixture / fixture_alt；联网后把 primary 改成 adata，backup 改成 akshare。
+
+project:
+  name: ashare-collector
+  spec_version: "1.1"
+  feature_version: "v1.1"   # 改权重或规则时必须改这里，审计表靠它追溯
+  db_path: data/market.db
+  timezone: Asia/Shanghai
+
+watchlist:
+  indices: [SZ399006]
+  etfs: [SH510300, SH510050, SZ159919, SH510500, SH588000]
+  stocks: [SZ000333]
+
+sources:
+  # 实测（2026-09-16，本机网络）：
+  #   tencent  ✅ 沪深京都能取、支持前复权、一次请求可批量问实时价
+  #   baostock ❌ 走非标准端口 10030，且匿名登录有 IP 限流（登录太频繁被拉黑）
+  #   akshare  ❌ 日线接口走东财 push2his，本网络连接直接被断（换 UA 也无效）
+  primary: tencent
+  backup: baostock
+  fallback: akshare
+  # 只给全市场同步用的补充源（不参与主备交叉校验，避免复权口径不一致造成误报）：
+  # 新浪能拿到北交所的历史，代价是不复权。
+  extra: [sina]
+  min_interval_sec: 0.5   # 免费源请求间隔下限
+
+collection:
+  daily_after: "15:30"
+  intraday_interval_min: 5
+  tail_boost_after: "14:30"   # 尾盘提升到 1 分钟
+  intraday_period: 30
+  keep_intraday_days: 250
+  factor_keep_days: 500       # 因子贡献保留多少个交易日（审计与影子因子准入都要用）
+
+validation:
+  price_tol: 0.003            # 双源收盘价差异上限 0.3%
+  amount_tol: 0.03            # 双源成交额差异上限 3%
+  jump_pct_limit: 11.0        # 非新股非 ST 的涨跌幅跳变上限
+  volume_anomaly_ratio: 10.0  # 成交额超过 20 日均值倍数只标记不阻断
+  critical_codes: [SH000300]  # 缺失即冻结当日自动提醒
+
+state:
+  enter_up: 70
+  exit_up: 55
+  enter_down: 30
+  exit_down: 45
+  confirm_days: 2             # 连续确认天数
+  min_state_days: 3           # 最短持续期
+  neutral_band: 0.10          # 默认沉默带：分数落在 0.5±0.10 判为不确定
+
+levels:
+  bins: 30
+  top_bins: 6
+  merge_gap_pct: 0.5
+  max_levels: 4
+
+alerts:
+  budget_p1: 3                # 每天 P1 提醒上限
+  cooldown_minutes_p0: 15
+  cooldown_days_p1: 1
+  cooldown_days_p2: 5
+
+# 全市场本地化：有空时把全市场的票拉到本地，之后每天只补最新一根。
+# 历史回补逐只抓（可中断续跑）；每日增量用一次全市场快照搞定，不逐只请求。
+warehouse:
+  snapshot_daily: true        # 日终时用快照给观察池以外的股票补当日 K 线
+  history_days: 750           # 首次回补拉多少天的历史
+  batch_size: 800             # 单次最多补多少只（反复跑即可填满）
+
+# 风险层：仓位上限与止损位怎么算（规格里风险层的出口就是这两个数）
+risk:
+  base_cap: {up: 0.8, range: 0.4, down: 0.0}   # 各状态下的基准仓位
+  target_atr_pct: 2.0        # 目标波动率，实际波动比它大就等比减仓
+  stop_buffer_pct: 0.5       # 止损放在支撑带下沿再往下留 0.5%
+  atr_stop_multiple: 2.0     # 没有支撑带时，用 2 倍 ATR 当止损
+  min_reward_risk: 2.0       # 期望盈亏比，达不到就减仓
+  cap_floor: 0.3             # 缩放系数的下限，避免直接归零
+
+# 值得盯的形态：筛选条件全部写成数据，加一条就是加一段配置，不用改代码。
+# 支持的运算：== != > >= < <= between in not_in contains startswith exists
+#   - value: 固定值         - compare: 与另一字段比（可带 factor 系数）
+#   - value: [a, b] 配 between 表示区间
+# sort 是排序字段（默认降序）；why 是给人看的说明，会显示在页面和报告里。
+screen:
+  min_bars: 80               # 至少多少根日线才参与筛选
+  top: 30                    # 每个条件保留多少条
+  criteria:
+    - key: 反转
+      title: 下跌/震荡里出现放量长阳等反转确认
+      why: 均线和 ATR 天生滞后，转折点上先动的是 K 线形态
+      sort: body_pct
+      when:
+        - {field: state, op: "!=", value: up}
+        - {field: candle.reversal_up, op: "==", value: true}
+        - {field: close, op: "<=", compare: ma20, factor: 1.12}
+
+    - key: 低位横盘
+      title: 跌下来之后横着缩量，等打底
+      why: 和高位蓄势形态一样，但含义不同——它在均线下方，是打底不是蓄势突破
+      sort: vol_shrink_ratio
+      desc: false            # 缩量越狠越靠前
+      when:
+        - {field: consolidation_days, op: ">=", value: 20}
+        - {field: vol_shrink_ratio, op: "<=", value: 0.7}
+        - {field: close, op: "<=", compare: ma60, factor: 1.0}
+        - {field: state, op: "!=", value: up}
+
+    - key: 蓄势
+      title: 缩量横盘且贴着高位，等方向
+      why: 高位缩量横盘之后往往跟着方向选择，向上突破的概率取决于量能是否恢复
+      sort: vol_shrink_ratio
+      desc: false            # 缩量越狠越靠前
+      when:
+        - {field: consolidation_days, op: ">=", value: 20}
+        - {field: vol_shrink_ratio, op: "<=", value: 0.6}
+        - {field: close, op: ">", compare: ma60, factor: 1.02}
+        - {field: state, op: "!=", value: down}
+
+    - key: 突破
+      title: 放量突破区间上沿
+      why: 突破要放量才算数，缩量突破多半是假突破
+      sort: vol_ratio_20
+      when:
+        - {field: breakout_confirmed, op: "==", value: 1}
+
+    - key: 异动
+      title: 成交额异常放大
+      why: 量能突然放大通常意味着有事情发生，值得看一眼
+      sort: vol_ratio_20
+      when:
+        - {field: vol_ratio_20, op: ">=", value: 3}
+
+    - key: 趋势
+      title: 上升趋势里趋势分最高
+      why: 顺势标的的容错率更高
+      sort: trend_score
+      when:
+        - {field: state, op: "==", value: up}
+        - {field: trend_score, op: "exists", value: true}
+
+    - key: 回踩
+      title: 上升趋势里回踩到关键带附近
+      why: 上升趋势中的回踩是低吸位置，但前提是支撑有效
+      sort: trend_score
+      when:
+        - {field: state, op: "==", value: up}
+        - {field: raw_values.dist_to_level, op: "between", value: [-1.5, 1.5]}
+
+# 指标台账：role = primary / modifier / veto；status = candidate / shadow / active / retired
+# 类别权重预算：trend ≤ 0.40，structure ≤ 0.20，volume ≤ 0.25，volatility ≤ 0.15，fund+sentiment ≤ 0.10
+factors:
+  - factor_id: ma_slope
+    name: 均线斜率
+    layer: state
+    role: primary
+    category: trend
+    weight: 0.25
+    min_samples: 120
+    status: active
+    source_field: ma_slope_20
+    normalize: {type: linear, x0: -3.0, x1: 3.0}
+
+  - factor_id: ma_align
+    name: 均线排列
+    layer: state
+    role: primary
+    category: trend
+    weight: 0.15
+    min_samples: 120
+    status: active
+    source_field: ma_align
+    normalize: {type: linear, x0: -1.0, x1: 1.0}
+
+  - factor_id: vol_confirm
+    name: 量能配合
+    layer: state
+    role: modifier
+    category: volume
+    weight: 0.20
+    min_samples: 60
+    status: active
+    source_field: vol_confirm
+    normalize: {type: linear, x0: -1.5, x1: 1.5}
+
+  - factor_id: atr_pct
+    name: 波动率
+    layer: state
+    role: modifier
+    category: volatility
+    weight: 0.15
+    min_samples: 60
+    status: active
+    source_field: atr_pct
+    normalize: {type: linear, x0: 5.0, x1: 1.0}   # 反向：波动越小得分越高
+
+  - factor_id: donchian
+    name: 通道突破
+    layer: state
+    role: modifier
+    category: structure
+    weight: 0.15
+    min_samples: 60
+    status: active
+    source_field: donchian_break
+    normalize: {type: linear, x0: -1.0, x1: 1.0}
+
+  - factor_id: dist_to_level
+    name: 距关键带距离
+    layer: state
+    role: modifier
+    category: structure
+    weight: 0.05
+    min_samples: 60
+    status: active
+    source_field: dist_to_level
+    normalize: {type: linear, x0: -2.0, x1: 2.0}
+
+  # 影子运行：只记录贡献分，不参与打分（准入流程第 4 步）
+  - factor_id: adx
+    name: ADX
+    layer: state
+    role: modifier
+    category: trend
+    weight: 0.0
+    min_samples: 60
+    status: shadow
+    source_field: adx14
+    normalize: {type: linear, x0: 15.0, x1: 40.0}
+
+  - factor_id: breadth
+    name: 市场广度
+    layer: state
+    role: modifier
+    category: sentiment
+    weight: 0.0
+    min_samples: 120
+    status: shadow
+    source_field: breadth_score
+    normalize: {type: linear, x0: -1.0, x1: 1.0}
+
+  - factor_id: etf_share
+    name: ETF 份额变化
+    layer: state
+    role: modifier
+    category: fund
+    weight: 0.0
+    min_samples: 60
+    status: shadow
+    source_field: etf_share_chg
+    normalize: {type: linear, x0: -0.03, x1: 0.03}

@@ -1,0 +1,61 @@
+{
+  // 用法：菜单栏「终端 → 运行任务」，或按 Cmd+Shift+B 直接跑「自检」
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "自检（离线跑通全链路）",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["run.py", "selftest"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "跑单元测试",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["run_tests.py"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "每日任务（抓数据 → 算状态 → 出提醒）",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["run.py", "daily"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "查看简报（终端）",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["run.py", "report"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "生成简报页面",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["run.py", "dashboard"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "列出数据库所有表",
+      "type": "shell",
+      "command": "${command:python.interpreterPath}",
+      "args": ["sql.py", "tables"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "options": { "cwd": "${workspaceFolder}" }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  // 运行环境装在用户目录，不在项目里。Mac 用这一行：
+  "python.defaultInterpreterPath": "/Users/z.chi/ashare-env/bin/python",
+  // Windows 上把上面一行换成（路径记得用双反斜杠）：
+  // "python.defaultInterpreterPath": "C:\\Users\\你的用户名\\ashare-env\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+
+  // 文件里有中文，统一按 UTF-8 读，个别乱码时再自动猜一次
+  "files.encoding": "utf8",
+  "files.autoGuessEncoding": true,
+
+  // 少一点视觉噪音，看着清爽些
+  "explorer.compactFolders": false,
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "**/.DS_Store": true
+  },
+
+  "[markdown]": {
+    "editor.wordWrap": "on"
+  }
+}

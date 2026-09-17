@@ -1,0 +1,27 @@
+# 换行符按文件类型固定，避免 Windows / macOS 之间同步时被自动改写。
+# .bat 需要 CRLF；.command / .sh 必须是 LF，否则 macOS 上双击会报错。
+* text=auto
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.command text eol=lf
+*.sh text eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+
+*.db binary
+*.zip binary
+*.pdf binary
+*.exe binary
+*.dll binary
+*.lnk binary
