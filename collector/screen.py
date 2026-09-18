@@ -14,6 +14,7 @@ screen_criteria 表，方便查询和复盘"当时用的是哪些条件"。
 
 from __future__ import annotations
 
+import statistics
 import time
 
 from . import candles as candles_mod, db, features as features_mod, review, rules, universe
@@ -28,43 +29,57 @@ BENCHMARK_CODE = "SH000300"
 
 # config 里没配 criteria 时的兜底（与仓库里的 config.yaml 保持一致）
 DEFAULT_CRITERIA = (
-    {"key": "反转", "title": "下跌/震荡里出现放量长阳等反转确认", "sort": "body_pct",
+    {"key": "反转", "priority": 20, "title": "下跌/震荡里出现放量长阳等反转确认", "sort": "body_pct",
      "when": [{"field": "state", "op": "!=", "value": "up"},
               {"field": "candle.reversal_up", "op": "==", "value": True},
               {"field": "close", "op": "<=", "compare": "ma20", "factor": 1.12}]},
-    {"key": "低位横盘", "title": "跌下来之后横着缩量，等打底", "sort": "vol_shrink_ratio", "desc": False,
+    {"key": "低位横盘", "priority": 60, "title": "跌下来之后横着缩量，等打底",
+     "sort": "vol_shrink_ratio", "desc": False,
      "when": [{"field": "consolidation_days", "op": ">=", "value": 20},
               {"field": "vol_shrink_ratio", "op": "<=", "value": 0.7},
               {"field": "close", "op": "<=", "compare": "ma60", "factor": 1.0},
               {"field": "state", "op": "!=", "value": "up"}]},
-    {"key": "蓄势", "title": "缩量横盘且贴着高位，等方向", "sort": "vol_shrink_ratio", "desc": False,
+    {"key": "蓄势", "priority": 40, "title": "缩量横盘且贴着高位，等方向",
+     "sort": "vol_shrink_ratio", "desc": False,
      "when": [{"field": "consolidation_days", "op": ">=", "value": 20},
               {"field": "vol_shrink_ratio", "op": "<=", "value": 0.6},
               {"field": "close", "op": ">", "compare": "ma60", "factor": 1.02},
               {"field": "state", "op": "!=", "value": "down"}]},
-    {"key": "突破", "title": "放量突破区间上沿", "sort": "vol_ratio_20",
+    {"key": "突破", "priority": 10, "title": "放量突破区间上沿", "sort": "vol_ratio_20",
      "when": [{"field": "breakout_confirmed", "op": "==", "value": 1}]},
-    {"key": "异动", "title": "成交额异常放大", "sort": "vol_ratio_20",
-     "when": [{"field": "vol_ratio_20", "op": ">=", "value": 3}]},
-    {"key": "趋势", "title": "上升趋势里趋势分最高", "sort": "trend_score",
+    {"key": "放量阳线异动", "priority": 50, "title": "成交额放大到 3 倍以上，且收阳",
+     "sort": "vol_ratio_20",
+     "when": [{"field": "vol_ratio_20", "op": ">=", "value": 3},
+              {"field": "candle.body_pct", "op": ">=", "value": 0}]},
+    {"key": "放量阴线异动", "priority": 55, "title": "成交额放大到 3 倍以上，且收阴",
+     "sort": "vol_ratio_20",
+     "when": [{"field": "vol_ratio_20", "op": ">=", "value": 3},
+              {"field": "candle.body_pct", "op": "<", "value": 0}]},
+    {"key": "趋势", "priority": 90, "title": "上升趋势里趋势分最高", "sort": "trend_score",
      "when": [{"field": "state", "op": "==", "value": "up"},
               {"field": "trend_score", "op": "exists", "value": True}]},
-    {"key": "回踩", "title": "上升趋势里回踩到关键带附近", "sort": "trend_score",
+    {"key": "回踩", "priority": 30, "title": "上升趋势里回踩到关键带附近", "sort": "trend_score",
      "when": [{"field": "state", "op": "==", "value": "up"},
               {"field": "raw_values.dist_to_level", "op": "between", "value": [-1.5, 1.5]}]},
 )
 
 
 def criteria(cfg: dict) -> list[dict]:
-    """从配置读出筛选条件（没配就用兜底），并补上默认值。"""
+    """从配置读出筛选条件（没配就用兜底），并补上默认值。
+
+    priority 只决定"一只票同时命中多个条件时，拿哪个当主标签"，数字越小越具体。
+    没写就按配置里的出现顺序排（越靠前越优先）——这样老的 config 不改也能用。
+    它不改变任何一条记录：一只票同时命中几个条件，几条记录就都在。
+    """
     raw = ((cfg or {}).get("screen") or {}).get("criteria") or DEFAULT_CRITERIA
     out: list[dict] = []
-    for item in raw:
+    for index, item in enumerate(raw):
         key = (item.get("key") or "").strip()
         if not key:
             continue
         entry = {
             "key": key,
+            "priority": _number_or(item.get("priority"), float(index + 1)),
             "title": item.get("title") or "",
             "why": item.get("why") or "",
             "sort": item.get("sort") or "trend_score",
@@ -75,6 +90,32 @@ def criteria(cfg: dict) -> list[dict]:
         if entry["enabled"]:
             out.append(entry)
     return out
+
+
+def _number_or(value, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def primary_labels(criteria_items: list[dict], groups: dict) -> dict:
+    """每只票的"主标签"：命中多个条件时取 priority 最小的那个。
+
+    分组还在，一条记录都不删——多标签是证据（一只票既突破又放量，比只突破信息更多）。
+    这里解决的只是"同一只票在五个分组里各刷一遍"的观感问题。
+    """
+    priority = {item["key"]: item["priority"] for item in criteria_items}
+    best: dict[str, tuple] = {}
+    for key, rows in groups.items():
+        for rank, row in enumerate(rows):
+            code = row.get("code")
+            if not code:
+                continue
+            seat = (priority.get(key, 999.0), rank)
+            if code not in best or seat < best[code][0]:
+                best[code] = (seat, key)
+    return {code: value[1] for code, value in best.items()}
 
 
 def sync_criteria(conn, cfg: dict, effective_from: str) -> int:
@@ -95,6 +136,12 @@ def sync_criteria(conn, cfg: dict, effective_from: str) -> int:
             "updated_at": db.now_iso(),
         })
     db.upsert_rows(conn, "screen_criteria", rows, ["key"])
+    # 配置里已经删掉的条件标成停用，而不是留着 enabled=1——这张表是审计用的，
+    # "当时用的规则"和"现在还在用的规则"必须分得清（异动拆成阴阳两条就是这种情况）。
+    keys = [row["key"] for row in rows]
+    placeholders = ",".join("?" for _ in keys)
+    conn.execute(f"UPDATE screen_criteria SET enabled=0 WHERE key NOT IN ({placeholders})", tuple(keys))
+    conn.commit()
     return len(rows)
 
 
@@ -106,6 +153,49 @@ def _thresholds(cfg: dict) -> tuple[int, int]:
 def _db_name(conn, code: str) -> str:
     row = db.query_one(conn, "SELECT name FROM instruments WHERE code=?", (code,))
     return (row["name"] if row else "") or ""
+
+
+def build_row(code: str, name: str, feature: dict, bar: dict, candle: dict) -> dict:
+    """把"某一天的特征 + 那天的 K 线 + 那天的行情"拼成规则引擎要的行。
+
+    扫描（只看最新一天）和历史重放（看每一天）共用这一个函数——两边拼出来的行
+    必须是同一个形状，否则"重放出来的筛选"和"每天真跑一遍的筛选"会对不上。
+    """
+    return {
+        "code": code,
+        "name": name,
+        "trade_date": feature["trade_date"],
+        "close": feature.get("close"),
+        "pct_chg": bar.get("pct_chg"),
+        "state": feature.get("state"),
+        "trend_score": feature.get("trend_score"),
+        "opportunity_score": feature.get("opportunity_score"),
+        "vol_ratio_20": feature.get("vol_ratio_20"),
+        "consolidation_days": feature.get("consolidation_days"),
+        "vol_shrink_ratio": feature.get("vol_shrink_ratio"),
+        "breakout_confirmed": feature.get("breakout_confirmed"),
+        "avg_amount_60d": feature.get("avg_amount_60d"),
+        "ma20": feature.get("ma20"),
+        "ma60": feature.get("ma60"),
+        "raw_values": feature.get("raw_values") or {},
+        "range_position": feature.get("range_position"),
+        "range_width_pct": feature.get("range_width_pct"),
+        "candle": candle,
+        "pattern": candles_mod.describe(candle),
+        "body_pct": candle.get("body_pct"),
+        "reversal_up": candle.get("reversal_up"),
+    }
+
+
+def group_rows(rows: list[dict], conditions: list[dict]) -> dict[str, list[dict]]:
+    """按条件分组，每组按它自己的 sort 字段排序。"""
+    grouped: dict[str, list[dict]] = {}
+    for item in conditions:
+        matched = [row for row in rows if rules.matches(row, item["when"])]
+        matched.sort(key=lambda row: row.get(item["sort"]) if row.get(item["sort"]) is not None else -1,
+                     reverse=item["desc"])
+        grouped[item["key"]] = matched
+    return grouped
 
 
 def scan(conn, cfg: dict, min_bars: int | None = None, limit: int | None = None,
@@ -145,43 +235,14 @@ def scan(conn, cfg: dict, min_bars: int | None = None, limit: int | None = None,
             series = features_mod.compute_feature_series(bars, cfg, registry, {})
         except Exception:
             continue
-        last = series[-1]
-        candle = candles_mod.analyze(bars, len(bars) - 1)
-        rows.append(
-            {
-                "code": code,
-                "name": display_name(code, _db_name(conn, code)) or code,
-                "trade_date": last["trade_date"],
-                "close": last.get("close"),
-                "pct_chg": bars[-1].get("pct_chg"),
-                "state": last.get("state"),
-                "trend_score": last.get("trend_score"),
-                "opportunity_score": last.get("opportunity_score"),
-                "vol_ratio_20": last.get("vol_ratio_20"),
-                "consolidation_days": last.get("consolidation_days"),
-                "vol_shrink_ratio": last.get("vol_shrink_ratio"),
-                "breakout_confirmed": last.get("breakout_confirmed"),
-                "avg_amount_60d": last.get("avg_amount_60d"),
-                "ma20": last.get("ma20"),
-                "ma60": last.get("ma60"),
-                "raw_values": last.get("raw_values") or {},
-                "candle": candle,
-                "pattern": candles_mod.describe(candle),
-                "body_pct": candle.get("body_pct"),
-                "reversal_up": candle.get("reversal_up"),
-            }
-        )
+        rows.append(build_row(code, display_name(code, _db_name(conn, code)) or code,
+                              series[-1], bars[-1], candles_mod.analyze(bars, len(bars) - 1)))
         if verbose and index % 500 == 0:
             speed = index / max(0.001, time.time() - started)
             left = (len(codes) - index) / max(0.001, speed)
             print(f"    已扫 {index}/{len(codes)}，预计还要 {left / 60:.1f} 分钟")
 
-    grouped: dict[str, list[dict]] = {}
-    for item in conditions:
-        matched = [row for row in rows if rules.matches(row, item["when"])]
-        matched.sort(key=lambda row: row.get(item["sort"]) if row.get(item["sort"]) is not None else -1,
-                     reverse=item["desc"])
-        grouped[item["key"]] = matched
+    grouped = group_rows(rows, conditions)
 
     result = {
         "ok": True,
@@ -199,6 +260,38 @@ def scan(conn, cfg: dict, min_bars: int | None = None, limit: int | None = None,
     return result
 
 
+def describe_detail(key: str, row: dict) -> str:
+    """一句话说明"为什么它在这一组里"。落库和报告共用，免得两处口径不一样。"""
+    if row.get("pattern"):
+        return row["pattern"]
+    if key == "蓄势":
+        return f"蓄势 {row.get('consolidation_days')} 日，缩量至 {(row.get('vol_shrink_ratio') or 0):.2f}"
+    if key == "回踩":
+        dist = (row.get("raw_values") or {}).get("dist_to_level")
+        return f"距关键带 {dist:+.2f}%" if dist is not None else "贴近关键带"
+    if key == "趋势":
+        return f"趋势分 {row.get('trend_score'):.1f}"
+    return f"量比 {(row.get('vol_ratio_20') or 0):.2f}"
+
+
+def payload_row(trade_date: str, criterion: str, rank: int, row: dict) -> dict:
+    """落库用的一行。日终扫描和历史重放都走这里，字段不会对不上。"""
+    return {
+        "trade_date": trade_date,
+        "criterion": criterion,
+        "rank_no": rank,
+        "code": row["code"],
+        "name": row.get("name"),
+        "close": row.get("close"),
+        "pct_chg": row.get("pct_chg"),
+        "state": row.get("state"),
+        "trend_score": row.get("trend_score"),
+        "vol_ratio": row.get("vol_ratio_20"),
+        "detail": describe_detail(criterion, row),
+        "created_at": db.now_iso(),
+    }
+
+
 def save(conn, result: dict, top: int | None = None) -> int:
     """把筛选结果落库（页面读它）。每次覆盖同一天的结果，避免重复累积。"""
     if not result.get("ok") or not result.get("trade_date"):
@@ -213,36 +306,123 @@ def save(conn, result: dict, top: int | None = None) -> int:
     payload: list[dict] = []
     for item in result["criteria"]:
         for rank, row in enumerate(result["groups"].get(item["key"], [])[:top], 1):
-            if row.get("pattern"):
-                detail = row["pattern"]
-            elif item["key"] == "蓄势":
-                detail = f"蓄势 {row.get('consolidation_days')} 日，缩量至 {(row.get('vol_shrink_ratio') or 0):.2f}"
-            elif item["key"] == "回踩":
-                dist = (row.get("raw_values") or {}).get("dist_to_level")
-                detail = f"距关键带 {dist:+.2f}%" if dist is not None else "贴近关键带"
-            elif item["key"] == "趋势":
-                detail = f"趋势分 {row.get('trend_score'):.1f}"
-            else:
-                detail = f"量比 {(row.get('vol_ratio_20') or 0):.2f}"
-            payload.append({
-                "trade_date": trade_date,
-                "criterion": item["key"],
-                "rank_no": rank,
-                "code": row["code"],
-                "name": row["name"],
-                "close": row.get("close"),
-                "pct_chg": row.get("pct_chg"),
-                "state": row.get("state"),
-                "trend_score": row.get("trend_score"),
-                "vol_ratio": row.get("vol_ratio_20"),
-                "detail": detail,
-                "created_at": db.now_iso(),
-            })
+            payload.append(payload_row(trade_date, item["key"], rank, row))
     if not payload:
         return 0
     conn.execute("DELETE FROM screen_results WHERE trade_date=?", (trade_date,))
     db.upsert_rows(conn, "screen_results", payload, ["trade_date", "criterion", "code"])
     return len(payload)
+
+
+def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: int | None = None,
+           verbose: bool = True) -> dict:
+    """把筛选条件放到历史上的每一天重放一遍——今天就能拿到 5 / 20 日的真实表现。
+
+    为什么需要它：筛选结果要等"筛出日之后 20 个交易日"才长得出 outcome，
+    今天筛出来的票得等到下个月才知道后来怎么样。但历史数据已经在本地了，
+    对过去每一天跑一遍同一套条件，等价于"那天真的跑了一次筛选"，
+    唯一的区别是我们已经知道后面发生了什么。
+
+    **没有未来函数**：每一天用的都是截至那一天收盘的数据（滚动窗口和状态机都是因果的），
+    K 线形态也只看到那一天；收益口径与 16-信号复盘 完全一致（信号日收盘 → 次日收盘建仓 →
+    持有 N 个交易日），所以两边算出来的数字可以直接比。
+
+    代价：全市场一次要重算特征链，几百秒。特征只算一遍，之后每一天是顺带评估的，
+    所以"重放 120 天"和"重放 20 天"的耗时差不多。
+    """
+    default_min, default_top = _thresholds(cfg)
+    min_bars = min_bars or default_min
+    top = top or default_top
+    conditions = criteria(cfg)
+    if not conditions:
+        return {"ok": False, "message": "config.yaml 的 screen.criteria 是空的，没有可用的筛选条件"}
+    if days < 21:
+        return {"ok": False, "message": "至少要有 20 个交易日才回填得出 20 日表现，把 days 调到 21 以上"}
+
+    registry = FactorRegistry(cfg.get("factors", []), "screen")
+    picked = universe.select_codes(conn, cfg, min_bars=min_bars, verbose=verbose)
+    codes = picked["codes"]
+    if not codes:
+        return {"ok": False, "message": f"本地没有够 {min_bars} 根日线、且成交额过门槛的标的，先跑 18-全市场同步"}
+
+    started = time.time()
+    # 命中先按 (日期, 条件) 攒着，每格只留排序需要的那几个字段——全市场几百天的命中量
+    # 不值得把整行都留在内存里。
+    buckets: dict[tuple, list] = {}
+    scanned = 0
+    for index, code in enumerate(codes, 1):
+        bars = [
+            dict(row)
+            for row in db.query(
+                conn,
+                """SELECT * FROM bars_daily WHERE code=? AND COALESCE(quality_flag,'ok')!='blocked'
+                   ORDER BY trade_date""",
+                (code,),
+            )
+        ]
+        if len(bars) < min_bars:
+            continue
+        try:
+            series = features_mod.compute_feature_series(bars, cfg, registry, {})
+        except Exception:
+            continue
+        scanned += 1
+        name = display_name(code, _db_name(conn, code)) or code
+        for position in range(max(0, len(bars) - days), len(bars)):
+            candle = candles_mod.analyze(bars, position)
+            row = build_row(code, name, series[position], bars[position], candle)
+            trade_date = row.get("trade_date")
+            if not trade_date:
+                continue
+            for item in conditions:
+                if not rules.matches(row, item["when"]):
+                    continue
+                buckets.setdefault((trade_date, item["key"]), []).append(
+                    (row.get(item["sort"]), row["code"], row.get("name"), row.get("close"),
+                     row.get("pct_chg"), row.get("state"), row.get("trend_score"),
+                     row.get("vol_ratio_20"), describe_detail(item["key"], row)))
+        if verbose and index % 500 == 0:
+            speed = index / max(0.001, time.time() - started)
+            left = (len(codes) - index) / max(0.001, speed)
+            print(f"    已重放 {index}/{len(codes)}，预计还要 {left / 60:.1f} 分钟")
+
+    by_date: dict[str, list[dict]] = {}
+    for (trade_date, key), hits in buckets.items():
+        item = next(entry for entry in conditions if entry["key"] == key)
+        # 排序口径与 group_rows 完全一致：取不到排序字段的当 -1，按方向排
+        hits.sort(key=lambda hit: hit[0] if hit[0] is not None else -1, reverse=item["desc"])
+        for rank, hit in enumerate(hits[:top], 1):
+            by_date.setdefault(trade_date, []).append({
+                "trade_date": trade_date, "criterion": key, "rank_no": rank,
+                "code": hit[1], "name": hit[2], "close": hit[3], "pct_chg": hit[4],
+                "state": hit[5], "trend_score": hit[6], "vol_ratio": hit[7],
+                "detail": hit[8], "created_at": db.now_iso(),
+            })
+
+    written = 0
+    for trade_date in sorted(by_date):
+        payload = by_date[trade_date]
+        conn.execute("DELETE FROM screen_results WHERE trade_date=?", (trade_date,))
+        db.upsert_rows(conn, "screen_results", payload, ["trade_date", "criterion", "code"])
+        written += len(payload)
+    conn.commit()
+
+    dates = sorted(by_date)
+    if dates:
+        db.log_health(conn, dates[-1], "screen", "screen", "ok", scanned, 0.0, 0,
+                      f"历史重放 {len(dates)} 个交易日，命中 {written} 条")
+        conn.commit()
+    return {
+        "ok": True,
+        "scanned": scanned,
+        "days": len(dates),
+        "dates": dates,
+        "first": dates[0] if dates else None,
+        "last": dates[-1] if dates else None,
+        "written": written,
+        "seconds": round(time.time() - started, 1),
+        "universe": picked,
+    }
 
 
 def load(conn, cfg: dict, trade_date: str | None = None, top: int | None = None) -> dict:
@@ -257,9 +437,10 @@ def load(conn, cfg: dict, trade_date: str | None = None, top: int | None = None)
         trade_date = row["d"] if row else None
     items = criteria(cfg)
     meta = [{"key": item["key"], "title": item["title"], "why": item["why"],
-             "conditions": rules.describe_all(item["when"])} for item in items]
+             "priority": item["priority"], "conditions": rules.describe_all(item["when"])}
+            for item in items]
     if not trade_date:
-        return {"trade_date": None, "groups": {}, "criteria": meta, "last_run": last_run}
+        return {"trade_date": None, "groups": {}, "criteria": meta, "last_run": last_run, "primary": {}}
     _, default_top = _thresholds(cfg)
     top = top or default_top
     groups: dict[str, list[dict]] = {}
@@ -274,7 +455,8 @@ def load(conn, cfg: dict, trade_date: str | None = None, top: int | None = None)
                 (trade_date, item["key"], top),
             )
         ]
-    return {"trade_date": trade_date, "groups": groups, "criteria": meta, "last_run": last_run}
+    return {"trade_date": trade_date, "groups": groups, "criteria": meta,
+            "last_run": last_run, "primary": primary_labels(items, groups)}
 
 
 def report(result: dict, top: int = 15) -> str:
@@ -289,6 +471,16 @@ def report(result: dict, top: int = 15) -> str:
         lines.append(f"标的池：{info.get('total', 0)} 只可用，已剔除 {info['dropped_liquidity']} 只"
                      f"近 60 日均成交额低于 {(info.get('threshold') or 0) / 1e4:,.0f} 万的小票"
                      f"（门槛在 config.yaml 的 universe.min_avg_amount_60d）")
+    primary = primary_labels(result["criteria"], result["groups"])
+    label_count: dict[str, int] = {}
+    for rows in result["groups"].values():
+        for row in rows:
+            label_count[row["code"]] = label_count.get(row["code"], 0) + 1
+    shared = sum(1 for count in label_count.values() if count > 1)
+    if shared:
+        lines.append(f"命中 {len(primary)} 只票，其中 {shared} 只同时命中多个条件。"
+                     f"下面每只票在它「主标签」那一组里标了 ★（优先级见 config.yaml 的 screen.criteria）——"
+                     f"多标签是证据，不删；★ 只是告诉你该从哪一条开始看。")
     for item in result["criteria"]:
         rows = result["groups"].get(item["key"], [])
         lines.append("")
@@ -305,8 +497,9 @@ def report(result: dict, top: int = 15) -> str:
             vol = f"{row['vol_ratio_20']:.2f}" if row.get("vol_ratio_20") is not None else "—"
             amount = row.get("avg_amount_60d")
             amt = f"{amount / 1e4:,.0f}" if amount else "—"
+            mark = "★" if primary.get(row["code"]) == item["key"] else " "
             lines.append(
-                f"  {rank:>2}. {row['name']:<10} {row['code']:<9} 收 {row['close']:>8.2f} "
+                f" {mark}{rank:>3}. {row['name']:<10} {row['code']:<9} 收 {row['close']:>8.2f} "
                 f"涨跌 {(row['pct_chg'] or 0):+6.2f}%  趋势 {trend:>4}  量比 {vol:>5}  均额万 {amt:>7}"
             )
     return "\n".join(lines)
@@ -383,15 +576,53 @@ def _benchmark_returns(conn, dates, horizon: int) -> dict:
     return out
 
 
-def performance_report(conn, min_sample: int = 20) -> str:
-    """给人看的"筛出来的票后来怎么样"。没有样本就明说，不硬凑结论。"""
+def equal_weight_baseline(conn, cfg: dict, dates: list[str], horizon: int = 20,
+                          min_bars: int | None = None) -> dict:
+    """同一批筛选日上，"随便买一只同口径的票"平均能拿到多少（全市场等权基准）。
+
+    为什么非要这一条：筛出来的票跑输沪深300，有两种可能——这批票整体就不如大盘，
+    或者形态本身没有判断力。全市场等权基准把前一种可能排除掉：
+    **比等权还低，才是形态自己的问题**。只看沪深300 会把市场结构误读成形态失效。
+    """
+    default_min, _ = _thresholds(cfg)
+    min_bars = min_bars or default_min
+    picked = universe.select_codes(conn, cfg, min_bars=min_bars, verbose=False)
+    cache: dict = {}
+    per_date: dict[str, list] = {day: [] for day in dates}
+    for code in picked["codes"]:
+        series, bars = review.load_series(conn, code, cache)
+        for day in dates:
+            value = review.forward_return(bars, series, day, horizon)
+            if value is not None:
+                per_date[day].append(value)
+    means = [statistics.mean(per_date[day]) for day in dates if per_date[day]]
+    medians = [statistics.median(per_date[day]) for day in dates if per_date[day]]
+    if not means:
+        return {"mean": None, "median": None, "days": 0, "universe": len(picked["codes"])}
+    return {
+        "mean": round(statistics.mean(means), 4),
+        "median": round(statistics.mean(medians), 4),
+        "days": len(means),
+        "horizon": horizon,
+        "universe": len(picked["codes"]),
+    }
+
+
+def performance_report(conn, min_sample: int = 20, baseline: dict | None = None) -> str:
+    """给人看的"筛出来的票后来怎么样"。没有样本就明说，不硬凑结论。
+
+    给了 baseline（全市场等权，见 equal_weight_baseline）就多一列"相对全市场"——
+    那一列才是形态自己的信息量：跑输沪深300 可能只是这批票整体不如大盘。
+    """
     stats = outcome_stats(conn)
     if not stats:
         return ""
     all_dates = [row["trade_date"] for row in db.query(conn, "SELECT DISTINCT trade_date FROM screen_results")]
     base20 = _benchmark_returns(conn, all_dates, 20)
     lines = ["", "筛选结果回填（筛出来的票后来怎么样了）"]
-    lines.append(f"{'形态':<10}{'条数':>5}{'5日胜率':>9}{'5日均值':>9}{'20日胜率':>9}{'20日均值':>9}{'20日超额':>10}")
+    lines.append(f"{'形态':<10}{'条数':>5}{'5日胜率':>9}{'5日均值':>9}{'20日胜率':>9}"
+                 f"{'20日均值':>9}{'vs沪深300':>10}"
+                 + (f"{'vs全市场':>10}" if baseline and baseline.get("mean") is not None else ""))
     for row in stats:
         win5 = f"{row['win5'] / row['done5'] * 100:.0f}%" if row["done5"] else "—"
         win20 = f"{row['win20'] / row['done20'] * 100:.0f}%" if row["done20"] else "—"
@@ -403,12 +634,22 @@ def performance_report(conn, min_sample: int = 20) -> str:
         bench_values = [base20[day] for day in own_dates if day in base20]
         bench = sum(bench_values) / len(bench_values) if bench_values else None
         excess = f"{row['avg20'] - bench:+.2f}%" if (row["avg20"] is not None and bench is not None) else "—"
+        vs_market = ""
+        if baseline and baseline.get("mean") is not None and row["avg20"] is not None:
+            vs_market = f"{row['avg20'] - baseline['mean']:+.2f}%"
         lines.append(f"{row['criterion']:<10}{row['n']:>5}{win5:>9}{avg5:>9}{win20:>9}{avg20:>9}"
-                     f"{excess:>10}")
+                     f"{excess:>10}" + (f"{vs_market:>10}" if baseline and baseline.get("mean") is not None else ""))
     if base20:
         lines.append("")
-        lines.append("超额 = 该形态 20 日均值 − 同期沪深300（按各自的筛选日期取基准）；"
-                     "正数才说明形态本身有信息量。")
+        if baseline and baseline.get("mean") is not None:
+            lines.append(f"vs沪深300 = 该形态 20 日均值 − 同期沪深300；vs全市场 = 同一批日期上"
+                         f"「随便买一只同口径的票」的平均值（{baseline['mean']:+.2f}%，"
+                         f"{baseline['universe']} 只等权，{baseline['days']} 个日期）。")
+            lines.append("判断形态有没有信息量看**vs全市场**那一列：跑输沪深300 也可能只是这批票整体不如大盘。"
+                         "正数才说明形态本身有价值。")
+        else:
+            lines.append("超额 = 该形态 20 日均值 − 同期沪深300（按各自的筛选日期取基准）；"
+                         "正数才说明形态本身有信息量。")
     waiting = [row for row in stats if not row["done20"]]
     if waiting:
         lines.append(f"（{len(waiting)} 个形态还一条结果都算不出来——筛选日之后的交易日不够。"

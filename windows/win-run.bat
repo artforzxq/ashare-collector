@@ -172,6 +172,7 @@ echo   18   build the local full-market warehouse (run it a few times)
 echo   19   factor ledger health check
 echo   20   screen every stored symbol by pattern
 echo   21   watchlist candidates: who should be in, who should be out
+echo   22   replay the screen criteria over history (real 5/20-day results)
 echo   10   create a desktop shortcut for the daily job
 echo.
 echo From a command line: win-run.bat STEP [args]   e.g.  win-run.bat daily
@@ -203,6 +204,7 @@ if /i "%STEP%"=="sync"            goto :sync
 if /i "%STEP%"=="shadow"          goto :shadow
 if /i "%STEP%"=="screen"          goto :screen
 if /i "%STEP%"=="candidates"      goto :candidates
+if /i "%STEP%"=="replay"          goto :replay
 if /i "%STEP%"=="pack"            goto :pack
 echo Unknown step: %STEP%
 exit /b 1
@@ -355,6 +357,14 @@ echo Ranking watchlist candidates from the stored screen results ...
 echo This only reads local data; nothing is added to the watchlist by itself.
 echo.
 "%PY%" run.py candidates %EXTRA%
+exit /b %ERRORLEVEL%
+
+:replay
+echo Replaying the screen criteria over past trading days ...
+echo Takes several minutes: it recomputes every symbol once, then walks back through history.
+echo After it finishes you get the real 5 / 20-day performance of each pattern.
+echo.
+"%PY%" run.py replay %EXTRA%
 exit /b %ERRORLEVEL%
 
 :pack

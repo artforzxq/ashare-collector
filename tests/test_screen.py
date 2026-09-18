@@ -5,7 +5,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
-from collector import db, screen
+from collector import db, rules, screen
 from collector.config import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -32,8 +32,10 @@ class MatchRuleTests(unittest.TestCase):
     def test_breakout_and_spike(self):
         self.assertTrue(self._match("突破", {"breakout_confirmed": 1}))
         self.assertFalse(self._match("突破", {"breakout_confirmed": 0}))
-        self.assertTrue(self._match("异动", {"vol_ratio_20": 3.2}))
-        self.assertFalse(self._match("异动", {"vol_ratio_20": 2.9}))
+        # 异动已按阴阳拆成两条（见 VolumeSpikeSplitTests），这里只验量能那一档
+        spike = {"vol_ratio_20": 3.2, "candle": {"body_pct": 4.0}}
+        self.assertTrue(self._match("放量阳线异动", spike))
+        self.assertFalse(self._match("放量阳线异动", {**spike, "vol_ratio_20": 2.9}))
 
     def test_trend_and_pullback(self):
         up = {"state": "up", "trend_score": 80.0}
@@ -116,7 +118,9 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 1)
         groups = result["groups"]
         self.assertGreaterEqual(len(groups["突破"]), 1)
-        self.assertGreaterEqual(len(groups["异动"]), 1)
+        # 放量突破那根是阳线 → 落在"放量阳线异动"，不会跑到阴线那一组
+        self.assertGreaterEqual(len(groups["放量阳线异动"]), 1)
+        self.assertEqual(len(groups["放量阴线异动"]), 0)
         hit = groups["突破"][0]
         self.assertEqual(hit["code"], "SH600000")
         self.assertEqual(hit["name"], "浦发银行")        # 名称来自代码表
@@ -252,6 +256,169 @@ class LiquidityFilterTests(unittest.TestCase):
         # 两只都没过 3000 万门槛 → 一个都不剩
         self.assertFalse(result["ok"])
         self.assertIn("成交额", result["message"])
+
+
+class PrimaryLabelTests(unittest.TestCase):
+    """多标签不删，但每只票要有一个"从哪一条开始看"的主标签。"""
+
+    def _items(self):
+        return [{"key": "突破", "priority": 10.0}, {"key": "异动", "priority": 50.0},
+                {"key": "趋势", "priority": 90.0}]
+
+    def test_lowest_priority_number_wins(self):
+        groups = {"突破": [{"code": "SH600000"}], "异动": [{"code": "SH600000"}],
+                  "趋势": [{"code": "SH600000"}]}
+        primary = screen.primary_labels(self._items(), groups)
+        self.assertEqual(primary["SH600000"], "突破")
+
+    def test_single_label_stock_is_its_own_primary(self):
+        groups = {"趋势": [{"code": "SH600001"}]}
+        self.assertEqual(screen.primary_labels(self._items(), groups)["SH600001"], "趋势")
+
+    def test_priority_defaults_to_config_order(self):
+        cfg = {"screen": {"criteria": [
+            {"key": "先写的", "when": [{"field": "close", "op": ">", "value": 0}]},
+            {"key": "后写的", "when": [{"field": "close", "op": ">", "value": 0}]},
+        ]}}
+        items = screen.criteria(cfg)
+        self.assertLess(items[0]["priority"], items[1]["priority"])
+
+
+class VolumeSpikeSplitTests(unittest.TestCase):
+    """异动拆成阳线 / 阴线：同样是放量 3 倍，一个是资金进场，一个是派发。"""
+
+    def _match(self, key: str, row: dict) -> bool:
+        item = next(c for c in screen.criteria({}) if c["key"] == key)
+        return rules.matches(row, item["when"])
+
+    def test_bullish_spike_only_matches_the_yang_bucket(self):
+        row = {"vol_ratio_20": 4.0, "candle": {"body_pct": 5.0}}
+        self.assertTrue(self._match("放量阳线异动", row))
+        self.assertFalse(self._match("放量阴线异动", row))
+
+    def test_bearish_spike_only_matches_the_yin_bucket(self):
+        row = {"vol_ratio_20": 4.0, "candle": {"body_pct": -3.0}}
+        self.assertFalse(self._match("放量阳线异动", row))
+        self.assertTrue(self._match("放量阴线异动", row))
+
+    def test_quiet_day_matches_neither(self):
+        row = {"vol_ratio_20": 1.2, "candle": {"body_pct": 5.0}}
+        self.assertFalse(self._match("放量阳线异动", row))
+        self.assertFalse(self._match("放量阴线异动", row))
+
+    def test_flat_close_counts_as_yang(self):
+        """收平（实体 0）算阳线那一档——不然它会从两个条件里同时漏掉。"""
+        row = {"vol_ratio_20": 3.0, "candle": {"body_pct": 0.0}}
+        self.assertTrue(self._match("放量阳线异动", row))
+        self.assertFalse(self._match("放量阴线异动", row))
+
+
+class ReplayTests(unittest.TestCase):
+    """历史重放：把筛选条件放到过去每一天，立刻拿到 5 / 20 日的真实表现。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=root)
+        cls.cfg["_db_path"] = str(root / "t.db")
+        # 只留一个"永远成立"的条件，日期和收益都能手算
+        cls.cfg["screen"]["criteria"] = [
+            {"key": "全部", "sort": "close", "when": [{"field": "close", "op": ">", "value": 0}]},
+        ]
+        cls.conn = db.connect(cls.cfg["_db_path"])
+        db.init_db(cls.conn, PROJECT_ROOT / "schema.sql")
+        cls.bars = []
+        for index in range(140):
+            close = 100.0 + index
+            cls.bars.append({
+                "code": "SH600000",
+                "trade_date": (date(2026, 1, 1) + timedelta(days=index)).isoformat(),
+                "open": close, "high": close, "low": close, "close": close,
+                "volume": 1000, "amount": 200_000_000, "pct_chg": 1.0,
+            })
+        db.upsert_rows(cls.conn, "bars_daily", cls.bars, ["code", "trade_date"])
+        db.upsert_rows(cls.conn, "instruments",
+                       [{"code": "SH600000", "name": "浦发银行", "type": "stock",
+                         "exchange": "SH", "in_watchlist": 0}], ["code"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.conn.close()
+        cls.tmp.cleanup()
+
+    def _dates(self):
+        return [bar["trade_date"] for bar in self.bars]
+
+    def setUp(self):
+        # 同类里的用例共用一份库，谁先跑都得有重放结果在
+        if not db.query(self.conn, "SELECT 1 AS x FROM screen_results LIMIT 1"):
+            screen.replay(self.conn, self.cfg, days=30, verbose=False)
+
+    def test_writes_one_row_per_replayed_day(self):
+        result = screen.replay(self.conn, self.cfg, days=30, verbose=False)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["days"], 30)
+        self.assertEqual(result["written"], 30)
+        rows = db.query(self.conn, "SELECT COUNT(*) AS n FROM screen_results")
+        self.assertEqual(rows[0]["n"], 30)
+
+    def test_row_carries_that_days_price_not_the_latest_one(self):
+        """重放的第 1 天必须写那天的收盘价——这是"没有未来函数"的直接体现。"""
+        row = db.query(self.conn, "SELECT trade_date, close, rank_no FROM screen_results "
+                                  "ORDER BY trade_date LIMIT 1")[0]
+        index = self._dates().index(row["trade_date"])
+        self.assertAlmostEqual(row["close"], self.bars[index]["close"], places=3)
+        self.assertEqual(row["rank_no"], 1)
+        self.assertLess(row["close"], self.bars[-1]["close"])
+
+    def test_forward_return_uses_next_day_entry(self):
+        screen.backfill_outcomes(self.conn)
+        row = db.query(self.conn, "SELECT trade_date, outcome_5d, outcome_20d FROM screen_results "
+                                  "ORDER BY trade_date LIMIT 1")[0]
+        index = self._dates().index(row["trade_date"])
+        entry = self.bars[index + 1]["close"]                 # 次日收盘建仓
+        expect5 = round((self.bars[index + 1 + 5]["close"] / entry - 1) * 100, 4)
+        expect20 = round((self.bars[index + 1 + 20]["close"] / entry - 1) * 100, 4)
+        self.assertAlmostEqual(row["outcome_5d"], expect5, places=3)
+        self.assertAlmostEqual(row["outcome_20d"], expect20, places=3)
+
+    def test_too_short_window_is_refused(self):
+        result = screen.replay(self.conn, self.cfg, days=5, verbose=False)
+        self.assertFalse(result["ok"])
+        self.assertIn("20 个交易日", result["message"])
+
+    def test_equal_weight_baseline_matches_the_only_symbol(self):
+        """等权基准 = 同一批日期上"随便买一只同口径的票"的平均收益；这里只有一只票，手算得到。"""
+        day = self.bars[-30]["trade_date"]
+        baseline = screen.equal_weight_baseline(self.conn, self.cfg, [day])
+        index = self._dates().index(day)
+        entry = self.bars[index + 1]["close"]
+        expect = round((self.bars[index + 1 + 20]["close"] / entry - 1) * 100, 4)
+        self.assertAlmostEqual(baseline["mean"], expect, places=3)
+        self.assertEqual(baseline["universe"], 1)
+
+    def test_report_shows_the_market_wide_column_when_baseline_is_given(self):
+        screen.backfill_outcomes(self.conn)
+        day = self.bars[-30]["trade_date"]
+        baseline = screen.equal_weight_baseline(self.conn, self.cfg, [day])
+        plain = screen.performance_report(self.conn)
+        with_base = screen.performance_report(self.conn, baseline=baseline)
+        self.assertNotIn("vs全市场", plain)
+        self.assertIn("vs全市场", with_base)
+
+    def test_replay_of_the_last_day_matches_a_real_scan(self):
+        """重放的最后一天必须和真跑一遍筛选写出来的一样，否则两边对不上。"""
+        screen.replay(self.conn, self.cfg, days=30, verbose=False)
+        last = db.query(self.conn, "SELECT MAX(trade_date) AS d FROM screen_results")[0]["d"]
+        replayed = [dict(r) for r in db.query(
+            self.conn, "SELECT * FROM screen_results WHERE trade_date=? ORDER BY criterion, code", (last,))]
+        result = screen.scan(self.conn, self.cfg, verbose=False)
+        screen.save(self.conn, result)
+        scanned = [dict(r) for r in db.query(
+            self.conn, "SELECT * FROM screen_results WHERE trade_date=? ORDER BY criterion, code", (last,))]
+        strip = lambda rows: [{k: v for k, v in row.items() if k != "created_at"} for row in rows]
+        self.assertEqual(strip(replayed), strip(scanned))
 
 
 if __name__ == "__main__":

@@ -566,6 +566,36 @@ def cmd_candidates(args) -> int:
     return 0 if result.get("ok") else 1
 
 
+def cmd_replay(args) -> int:
+    """历史重放：把筛选条件放到过去每一天跑一遍，今天就能看到 5 / 20 日的真实表现。
+
+    没有未来函数——每一天只用截至那天的数据；收益口径与 16-信号复盘 一致。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    result = screen_mod.replay(conn, cfg, days=int(args.days or 120), top=args.top,
+                               min_bars=args.min_bars, verbose=True)
+    if not result.get("ok"):
+        print(result.get("message", "重放失败"))
+        conn.close()
+        return 1
+    print("")
+    print(f"重放完成：{result['days']} 个交易日（{result['first']} → {result['last']}），"
+          f"扫了 {result['scanned']} 只，写入 {result['written']} 条，用时 {result['seconds']} 秒")
+    screen_mod.sync_criteria(conn, cfg, result["last"])
+    print("")
+    print("回填之后的真实表现（信号日收盘确认 → 次日收盘建仓 → 持有 N 个交易日）：")
+    filled = screen_mod.backfill_outcomes(conn, verbose=True)
+    dates = [row["trade_date"] for row in db.query(
+        conn, "SELECT DISTINCT trade_date FROM screen_results ORDER BY trade_date")]
+    print("  正在算全市场等权基准（同一批日期、同一口径，几十秒）…")
+    baseline = screen_mod.equal_weight_baseline(conn, cfg, dates)
+    text = screen_mod.performance_report(conn, baseline=baseline)
+    print(text if text else "  还没有可回填的结果")
+    conn.close()
+    return 0
+
+
 def cmd_screen(args) -> int:
     """全市场筛选：把本地有历史的票按形态扫一遍。"""
     cfg = _prepare(args)
@@ -732,6 +762,13 @@ def build_parser() -> argparse.ArgumentParser:
     candidates.add_argument("--min-hits", type=int, help="至少被命中几次才算候选")
     candidates.add_argument("--db", help="数据库路径")
     candidates.set_defaults(func=cmd_candidates)
+
+    replay = sub.add_parser("replay", help="历史重放：把筛选条件在过去每一天跑一遍，立刻得到 5/20 日真实表现")
+    replay.add_argument("--days", type=int, help="重放多少个交易日（默认 120）")
+    replay.add_argument("--top", type=int, help="每个条件每天保留多少条（默认取配置 screen.top）")
+    replay.add_argument("--min-bars", type=int, help="至少多少根日线才参与（默认取配置 screen.min_bars）")
+    replay.add_argument("--db", help="数据库路径")
+    replay.set_defaults(func=cmd_replay)
 
     return parser
 

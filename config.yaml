@@ -6,7 +6,8 @@ project:
   spec_version: "1.1"
   # v1.2：上方无阻力带时按保守倍数处理，不再跳过盈亏比检查
   # v1.3：用期望值（胜率×盈亏比）替代纯盈亏比；结构位太远时退到 ATR 止损，不再整只票否决
-  feature_version: "v1.3"
+  # v1.4：异动按阴阳拆成两条；条件加 priority（多标签命中时决定主标签，记录一条不删）
+  feature_version: "v1.4"
   db_path: data/market.db
   timezone: Asia/Shanghai
 
@@ -128,8 +129,14 @@ backtest:
 screen:
   min_bars: 80               # 至少多少根日线才参与筛选
   top: 30                    # 每个条件保留多少条
+  # priority 只决定"一只票同时命中多个条件时，拿哪个当主标签"（数字越小越具体）。
+  # 底层记录一条都不删——一只票同时是"突破"和"异动"是有信息量的，
+  # 只是页面和报告不该把同一只票在五个分组里各刷一遍。
+  # 经验顺序：先看已经发生的动作（突破/反转），再看位置（回踩/蓄势/横盘），
+  # 最后才是宽泛的状态描述（趋势）。
   criteria:
     - key: 反转
+      priority: 20
       title: 下跌/震荡里出现放量长阳等反转确认
       why: 均线和 ATR 天生滞后，转折点上先动的是 K 线形态
       sort: body_pct
@@ -139,6 +146,7 @@ screen:
         - {field: close, op: "<=", compare: ma20, factor: 1.12}
 
     - key: 低位横盘
+      priority: 60
       title: 跌下来之后横着缩量，等打底
       why: 和高位蓄势形态一样，但含义不同——它在均线下方，是打底不是蓄势突破
       sort: vol_shrink_ratio
@@ -150,6 +158,7 @@ screen:
         - {field: state, op: "!=", value: up}
 
     - key: 蓄势
+      priority: 40
       title: 缩量横盘且贴着高位，等方向
       why: 高位缩量横盘之后往往跟着方向选择，向上突破的概率取决于量能是否恢复
       sort: vol_shrink_ratio
@@ -161,20 +170,36 @@ screen:
         - {field: state, op: "!=", value: down}
 
     - key: 突破
+      priority: 10
       title: 放量突破区间上沿
       why: 突破要放量才算数，缩量突破多半是假突破
       sort: vol_ratio_20
       when:
         - {field: breakout_confirmed, op: "==", value: 1}
 
-    - key: 异动
-      title: 成交额异常放大
-      why: 量能突然放大通常意味着有事情发生，值得看一眼
+    # 异动拆成阳线 / 阴线两个条件：同样是"成交额放大到 3 倍"，放量长阳可能是资金进场，
+    # 放量长阴多半是派发或者出了事——这两件事的性质完全相反，混在一个标签里没法用。
+    # 两个条件是互斥的（实体涨跌幅 ≥0 / <0），不会重复占位。
+    - key: 放量阳线异动
+      priority: 50
+      title: 成交额放大到 3 倍以上，且收阳
+      why: 放量上涨说明有资金在买；同样放量但收阴，含义正好相反（见下一条）
       sort: vol_ratio_20
       when:
         - {field: vol_ratio_20, op: ">=", value: 3}
+        - {field: candle.body_pct, op: ">=", value: 0}
+
+    - key: 放量阴线异动
+      priority: 55
+      title: 成交额放大到 3 倍以上，且收阴
+      why: 放量下跌通常是派发或者消息面有变，值得先看一眼再说
+      sort: vol_ratio_20
+      when:
+        - {field: vol_ratio_20, op: ">=", value: 3}
+        - {field: candle.body_pct, op: "<", value: 0}
 
     - key: 趋势
+      priority: 90
       title: 上升趋势里趋势分最高
       why: 顺势标的的容错率更高
       sort: trend_score
@@ -183,6 +208,7 @@ screen:
         - {field: trend_score, op: "exists", value: true}
 
     - key: 回踩
+      priority: 30
       title: 上升趋势里回踩到关键带附近
       why: 上升趋势中的回踩是低吸位置，但前提是支撑有效
       sort: trend_score

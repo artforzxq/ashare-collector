@@ -205,6 +205,13 @@ TIP
     echo
     run_py candidates "$@"
     ;;
+  replay)
+    ensure_python || { pause; exit 1; }
+    echo "历史重放：把筛选条件在过去每一天跑一遍，跑完就能看到每个形态真实的 5 / 20 日表现。"
+    echo "要几分钟——它会把全市场重算一遍，然后再顺着历史走。"
+    echo
+    run_py replay "$@"
+    ;;
   pack)
     ensure_python || { pause; exit 1; }
     echo "打包数据库（先确认没有程序正在用它；压缩 480MB 大约要一分钟）…"

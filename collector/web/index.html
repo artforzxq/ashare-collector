@@ -132,6 +132,8 @@ canvas{display:block;width:100%}
 .badge.live{background:#e7f7ee;color:#0f7a45;border-color:#bfe8d2}
 .badge.today{background:#eef2ff;color:#3949ab;border-color:#d5dcfb}
 .badge.stale{background:#fff4e5;color:#a35a00;border-color:#ffd9a8}
+.primary-chip{display:inline-block;border-radius:99px;padding:0 5px;font-size:10px;
+  background:#eef2ff;color:#3949ab;border:1px solid #d5dcfb;vertical-align:1px}
 .block-head{display:flex;align-items:center;gap:8px;margin:18px 2px 6px;font-size:13px;color:var(--muted)}
 .block-head h2{margin:0;font-size:13px;font-weight:600;color:var(--text);letter-spacing:.02em}
 .block-head .line{flex:1;height:1px;background:var(--line, #e6e8ee)}
@@ -407,7 +409,7 @@ function buildHelp(m){
       label: '量比',
       what: '今天的成交额是过去 20 天平均的几倍。',
       how: '当日成交额 ÷ 前 20 个交易日均值（不含当日）。',
-      use: '>1.5 配合突破才算"放量突破"；>3 算异动；>10 会被标记为可疑但不阻断（因为那也可能是真信号）。'
+      use: '>1.5 配合突破才算"放量突破"；>3 进放量异动（按阴阳分成阳线/阴线两条）；>10 会被标记为可疑但不阻断（因为那也可能是真信号）。'
     },
     cap: {
       label: '仓位上限',
@@ -1213,11 +1215,18 @@ function renderScreen(){
   }
   const head = `<table><thead><tr><th>标的</th><th>代码</th><th class="num">现价</th>
       <th class="num">涨跌</th><th class="num">趋势</th><th class="num">量比</th><th>说明</th></tr></thead><tbody>`;
+  const prim = (screenData && screenData.primary) || {};
+  const shared = rows.filter(row => prim[row.code] && prim[row.code] !== screenCrit).length;
+  const lead = shared
+    ? `<div class="hint" style="padding:0 0 6px">这一组里有 ${shared} 只票的主标签在别的组（优先级更高的那个）——
+       一只票同时命中多个条件是证据，记录都在；打 ★ 的才是"从哪一条开始看"。</div>`
+    : '';
   const body = rows.map(row => {
     const chg = row.pct_chg;
     const color = chg > 0 ? C.up : (chg < 0 ? C.down : 'var(--muted)');
+    const star = prim[row.code] === screenCrit ? '<span class="primary-chip">主</span> ' : '';
     return `<tr data-code="${row.code}">
-      <td class="nm">${row.name || row.code}</td>
+      <td class="nm">${star}${row.name || row.code}</td>
       <td class="cd">${row.code}</td>
       <td class="num">${fmt(row.close)}</td>
       <td class="num" style="color:${color}">${pct(chg)}</td>
@@ -1226,7 +1235,7 @@ function renderScreen(){
       <td style="color:var(--muted)">${row.detail || ''}</td>
     </tr>`;
   }).join('');
-  $('screenBody').innerHTML = explain + head + body + '</tbody></table>';
+  $('screenBody').innerHTML = explain + lead + head + body + '</tbody></table>';
   $('screenBody').querySelectorAll('tr[data-code]').forEach(tr => {
     tr.onclick = () => selectItem(tr.dataset.code);   // 点一行直接看它的 K 线
   });
@@ -1363,3 +1372,4 @@ document.addEventListener('visibilitychange', async () => {
 </script>
 </body>
 </html>
+.badge{border-radius:99px;padding:1px 7px;font-size:11px;border:1px solid transparent}
