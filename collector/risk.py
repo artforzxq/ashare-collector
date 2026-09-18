@@ -26,7 +26,18 @@ DEFAULTS = {
     "target_atr_pct": 2.0,   # 目标波动率（ATR 占价格百分比）
     "stop_buffer_pct": 0.5,  # 止损放在支撑带下沿再往下留多少
     "atr_stop_multiple": 2.0,
-    "min_reward_risk": 2.0,
+    # 期望值口径：只看盈亏比是不够的——0.8 的盈亏比配 70% 胜率是赚的，
+    # 3.0 的配 20% 胜率是亏的。所以这里用 期望(R) = 胜率×盈亏比 − (1−胜率)
+    # 决定缩放到多少；期望 ≤ 0 直接不建仓。胜率由回测测出来（报告里会给建议值）。
+    "win_rate": 0.5,
+    "target_expectancy": 0.5,   # 期望达到多少给满缩放（单位：R）
+    # 上方没有阻力带、且离 250 日高点还远时的兜底倍数：风控不能在"数据缺失"时放行。
+    # 1.0 表示"只按 1 倍风险算收益空间"——配 50% 胜率时期望正好 0，也就是不做。
+    "no_resistance_rr": 1.0,
+    "open_space_atr_multiple": 3.0,   # 接近历史高点、上方真空时，用几倍 ATR 估目标
+    # "接近 250 日高点"的容差（%）。实测强势票回撤到 -5%~-8% 很常见
+    # （SZ000333 在 -5.4% 时仍被当成"上方有阻力"），容差太紧会把这批票系统性挡在门外。
+    "open_space_high_tolerance_pct": 8.0,
     "cap_floor": 0.3,
     "max_stop_pct": 8.0,     # 止损离现价超过这个百分比就不做（位置太远，风险预算不够）
 }
@@ -54,7 +65,7 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
     state = row.get("state") or "range"
     notes: list[str] = []
     blank = {"position_cap": 0.0, "stop_level": None, "stop_pct": None,
-             "risk_reward": None, "reason": "", "notes": notes}
+             "risk_reward": None, "expectancy": None, "reason": "", "notes": notes}
 
     if (row.get("quality_flag") or row.get("data_quality_flag") or "ok") != "ok":
         return {**blank, "reason": "数据不可信，0 仓"}
@@ -83,7 +94,21 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
 
     risk_pct = (close - stop) / close * 100
     if risk_pct > float(params["max_stop_pct"]):
-        return {**blank, "reason": f"止损离现价 {risk_pct:.1f}%（超过 {params['max_stop_pct']:g}%），位置太远，0 仓"}
+        # 结构位太远——**强势票的典型处境**（涨了很久，脚下支撑离现价很远）。
+        # 因为"止损放不下"就整只票不做，等于系统性排除最强的标的：实测 SZ000333
+        # 上升趋势持续 100 天、趋势分 77，却长期 0 仓，就是被这一条挡住的。
+        # 改成：结构位太远时退到波动率止损，让"风险预算"去约束参与方式，而不是否决参与。
+        atr = row.get("atr14")
+        fallback = close - float(params["atr_stop_multiple"]) * float(atr) if atr else None
+        if fallback is None or fallback >= close \
+                or (close - fallback) / close * 100 > float(params["max_stop_pct"]):
+            return {**blank, "reason": f"止损离现价 {risk_pct:.1f}%，结构位和 ATR 都超过 "
+                                      f"{params['max_stop_pct']:g}% 的风险预算，0 仓"}
+        notes.append(f"结构位太远（{risk_pct:.1f}%）→ 改用 "
+                     f"{params['atr_stop_multiple']:g} 倍 ATR 止损")
+        stop = fallback
+        stop_reason = f"{params['atr_stop_multiple']:g} 倍 ATR（结构位太远）"
+        risk_pct = (close - stop) / close * 100
 
     # ---- 基准仓位 ----
     reversal = bool(candle.get("reversal_up") or candle.get("long_bull"))
@@ -108,22 +133,62 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
 
     reward_risk = None
     resistance = nearest_band(bands, close, "resistance")
+    downside = close - stop
     if resistance:
         upside = (resistance["price_low"] + resistance["price_high"]) / 2 - close
-        downside = close - stop
-        if downside > 0 and upside > 0:
-            reward_risk = round(upside / downside, 2)
-            scale = _clamp(reward_risk / float(params["min_reward_risk"]), float(params["cap_floor"]), 1.0)
-            cap *= scale
-            notes.append(f"盈亏比 {reward_risk:.2f} → 缩放 {scale:.2f}")
-        elif upside <= 0:
-            notes.append("上方紧贴阻力带，空间不足")
+    else:
+        # 上方没有阻力带，有两种成因，不能一概而论：
+        #   a) 价格贴着/突破 250 日高点——成交密集区都在脚下，上方本来就是真空，"没带"就是"空间打开"
+        #   b) 关键带没识别出头顶那段——这是数据缺失，不是好消息
+        # 以前这两种都走"保守 1R"，配上 50% 胜率期望正好是 0，于是 b) 还好，
+        # a) 却被系统性判 0 仓：越强的票越做不了（实测 SZ000333 上升趋势 100 天、离高点 5.4%，长期 0 仓）。
+        near_high = row.get("dist_to_high_250")
+        atr = row.get("atr14")
+        projection = float(params["open_space_atr_multiple"]) * float(atr) if atr else None
+        if near_high is None or projection is None:
+            # 连参照都没有 → 按保守倍数算收益空间，让缩放照常生效（config: risk.no_resistance_rr）
+            upside = downside * float(params["no_resistance_rr"])
+            notes.append(f"上方无阻力带、也缺高点参照 → 按 {params['no_resistance_rr']:g}R 保守处理")
+        elif float(near_high) >= -abs(float(params["open_space_high_tolerance_pct"])):
+            # (a) 贴近或突破 250 日高点：那个"高点"已经不是天花板了，用波动率估目标
+            upside = projection
+            notes.append(f"接近 250 日高点（{float(near_high):+.1f}%）→ 上方真空，"
+                         f"按 {params['open_space_atr_multiple']:g} 倍 ATR 估目标")
+        else:
+            # (b) 离高点还远，头顶一定有筹码，只是密集区分箱没把它挑出来。
+            # 用"到 250 日高点的距离"当参照，再让它不超过波动率给的空间——宁可低估，不凭空放大。
+            room = close * (-float(near_high)) / 100.0
+            upside = min(room, projection)
+            notes.append(f"上方无阻力带 → 目标取「到 250 日高点 {room / close * 100:.1f}%」"
+                         f"与「{params['open_space_atr_multiple']:g} 倍 ATR」的较小者")
+    win_rate = _clamp(float(params["win_rate"]), 0.0, 1.0)
+    expectancy = None
+    if downside > 0 and upside > 0:
+        reward_risk = round(upside / downside, 2)
+        expectancy = round(win_rate * reward_risk - (1 - win_rate), 4)
+        if expectancy <= 0:
+            notes.append(
+                f"盈亏比 {reward_risk:.2f} 配 {win_rate:.0%} 胜率 → 期望 {expectancy:+.2f}R，不做")
+            return {**blank, "stop_level": round(stop, 4),
+                    "stop_pct": round((stop / close - 1) * 100, 2),
+                    "risk_reward": reward_risk,
+                    "expectancy": expectancy,
+                    "reason": f"止损放{stop_reason}；盈亏比 {reward_risk:.2f} × 胜率 {win_rate:.0%} "
+                              f"→ 期望 {expectancy:+.2f}R，0 仓"}
+        scale = _clamp(expectancy / float(params["target_expectancy"]),
+                       float(params["cap_floor"]), 1.0)
+        cap *= scale
+        notes.append(f"盈亏比 {reward_risk:.2f} × 胜率 {win_rate:.0%} → "
+                     f"期望 {expectancy:+.2f}R → 缩放 {scale:.2f}")
+    elif upside <= 0:
+        notes.append("上方紧贴阻力带，空间不足")
 
     return {
         "position_cap": round(_clamp(cap, 0.0, 1.0), 3),
         "stop_level": round(stop, 4),
         "stop_pct": round((stop / close - 1) * 100, 2),
         "risk_reward": reward_risk,
+        "expectancy": expectancy,
         "reason": f"{state}趋势，止损放{stop_reason}"
                   + ("（反转确认，试探仓）" if state == "down" else ""),
         "notes": notes,

@@ -58,7 +58,8 @@
   .wl-item.on{background:#eef3fe;box-shadow:inset 0 0 0 1px #cfdefb}
   .wl-item .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .wl-item .cd{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
-  .wl-item .px{font-variant-numeric:tabular-nums;font-size:13px}
+.wl-item .px{font-variant-numeric:tabular-nums;font-size:13px}
+.wl-item .px .chg{display:block;font-size:11px;text-align:right}
   .wl-item .st{font-size:11px;padding:1px 6px;border-radius:99px;justify-self:start}
   .wl-item .del{position:absolute;right:6px;top:6px;display:none;color:var(--muted);font-size:12px}
   .wl-item:hover .del{display:block}
@@ -229,6 +230,7 @@ canvas{display:block;width:100%}
     <div id="watchlist" class="watchlist"></div>
     <div class="side-foot">
       <div id="coverage" style="margin-bottom:6px"></div>
+      <div id="marketLine" style="margin-bottom:6px"></div>
       <div>最近提醒 <b id="alertCount">0</b> 条</div>
       <div id="recentAlerts" style="margin-top:6px;line-height:1.7"></div>
     </div>
@@ -241,7 +243,7 @@ canvas{display:block;width:100%}
     </div>
     <nav class="tabs" id="viewTabs">
       <button data-view="stock" class="on">自选标的</button>
-      <button data-view="market">全市场</button>
+      <button data-view="market">市场与扫描</button>
     </nav>
 
     <!-- ===================== 单只标的 ===================== -->
@@ -381,6 +383,7 @@ function buildHelp(m){
   const st = m.state || {}, rk = m.risk || {}, cap = rk.base_cap || {};
   const band = st.neutral_band != null ? st.neutral_band : 0.1;
   const f = n => (n == null ? '—' : n);
+  const pc = n => (n == null ? '—' : (n * 100).toFixed(0) + '%');
   return {
     state: {
       label: '状态（上升 / 震荡 / 下跌）',
@@ -409,13 +412,13 @@ function buildHelp(m){
     cap: {
       label: '仓位上限',
       what: '按这套风控规则，这只标的最多占你总资金的多少。',
-      how: `下跌趋势、跌破支撑带、或数据不可信 → 0；否则 = 基准仓位（上升 ${f(cap.up)} / 震荡 ${f(cap.range)}）× 波动率缩放（目标波动 ${f(rk.target_atr_pct)}% ÷ 实际 ATR%，限制在 ${f(rk.cap_floor)}–1 倍）× 盈亏比缩放（盈亏比 ÷ ${f(rk.min_reward_risk)}，同样限制在 ${f(rk.cap_floor)}–1 倍）。`,
+      how: `下跌趋势且无反转确认、跌破支撑带、数据不可信 → 0；结构位太远（止损离现价超过 ${f(rk.max_stop_pct)}% 且 ${f(rk.atr_stop_multiple)} 倍 ATR 也超过）→ 0；否则 = 基准仓位（上升 ${f(cap.up)} / 震荡 ${f(cap.range)}）× 波动率缩放（目标波动 ${f(rk.target_atr_pct)}% ÷ 实际 ATR%，限制在 ${f(rk.cap_floor)}–1 倍）× 期望值缩放（期望 R ÷ ${f(rk.target_expectancy)}，同样限制在 ${f(rk.cap_floor)}–1 倍）。`,
       use: '这是"上限"不是"建议买入量"。实际还得看你总仓位、其它持仓和现金。波动大或上方空间小，它会自动缩小。'
     },
     stop: {
       label: '止损位',
       what: '"判断错了"的位置，也就是当初的买入理由失效的地方。',
-      how: `优先放在最近支撑带下沿再往下留 ${f(rk.stop_buffer_pct)}%；没有支撑带时退到 收盘 − ${f(rk.atr_stop_multiple)}×ATR。`,
+      how: `优先放在最近支撑带下沿再往下留 ${f(rk.stop_buffer_pct)}%；没有支撑带、或者结构位离现价超过 ${f(rk.max_stop_pct)}% 时，退到 收盘 − ${f(rk.atr_stop_multiple)}×ATR。`,
       use: '跌破它说明"支撑有效"这个前提已经不成立，而不是"亏到这个数才跑"。'
     },
     candle: {
@@ -426,9 +429,9 @@ function buildHelp(m){
     },
     rr: {
       label: '盈亏比',
-      what: '往上的空间 ÷ 往下的空间。',
-      how: '（最近阻力带中心 − 收盘）÷（收盘 − 止损位）。',
-      use: `低于 ${f(rk.min_reward_risk)} 时上面的仓位上限会自动等比缩小——不是"不能买"，而是"性价比不够，只值得小仓试"。`
+      what: '往上的空间 ÷ 往下的空间，再按胜率折成"期望值"。',
+      how: `（最近阻力带中心 − 收盘）÷（收盘 − 止损位）。上方没有识别出阻力带时分两种：贴着 250 日高点（${f(rk.open_space_high_tolerance_pct)}% 以内）算"上方真空"，按 ${f(rk.open_space_atr_multiple)} 倍 ATR 估目标；离得还远就取"到 250 日高点的距离"和"波动率给的空间"里较小的那个——头顶一定有筹码，只是分箱没挑出来。`,
+      use: `决定仓位的是期望值 = 胜率 ${pc(rk.win_rate)} × 盈亏比 − (1 − 胜率)：期望 ≤ 0 直接 0 仓，0 到 ${f(rk.target_expectancy)} R 之间等比缩小。只看盈亏比会误判——0.8 的盈亏比配 70% 胜率是赚的，3.0 配 20% 胜率是亏的。`
     }
   };
 }
@@ -539,6 +542,8 @@ async function loadWatchlist(){
     const div = document.createElement('div');
     div.className = 'wl-item' + (item.code === state.code ? ' on' : '');
     div.dataset.code = item.code;
+    div.dataset.daily = item.close != null ? item.close : '';
+    div.dataset.date = item.trade_date || '';
     const label = item.name && item.name !== item.code ? item.name : item.code;
     div.innerHTML = `
       <div class="nm" title="${item.code}">${label}</div>
@@ -678,12 +683,19 @@ async function loadFreshness(){
   try { d = await api('/api/freshness'); } catch(e){ return; }
   state.freshness = d;
   const ref = d.daily;
+  const partial = d.daily_partial;
+  const age = d.intraday_age_min;
+  const intradayBadge = (() => {
+    if (!d.intraday) return '';
+    if (d.trading && age != null && age > 10) return badge(age + ' 分钟前', 'stale');
+    return badge(d.trading ? '盘中' : '最新', d.trading ? 'live' : 'today');
+  })();
   const items = [
-    `<span class="fi">日线 <b>${d.daily || '—'}</b> ${freshBadge(d.daily, ref)}</span>`,
+    `<span class="fi">日线 <b>${d.daily || '—'}</b> ${partial ? badge('盘中·未收盘', 'stale') : freshBadge(d.daily, ref)}</span>`,
     `<span class="fi">特征 <b>${d.features || '—'}</b> ${freshBadge(d.features, ref)}</span>`,
     `<span class="fi">广度 <b>${d.breadth || '—'}</b> ${freshBadge(d.breadth, ref)}</span>`,
-    d.intraday ? `<span class="fi">分时 <b>${String(d.intraday).slice(11)}</b> ${badge(d.trading ? '盘中' : '已收盘', d.trading ? 'live' : 'today')}</span>` : '',
-    `<span class="fi">筛选 <b>${d.screen || '—'}</b></span>`,
+    d.intraday ? `<span class="fi">分时 <b>${String(d.intraday).slice(11)}</b> ${intradayBadge}</span>` : '',
+    `<span class="fi">筛选 <b>${d.screen || '—'}</b> ${freshBadge(d.screen, ref)}</span>`,
     `<span class="fi">时段 <b>${d.session || '—'}</b></span>`,
     d.last_daily_run ? `<span class="fi">上次日终 <b>${String(d.last_daily_run).slice(5, 16)}</b></span>` : '',
   ];
@@ -695,13 +707,27 @@ async function loadFreshness(){
 /* ---------- 实时报价：只给盯盘用，不参与任何结论 ---------- */
 function renderQuotes(d){
   const box = $('quotebar');
-  if (!box) return;
-  if (!d || d.error || !d.items || !d.items.length){
-    box.innerHTML = `<span class="kv">${(d && d.error) || '暂时拿不到实时报价'}</span>`;
+  const items = (d && d.items) || [];
+  if (!items.length){
+    if (box) box.innerHTML = `<span class="kv">${(d && d.error) || '暂时拿不到实时报价'}</span>`;
     if ($('quoteTime')) $('quoteTime').textContent = '';
     return;
   }
-  const q = d.items.find(i => i.code === state.code) || d.items[0];
+  // 侧栏每一行也换成现价：日线收盘价和实时价不一样，两个地方显示同一个数才不会让人犯迷糊
+  items.forEach(item=>{
+    const row = document.querySelector('.wl-item[data-code="' + item.code + '"]');
+    if (!row) return;
+    const px = row.querySelector('.px');
+    if (!px) return;
+    const c = item.pct_chg;
+    const color = c > 0 ? 'var(--up)' : (c < 0 ? 'var(--down)' : 'var(--muted)');
+    px.style.color = color;
+    px.innerHTML = `${item.close != null ? item.close : '—'}` +
+      (c == null ? '' : `<span class="chg">${c > 0 ? '+' : ''}${c.toFixed(2)}%</span>`);
+    px.title = `现价 ${item.close}` + (row.dataset.daily ? `｜日线收盘 ${row.dataset.daily}（${row.dataset.date}）` : '');
+  });
+  if (!box) return;
+  const q = items.find(i => i.code === state.code) || items[0];
   const chg = q.pct_chg;
   const cls = chg > 0 ? 'up' : (chg < 0 ? 'down' : '');
   const f2 = v => (v == null ? '—' : v.toFixed(2));
@@ -718,8 +744,8 @@ function renderQuotes(d){
 }
 
 async function loadQuotes(){
-  const code = state.code ? '?codes=' + encodeURIComponent(state.code) : '';
-  try { state.quotes = await api('/api/quotes' + code); renderQuotes(state.quotes); }
+  // 一次把整个自选都问了：腾讯报价支持逗号拼一批，顺手就能刷新侧栏每一行
+  try { state.quotes = await api('/api/quotes'); renderQuotes(state.quotes); }
   catch(e){ renderQuotes({ error: e.message }); }
 }
 
@@ -1070,6 +1096,20 @@ async function loadMarket(){
 function renderMarket(){
   const m = marketData || {};
   $('marketDate').textContent = m.trade_date ? `数据 ${m.trade_date}` : '';
+  // 侧栏常驻一行"大盘"：看个股时也该知道今天整体是涨是跌
+  const line = $('marketLine');
+  if (line){
+    if (m.sample && m.breadth){
+      const b = m.breadth;
+      const med = b.median_pct_chg;
+      line.innerHTML = `<div>大盘 <b>${m.trade_date || '—'}</b></div>` +
+        `<div><span style="color:var(--up)">涨 ${b.up}</span> / ` +
+        `<span style="color:var(--down)">跌 ${b.down}</span> · 中位数 ` +
+        `<b style="color:${med > 0 ? 'var(--up)' : (med < 0 ? 'var(--down)' : 'var(--muted)')}">${med == null ? '—' : (med > 0 ? '+' : '') + med + '%'}</b></div>`;
+    } else {
+      line.textContent = '';
+    }
+  }
   if (!m.sample){
     $('marketStats').innerHTML = '';
     $('marketDist').innerHTML = '';
@@ -1314,6 +1354,7 @@ document.addEventListener('visibilitychange', async () => {
     await loadRecentAlerts();
     await loadFreshness();
     await loadQuotes();
+    await loadMarket();          // 侧栏那行"大盘"要在自选视图里也能看到
     startLiveRefresh();
     pollJobs();                  // 显示上一次任务的状态
     if (state.items.length) await loadKline();

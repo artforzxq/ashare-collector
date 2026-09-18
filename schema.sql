@@ -75,6 +75,45 @@ CREATE TABLE IF NOT EXISTS bars_intraday (
   PRIMARY KEY (code, dt, period)
 );
 
+-- 龙虎榜：谁上榜、为什么上榜、净买多少（东财）。
+-- 同一只票同一天可能因为多条原因上榜，所以"上榜原因"要进主键——两条记录含义完全不同。
+CREATE TABLE IF NOT EXISTS lhb (
+  trade_date  TEXT NOT NULL,            -- 上榜日
+  code        TEXT NOT NULL,            -- 标的代码（带交易所前缀）
+  reason      TEXT NOT NULL DEFAULT '', -- 上榜原因
+  name        TEXT,                     -- 名称
+  close       REAL,                     -- 收盘价
+  pct_chg     REAL,                     -- 涨跌幅，单位：%
+  net_buy     REAL,                     -- 龙虎榜净买额，单位：元
+  buy_amount  REAL,                     -- 买入额，单位：元
+  sell_amount REAL,                     -- 卖出额，单位：元
+  turnover    REAL,                     -- 龙虎榜成交额，单位：元
+  net_ratio   REAL,                     -- 净买额占总成交比，单位：%
+  source      TEXT,                     -- 数据来源
+  updated_at  TEXT,
+  PRIMARY KEY (trade_date, code, reason)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lhb_code ON lhb (code, trade_date);
+
+-- 个股资金流：主力/超大单/大单/中单/小单净流入（东财，近约 100 个交易日）。
+-- 这是"资金"类因子唯一能拿到历史序列的免费源；实时北向 2024-08 起已停止披露。
+CREATE TABLE IF NOT EXISTS fund_flow (
+  code        TEXT NOT NULL,   -- 标的代码
+  trade_date  TEXT NOT NULL,   -- 交易日
+  close       REAL,            -- 收盘价
+  pct_chg     REAL,            -- 涨跌幅，单位：%
+  main_net    REAL,            -- 主力净流入，单位：元
+  main_ratio  REAL,            -- 主力净流入占比，单位：%
+  super_net   REAL,            -- 超大单净流入，单位：元
+  large_net   REAL,            -- 大单净流入，单位：元
+  medium_net  REAL,            -- 中单净流入，单位：元
+  small_net   REAL,            -- 小单净流入，单位：元
+  source      TEXT,
+  updated_at  TEXT,
+  PRIMARY KEY (code, trade_date)
+);
+
 CREATE TABLE IF NOT EXISTS market_breadth (
   coverage        INTEGER,          -- 参与统计的个股数：样本太少时这一行不能当全市场广度看
   trade_date         TEXT PRIMARY KEY, -- 交易日

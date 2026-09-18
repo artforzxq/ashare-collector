@@ -252,8 +252,10 @@ def snapshot_bars(conn, cfg, trade_date: str | None = None, verbose: bool = True
     if source is None:
         return {"ok": False, "message": "没有支持全市场快照的数据源"}
     trade_date = trade_date or latest_trade_date(conn, cfg)
+    # 本地代码表：腾讯那种"只能批量报价"的源需要它（东财自己能列，会忽略这个参数）
+    codes = [row["code"] for row in db.query(conn, "SELECT code FROM instruments")]
     try:
-        snapshot = source.market_snapshot(trade_date)
+        snapshot = source.market_snapshot(trade_date, codes=codes)
     except Exception as exc:
         return {"ok": False, "message": f"取全市场快照失败：{exc}"}
     if not snapshot:

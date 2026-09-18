@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, market_time, tasks
+from . import db, market_time, tasks, warehouse as warehouse_mod
 from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
@@ -131,6 +131,8 @@ def _freshness_payload(cfg: dict) -> dict:
             return row["v"] if row and row["v"] else None
 
         intraday = db.query_one(conn, "SELECT MAX(dt) AS v FROM bars_intraday")
+        now = datetime.now()
+        session = market_time.describe(conn, now)
         last_daily = db.query_one(
             conn,
             "SELECT MAX(created_at) AS v FROM data_health WHERE task LIKE 'daily%'",
@@ -139,16 +141,29 @@ def _freshness_payload(cfg: dict) -> dict:
             conn,
             "SELECT MAX(created_at) AS v FROM data_health WHERE task='screen'",
         )
+        # 分时滞后多少分钟：交易时段里这个数字大就说明没跟上（比如上午的数据看到下午）
+        intraday_age = None
+        if intraday and intraday["v"]:
+            try:
+                stamp = datetime.strptime(str(intraday["v"])[:16], "%Y-%m-%d %H:%M")
+                intraday_age = int((now - stamp).total_seconds() // 60)
+            except ValueError:
+                intraday_age = None
+        daily_date = latest("bars_daily")
         return {
             "server_time": db.now_iso(),
-            "session": market_time.describe(conn),
+            "session": session,
             "trading": market_time.is_trading_now(conn),
-            "daily": latest("bars_daily"),
+            "daily": daily_date,
+            # 今天这根日线是不是"半根"：盘中就没收盘，别当成当日收盘价看
+            "daily_partial": bool(daily_date == now.strftime("%Y-%m-%d")
+                                  and session in ("交易中", "午休", "未开盘")),
             "features": latest("features_daily"),
             "breadth": latest("market_breadth"),
             "alerts": latest("alerts"),
             "screen": latest("screen_results"),
             "intraday": intraday["v"] if intraday else None,
+            "intraday_age_min": intraday_age,
             "last_daily_run": last_daily["v"] if last_daily else None,
             "last_screen_run": last_screen["v"] if last_screen else None,
         }
@@ -621,7 +636,9 @@ def _meta_payload(cfg: dict) -> dict:
                    "min_state_days", "neutral_band")},
         "risk": {key: risk.get(key) for key in
                  ("base_cap", "target_atr_pct", "stop_buffer_pct", "atr_stop_multiple",
-                  "min_reward_risk", "cap_floor")},
+                  "max_stop_pct", "win_rate", "target_expectancy",
+                  "open_space_high_tolerance_pct", "open_space_atr_multiple",
+                  "no_resistance_rr", "cap_floor")},
         "alerts": cfg.get("alerts") or {},
         "feature_version": (cfg.get("project") or {}).get("feature_version"),
         "factors": [

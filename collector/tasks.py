@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from . import (breadth as breadth_mod, candles as candles_mod, db, features as features_mod,
-               intraday as intraday_mod, review as review_mod, risk as risk_mod,
+               intraday as intraday_mod, market_time, review as review_mod, risk as risk_mod,
                screen as screen_mod, validate, warehouse)
 from .names import display_name
 from .alerts import apply_budget, apply_cooldown, build_candidates, persist
@@ -97,6 +97,16 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
 
     summary = {"trade_date": trade_date, "codes": {}, "breadth": None, "alerts": [], "issues": []}
     _log(f"[1/7] 交易日 {trade_date}，主源 {primary.name}，备份源 {backup.name}", verbose)
+
+    # 盘中跑日终会拿到"半根日线"：状态机、关键带、提醒全都建立在一个没收盘的价上。
+    # 数据会在收盘后重跑时被覆盖（按主键 upsert），但结论得等人重跑一次，所以这里要说清楚。
+    session = market_time.describe(conn)
+    if session in ("交易中", "午休"):
+        summary["issues"].append("交易时段运行：当日日线未收盘，结论是临时的")
+        _log(f"      ! 现在是「{session}」，今天的日线还没收盘——"
+             "跑出来的状态和关键带是临时的，收盘后请再跑一次", verbose)
+        db.log_health(conn, trade_date, "local", "daily", "suspect", 0, 0.0, 0,
+                      "交易时段运行：当日日线未收盘，结论是临时的")
 
     violations = registry.category_budget_violations()
     for problem in violations:
@@ -206,6 +216,12 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
         review_mod.backfill_outcomes(conn, verbose=verbose)
     except Exception as exc:
         _log(f"      ! 回填提醒表现失败：{exc}", verbose)
+    # 结构化情绪：龙虎榜（当日）+ 资金流（观察池）。失败不影响当日流程。
+    try:
+        collect_lhb(conn, cfg, trade_date, trade_date, verbose)
+        collect_fund_flow(conn, cfg, verbose=verbose)
+    except Exception as exc:
+        _log(f"      ! 情绪数据采集失败：{exc}", verbose)
     # 筛选结果也要回填：不然只能回答"筛出来了什么"，回答不了"筛出来的后来怎么样"
     try:
         screen_mod.backfill_outcomes(conn, verbose=verbose)
@@ -232,7 +248,8 @@ def _collect_breadth(conn, source, cfg: dict, trade_date: str, verbose: bool) ->
         _log("      · 没有支持全市场快照的数据源，改用本地 K 线算广度", verbose)
     else:
         try:
-            snapshot = source.market_snapshot(trade_date)
+            codes = [row["code"] for row in db.query(conn, "SELECT code FROM instruments")]
+            snapshot = source.market_snapshot(trade_date, codes=codes)
             record = breadth_mod.from_snapshot(snapshot, trade_date, source.name)
         except Exception as exc:
             _log(f"      · 快照不可用（{exc}），改用本地 K 线算广度", verbose)
@@ -244,6 +261,8 @@ def _collect_breadth(conn, source, cfg: dict, trade_date: str, verbose: bool) ->
             _log("      ! 本地也没有当日 K 线，市场广度跳过", verbose)
             db.log_health(conn, trade_date, "local", "breadth", "failed", 0, 1.0, 0, "本地无当日 K 线")
             return None
+        # 连板高度与炸板家数：纯本地算（要往前数连续涨停，所以单独走一遍）
+        record.update(breadth_mod.board_streaks(conn, [trade_date]).get(trade_date, {}))
         covered = record["up_count"] + record["down_count"] + record["flat_count"]
         db.log_health(conn, trade_date, "local", "breadth", "ok", covered, 0.0, 0, record["source"])
 
@@ -373,6 +392,16 @@ def _extra_series(conn, cfg: dict, trade_date: str) -> dict:
     breadth_score = {
         row["trade_date"]: round((float(row["up_ratio"]) - 0.5) * 2, 4) for row in breadth_rows if row["up_ratio"] is not None
     }
+    # 连板高度：市场情绪的另一个读法（广度看"多少家涨"，连板看"最强的资金还在不在"）
+    board_by_date = {
+        row["trade_date"]: float(row["max_boards"])
+        for row in db.query(
+            conn,
+            """SELECT trade_date, max_boards FROM market_breadth
+               WHERE trade_date <= ? AND max_boards IS NOT NULL ORDER BY trade_date""",
+            (trade_date,),
+        )
+    }
 
     share_rows = db.query(
         conn, "SELECT code, trade_date, shares FROM etf_shares WHERE trade_date <= ? ORDER BY code, trade_date", (trade_date,)
@@ -387,7 +416,7 @@ def _extra_series(conn, cfg: dict, trade_date: str) -> dict:
             if index < 5 or not rows[index - 5]["shares"]:
                 continue
             etf_share_chg[row["trade_date"]] = round(row["shares"] / rows[index - 5]["shares"] - 1, 4)
-    return {"breadth_score": breadth_score, "etf_share_chg": etf_share_chg}
+    return {"breadth_score": breadth_score, "etf_share_chg": etf_share_chg, "max_boards": board_by_date}
 
 
 def _compute_features(
@@ -727,6 +756,64 @@ def collect_instrument(
         "alerts": alerts,
         "notes": summary["issues"][:3],
     }
+
+def collect_lhb(conn, cfg: dict, start: str, end: str, verbose: bool = True) -> dict:
+    """龙虎榜：把一段日期内的上榜记录落库（东财）。
+
+    这是"结构化情绪"里最硬的一类数据：谁上榜、为什么上榜、净买多少，全是数字可回测。
+    没有支持它的数据源就安静跳过——不联网也能跑完日终。
+    """
+    # 龙虎榜是收盘后才公布的：盘中问当天，上游会返回空结构并抛 'NoneType' is not subscriptable。
+    # 与其每天报一次无意义的错，不如盘中直接跳过，等收盘后再抓。
+    session = market_time.describe(conn)
+    if session in ("交易中", "午休") and end >= datetime.now().strftime("%Y-%m-%d"):
+        _log(f"      · 现在是「{session}」，龙虎榜要收盘后才公布，跳过", verbose)
+        return {"ok": False, "rows": 0, "message": "未收盘，龙虎榜还没公布"}
+    source = _source_for(_source_pool(cfg), "lhb")
+    if source is None:
+        _log("      · 没有支持龙虎榜的数据源，跳过", verbose)
+        return {"ok": False, "rows": 0, "message": "没有支持 lhb 的数据源"}
+    try:
+        rows = source.lhb(start, end)
+    except Exception as exc:
+        _log(f"      ! 龙虎榜不可用：{exc}", verbose)
+        db.log_health(conn, end, source.name, "lhb", "failed", 0, 1.0, 0, str(exc))
+        return {"ok": False, "rows": 0, "message": str(exc)}
+    for row in rows:
+        row["updated_at"] = db.now_iso()
+    written = db.upsert_rows(conn, "lhb", rows, ["trade_date", "code", "reason"]) if rows else 0
+    db.log_health(conn, end, source.name, "lhb", "ok", written, 0.0, 0, f"{start}~{end}")
+    _log(f"      龙虎榜 {written} 条（{start} ~ {end}）", verbose)
+    return {"ok": True, "rows": written, "source": source.name}
+
+
+def collect_fund_flow(conn, cfg: dict, codes=None, verbose: bool = True) -> dict:
+    """个股资金流：主力/超大单等净流入（东财，近约 100 个交易日）。"""
+    source = _source_for(_source_pool(cfg), "fund_flow")
+    if source is None:
+        _log("      · 没有支持资金流的数据源，跳过", verbose)
+        return {"ok": False, "rows": 0, "message": "没有支持 fund_flow 的数据源"}
+    codes = list(codes) if codes else [item["code"] for item in watchlist_codes(cfg)]
+    total = 0
+    failed: list[str] = []
+    for code in codes:
+        try:
+            rows = source.fund_flow(code)
+        except Exception as exc:
+            failed.append(code)
+            continue
+        for row in rows:
+            row["updated_at"] = db.now_iso()
+        if rows:
+            total += db.upsert_rows(conn, "fund_flow", rows, ["code", "trade_date"])
+    if verbose:
+        # 这个源（东财 push2his）在部分网络下不可用，逐只刷错误会淹没日志——只报一次汇总
+        note = f"      资金流：{len(codes) - len(failed)}/{len(codes)} 只、{total} 行写库"
+        if failed:
+            note += f"（{len(failed)} 只取不到；东财 push2his 在本机网络下不稳定）"
+        _log(note, verbose)
+    return {"ok": True, "rows": total, "failed": failed, "source": source.name}
+
 
 def intraday_source(cfg: dict):
     """支持当日分时线的数据源（页面上的"看分时"也走这里）。"""

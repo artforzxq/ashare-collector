@@ -5,6 +5,7 @@ rem  This file lives in windows\; the project root is its parent folder.
 rem  Usage: call "%~dp0win-run.bat" <step> [extra args]
 rem  Steps: setup init-db selftest daily report sources dashboard
 rem         tables sql dictionary rebuild auto install-sources shortcut db-shortcut
+rem         web share review backtest sync shadow screen candidates pack
 rem
 rem  Keep this file pure ASCII. cmd.exe reads a .bat byte by byte using the
 rem  console code page, so a UTF-8 file containing Chinese gets mis-parsed and
@@ -167,7 +168,10 @@ echo   11   build the field dictionary
 echo   14   local chart page (daily K line + intraday)
 echo   16   fill in how past alerts actually performed
 echo   17   parameter backtest
+echo   18   build the local full-market warehouse (run it a few times)
 echo   19   factor ledger health check
+echo   20   screen every stored symbol by pattern
+echo   21   watchlist candidates: who should be in, who should be out
 echo   10   create a desktop shortcut for the daily job
 echo.
 echo From a command line: win-run.bat STEP [args]   e.g.  win-run.bat daily
@@ -198,6 +202,7 @@ if /i "%STEP%"=="backtest"        goto :backtest
 if /i "%STEP%"=="sync"            goto :sync
 if /i "%STEP%"=="shadow"          goto :shadow
 if /i "%STEP%"=="screen"          goto :screen
+if /i "%STEP%"=="candidates"      goto :candidates
 if /i "%STEP%"=="pack"            goto :pack
 echo Unknown step: %STEP%
 exit /b 1
@@ -344,6 +349,13 @@ echo.
 if errorlevel 1 exit /b 1
 "%PY%" run.py open screen
 exit /b 0
+
+:candidates
+echo Ranking watchlist candidates from the stored screen results ...
+echo This only reads local data; nothing is added to the watchlist by itself.
+echo.
+"%PY%" run.py candidates %EXTRA%
+exit /b %ERRORLEVEL%
 
 :pack
 echo Packing the database so you can carry it to another computer ...

@@ -106,6 +106,7 @@ def compute_feature_series(
     extra = extra or {}
     breadth_by_date = extra.get("breadth_score", {})
     share_by_date = extra.get("etf_share_chg", {})
+    board_by_date = extra.get("max_boards", {})
     params = cfg.get("state", {})
 
     closes = [float(b.get("close_adj") or b.get("close")) for b in bars]
@@ -203,6 +204,7 @@ def compute_feature_series(
 
         raw["breadth_score"] = breadth_by_date.get(bar["trade_date"])
         raw["etf_share_chg"] = share_by_date.get(bar["trade_date"])
+        raw["max_boards"] = board_by_date.get(bar["trade_date"])
 
         score, contributions = registry.score_layer("state", raw)
         breakout_confirmed = 1 if (raw["donchian_break"] == 1.0 and (raw["vol_ratio_20"] or 0) >= 1.5) else 0

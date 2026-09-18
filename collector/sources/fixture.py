@@ -165,7 +165,8 @@ class FixtureSource(BaseSource):
         return rows
 
     # ---- 全市场快照（用于广度） ----
-    def market_snapshot(self, trade_date: str | None = None) -> list[dict]:
+    def market_snapshot(self, trade_date: str | None = None, codes=None) -> list[dict]:
+        """夹具自己造一整个市场，所以在意不到 codes（真实源里腾讯需要它，东财不需要）。"""
         target = trade_date or self._dates[-1]
         index_rows = self._build_bars("SH000300", "index")
         index_pct = next((r["pct_chg"] for r in index_rows if r["trade_date"] == target), 0.0) or 0.0

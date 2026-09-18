@@ -31,15 +31,54 @@ def bar(date, close, amount=1e8, pct=0.5):
 
 
 class MergeTests(unittest.TestCase):
-    def test_conflict_beyond_tolerance_is_flagged(self):
-        primary = [bar("2026-09-01", 10.0), bar("2026-09-02", 10.5)]
-        backup = [bar("2026-09-01", 10.0), bar("2026-09-02", 10.6)]  # 差 0.95% > 0.3%
+    def test_conflict_needs_both_price_and_pct_to_disagree(self):
+        """两条都不一致才是冲突——只看绝对价会把复权口径差异当成数据错误。"""
+        primary = [bar("2026-09-01", 10.0, pct=1.0), bar("2026-09-02", 10.5, pct=5.0)]
+        backup = [bar("2026-09-01", 10.0, pct=1.0), bar("2026-09-02", 10.6, pct=1.0)]
         result = merge_two_sources(primary, backup, CFG)
 
         self.assertEqual(result.quality_flag, "suspect")
         self.assertEqual(len(result.conflicts), 1)
         self.assertEqual(result.rows[1]["quality_flag"], "suspect")
         self.assertEqual(result.rows[0]["quality_flag"], "ok")
+
+    def test_impossible_pct_is_repaired_from_the_backup(self):
+        """主源在除权日会拿错前收，派生出 +53% 这种不可能的涨跌幅。
+
+        备份源那天正常 → 用它的涨跌幅把价格修正回来（价格仍用主源，保持复权基准统一），
+        否则这一天会被跳变校验直接拦掉，等于凭空丢一天数据。
+        """
+        primary = [
+            bar("2026-09-01", 10.0, pct=0.0),
+            bar("2026-09-02", 15.3, pct=53.0),      # 不可能：主板上限 10%
+        ]
+        backup = [
+            bar("2026-09-01", 10.0, pct=0.0),
+            bar("2026-09-02", 9.6, pct=-4.0),       # 备份源正常
+        ]
+        result = merge_two_sources(primary, backup, CFG)
+        fixed = result.rows[1]
+        self.assertAlmostEqual(fixed["pct_chg"], -4.0, places=4)
+        self.assertAlmostEqual(fixed["pre_close"], 15.3 / 0.96, places=3)
+        self.assertEqual(fixed["quality_flag"], "suspect")
+        self.assertTrue(any("修正" in note for note in result.notes))
+        # 修完就不该再被跳变校验拦下
+        checked = validate_bars(result.rows, CFG)
+        self.assertEqual(len(checked.blocked), 0)
+
+    def test_rebase_difference_is_a_note_not_a_conflict(self):
+        """绝对价差 >0.3% 但涨跌幅一致 → 复权基准不同，记说明，不算冲突。
+
+        实测：同一只票两源收盘价能差 2.7%（各自的前复权基准不同），
+        可每天的涨跌幅差不到 0.1 个百分点——这不是数据错误。
+        """
+        primary = [bar("2026-09-01", 10.0, pct=0.5), bar("2026-09-02", 10.05, pct=0.5)]
+        backup = [bar("2026-09-01", 10.3, pct=0.5), bar("2026-09-02", 10.35, pct=0.5)]
+        result = merge_two_sources(primary, backup, CFG)
+
+        self.assertEqual(result.quality_flag, "ok")      # 没有冲突，只有说明
+        self.assertEqual(result.conflicts, [])
+        self.assertTrue(any("复权" in note for note in result.notes))
 
     def test_small_difference_is_ignored(self):
         primary = [bar("2026-09-01", 10.0)]

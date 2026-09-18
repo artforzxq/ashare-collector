@@ -49,6 +49,18 @@ def _num(value) -> float | None:
         return None
 
 
+def _prefixed(symbol: str) -> str:
+    """6 位数字代码 → 带上交易所前缀（与项目其它地方的口径一致）。"""
+    text = str(symbol or "").strip().upper()
+    if text[:2] in ("SH", "SZ", "BJ"):
+        return text
+    if text.startswith(("6", "9", "5")):
+        return "SH" + text
+    if text.startswith(("4", "8")):
+        return "BJ" + text
+    return "SZ" + text
+
+
 def _symbol(value) -> str:
     """交易所返回的代码统一成 6 位数字，方便和观察池对上。"""
     text = str(value or "").strip()
@@ -105,6 +117,8 @@ class AkshareSource(BaseSource):
         "market_snapshot",
         "intraday_snapshot",
         "etf_shares",
+        "lhb",
+        "fund_flow",
         "margin",
         "trade_calendar",
     }
@@ -159,7 +173,8 @@ class AkshareSource(BaseSource):
             row["source"] = self.name
         return rows
 
-    def market_snapshot(self, trade_date: str | None = None) -> list[dict]:
+    def market_snapshot(self, trade_date: str | None = None, codes=None) -> list[dict]:
+        """全市场快照（东财）。它自己能列出全市场，所以 codes 用不上，收下只是为了接口一致。"""
         """全市场快照。
 
         快路径：一次请求拿全市场（东财允许大 pageSize）。akshare 自带的实现要翻五十多页、
@@ -316,6 +331,106 @@ class AkshareSource(BaseSource):
         return rows
 
     # ---- ETF 份额 ----
+
+    @staticmethod
+    def _pick(columns, *keywords) -> str | None:
+        """按关键字找列名。上游改列名是常事（规格里专门提醒过），所以不硬编码。
+
+        要求所有关键字都出现在列名里，命中多个则取最短的那个（更精确）。
+        """
+        hits = [c for c in columns if all(k in str(c) for k in keywords)]
+        return sorted(hits, key=len)[0] if hits else None
+
+    def lhb(self, start: str, end: str) -> list[dict]:
+        """龙虎榜（东财）：一段日期内的全部上榜记录。
+
+        同一只票同一天可能因为多条原因上榜，所以 reason 要留着——它往往是最有信息量的那部分
+        （"日涨幅偏离值达 7%"和"机构专用席位买入"完全是两回事）。
+        """
+        ak = self._ak()
+        try:
+            df = ak.stock_lhb_detail_em(start_date=start.replace("-", ""), end_date=end.replace("-", ""))
+        except Exception as exc:
+            raise DataSourceError(f"龙虎榜请求失败：{exc}") from exc
+
+        columns = list(df.columns)
+        code_col = self._pick(columns, "代码")
+        day_col = self._pick(columns, "上榜日")
+        if not code_col or not day_col:
+            raise DataSourceError(f"龙虎榜列名对不上：{columns}")
+        name_col = self._pick(columns, "名称")
+        reason_col = self._pick(columns, "原因")
+        close_col = self._pick(columns, "收盘价")
+        pct_col = self._pick(columns, "涨跌幅")
+        net_col = self._pick(columns, "净买额")
+        buy_col = self._pick(columns, "买入额")
+        sell_col = self._pick(columns, "卖出额")
+        amount_col = self._pick(columns, "成交额")
+        ratio_col = self._pick(columns, "净买额", "占")
+
+        rows: list[dict] = []
+        for item in df.to_dict("records"):
+            symbol = str(item.get(code_col) or "").strip()
+            day = str(item.get(day_col) or "")[:10]
+            if not symbol or not day:
+                continue
+            code = _prefixed(symbol)
+            rows.append({
+                "trade_date": day,
+                "code": code,
+                "name": str(item.get(name_col) or "") if name_col else "",
+                "reason": str(item.get(reason_col) or "") if reason_col else "",
+                "close": _num(item.get(close_col)) if close_col else None,
+                "pct_chg": _num(item.get(pct_col)) if pct_col else None,
+                "net_buy": _num(item.get(net_col)) if net_col else None,
+                "buy_amount": _num(item.get(buy_col)) if buy_col else None,
+                "sell_amount": _num(item.get(sell_col)) if sell_col else None,
+                "turnover": _num(item.get(amount_col)) if amount_col else None,
+                "net_ratio": _num(item.get(ratio_col)) if ratio_col else None,
+                "source": self.name,
+            })
+        return rows
+
+    def fund_flow(self, code: str) -> list[dict]:
+        """个股资金流（东财，近约 100 个交易日）：主力/超大单/大单/中单/小单净流入。
+
+        单位：元；占比单位：%。这是"资金"类因子唯一能拿到**历史序列**的免费源
+        （实时北向那条 2024 年 8 月起就停止披露了，规格里也已排除）。
+        """
+        ak = self._ak()
+        exchange, symbol = split_code(code)
+        # 资金流走东财 push2his，这条在部分网络下很脆（实测连续请求会被断连），
+        # 所以间隔放大到 2 秒，宁可慢也别把它打成黑名单。
+        time.sleep(2.0)
+        try:
+            df = ak.stock_individual_fund_flow(stock=symbol, market=exchange.lower())
+        except Exception as exc:
+            raise DataSourceError(f"资金流请求失败：{exc}") from exc
+
+        columns = list(df.columns)
+        day_col = self._pick(columns, "日期")
+        if not day_col:
+            raise DataSourceError(f"资金流列名对不上：{columns}")
+        keep = {
+            "close": self._pick(columns, "收盘价"),
+            "pct_chg": self._pick(columns, "涨跌幅"),
+            "main_net": self._pick(columns, "主力", "净额"),
+            "main_ratio": self._pick(columns, "主力", "占比"),
+            "super_net": self._pick(columns, "超大单", "净额"),
+            "large_net": self._pick(columns, "大单", "净额"),
+            "medium_net": self._pick(columns, "中单", "净额"),
+            "small_net": self._pick(columns, "小单", "净额"),
+        }
+        rows: list[dict] = []
+        for item in df.to_dict("records"):
+            day = str(item.get(day_col) or "")[:10]
+            if not day:
+                continue
+            row = {"code": code, "trade_date": day, "source": self.name}
+            for field, column in keep.items():
+                row[field] = _num(item.get(column)) if column else None
+            rows.append(row)
+        return rows
 
     def etf_shares(self, codes, trade_date: str) -> list[dict]:
         """ETF 份额与净值。

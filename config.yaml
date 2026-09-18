@@ -4,14 +4,16 @@
 project:
   name: ashare-collector
   spec_version: "1.1"
-  feature_version: "v1.1"   # 改权重或规则时必须改这里，审计表靠它追溯
+  # v1.2：上方无阻力带时按保守倍数处理，不再跳过盈亏比检查
+  # v1.3：用期望值（胜率×盈亏比）替代纯盈亏比；结构位太远时退到 ATR 止损，不再整只票否决
+  feature_version: "v1.3"
   db_path: data/market.db
   timezone: Asia/Shanghai
 
 watchlist:
   indices: [SZ399006]
-  etfs: [SH510300, SH510050, SZ159919, SH510500, SH588000]
-  stocks: [SZ000333]
+  etfs: [SZ159919, SH510500, SH588000]
+  stocks: [SZ000333, SZ000063, SH600487]
 
 # 标的池：筛选和回测**共用**的成交额门槛（小票要带镣铐）。
 # 本地仓库是全市场同步来的，里面躺着大量一天只成交几百万的票：它们不是机会，
@@ -80,10 +82,22 @@ warehouse:
 # 风险层：仓位上限与止损位怎么算（规格里风险层的出口就是这两个数）
 risk:
   base_cap: {up: 0.8, range: 0.4, down: 0.0}   # 各状态下的基准仓位
+  probe_cap: 0.3             # 下跌趋势里出现反转确认时的试探仓上限
   target_atr_pct: 2.0        # 目标波动率，实际波动比它大就等比减仓
   stop_buffer_pct: 0.5       # 止损放在支撑带下沿再往下留 0.5%
   atr_stop_multiple: 2.0     # 没有支撑带时，用 2 倍 ATR 当止损
-  min_reward_risk: 2.0       # 期望盈亏比，达不到就减仓
+  max_stop_pct: 8.0          # 止损离现价超过这么多就放弃（结构位太远时退到 ATR 止损）
+  # 判断"够不够格"用的不是盈亏比，是期望值：期望(R) = 胜率 × 盈亏比 − (1 − 胜率)。
+  # 只看盈亏比会误判——0.8 的盈亏比配 70% 胜率是赚的，3.0 配 20% 胜率是亏的。
+  # 胜率由回测给出建议值（跑 backtest 会打印），期望 ≤ 0 直接 0 仓。
+  win_rate: 0.5
+  target_expectancy: 0.5     # 期望达到这么多 R 给满缩放，低于它按比例缩
+  # 上方没有阻力带的两种情况，处理方式不同：
+  #   贴近 250 日高点（容差内）→ 上方本来是真空，用 N 倍 ATR 估目标，别把创新高的票排除掉
+  #   其余                    → 数据不足，按保守倍数算，宁可不做
+  open_space_high_tolerance_pct: 8.0
+  open_space_atr_multiple: 3.0
+  no_resistance_rr: 1.0
   cap_floor: 0.3             # 缩放系数的下限，避免直接归零
 
 # 值得盯的形态：筛选条件全部写成数据，加一条就是加一段配置，不用改代码。
@@ -176,6 +190,13 @@ screen:
         - {field: state, op: "==", value: up}
         - {field: raw_values.dist_to_level, op: "between", value: [-1.5, 1.5]}
 
+# 观察池候选：从筛选结果里挑"值得进池子盯着"的票（只读本地数据，不会自己改观察池）。
+# 指数和 ETF 是固定配置，不参与轮换；这里排的是个股那一档。
+candidates:
+  days: 20        # 回看多少个筛选日
+  top: 20         # 打印多少条候选
+  min_hits: 2     # 至少被命中几次才算候选（1 次是噪声）
+
 # 指标台账：role = primary / modifier / veto；status = candidate / shadow / active / retired
 # 类别权重预算：trend ≤ 0.40，structure ≤ 0.20，volume ≤ 0.25，volatility ≤ 0.15，fund+sentiment ≤ 0.10
 factors:
@@ -267,6 +288,19 @@ factors:
     status: shadow
     source_field: breadth_score
     normalize: {type: linear, x0: -1.0, x1: 1.0}
+
+  # 连板高度：市场情绪的另一个读法。广度回答"多少家涨"，
+  # 连板高度回答"最强的资金还在不在"——两个都放观察期，先记录不计分。
+  - factor_id: board_streak
+    name: 连板高度
+    layer: state
+    role: modifier
+    category: sentiment
+    weight: 0.0
+    min_samples: 120
+    status: shadow
+    source_field: max_boards
+    normalize: {type: linear, x0: 0.0, x1: 8.0}
 
   - factor_id: etf_share
     name: ETF 份额变化

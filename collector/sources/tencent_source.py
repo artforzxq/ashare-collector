@@ -99,7 +99,9 @@ def _parse_intraday(payload: dict, symbol: str, code: str) -> list[dict]:
 
 class TencentSource(BaseSource):
     name = "tencent"
-    capabilities = {"daily_bars", "intraday_snapshot", "intraday_bars", "trade_calendar"}
+    capabilities = {"daily_bars", "intraday_snapshot", "intraday_bars", "market_snapshot",
+                    "trade_calendar"}
+    BATCH = 50          # 报价接口一次拼多少只：实测几十只没问题，太多容易超长被拒
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -186,7 +188,14 @@ class TencentSource(BaseSource):
                     "volume": volume,
                     # 腾讯不返回成交额，用成交量 × 均价估算（指数除外，见上）
                     "amount": amount,
+                    # 腾讯日线不返回成交额，上面那行是"量 × 均价"估算的——标记出来，
+                    # 交叉校验时用宽松容差，免得天天把估算误差报成数据冲突。
+                    "amount_estimated": True,
                     "pct_chg": pct_chg,
+                    # 派生出来的涨跌幅不该超过涨跌停上限（北交所 30% 是最大的一档）：
+                    # 超了说明前收不可靠——实测腾讯在除权日给出过错的前收，算出 +53%。
+                    # 这里只标记，具体怎么处置交给校验层（它的跳变阻断会拦下这种行）。
+                    "quality_flag": "suspect" if (pct_chg is not None and abs(pct_chg) > 31.0) else "ok",
                     "adj_factor": 1.0,
                     "close_adj": close,      # 取的就是前复权价
                     "source": self.name,
@@ -194,6 +203,45 @@ class TencentSource(BaseSource):
             )
             previous_close = close
         return [row for row in rows if start <= row["trade_date"] <= end]
+
+    def market_snapshot(self, trade_date: str | None = None, codes=None) -> list[dict]:
+        """全市场快照：分批问报价接口。
+
+        东财那条"一次拿全市场"的接口在部分网络下直接被断（实测 RemoteDisconnected），
+        而报价接口走 443、稳定得多——代价是要自己提供代码表（调用方从本地 instruments 拿）。
+        5574 只票按 50 只一批 ≈ 112 次请求，配合 0.5 秒间隔大约 1 分钟。
+        """
+        wanted = [str(code).strip().upper() for code in (codes or []) if str(code).strip()]
+        if not wanted:
+            raise DataSourceError("腾讯快照需要代码表：调用方要传入 codes（本地 instruments 表）")
+
+        rows: list[dict] = []
+        batches = failed = 0
+        for start in range(0, len(wanted), self.BATCH):
+            chunk = wanted[start:start + self.BATCH]
+            batches += 1
+            try:
+                quotes = self.intraday_snapshot(chunk)
+            except DataSourceError:
+                failed += 1
+                continue
+            for quote in quotes:
+                rows.append({
+                    "code": quote["code"],
+                    "trade_date": trade_date,
+                    "open": quote.get("open"),
+                    "high": quote.get("high"),
+                    "low": quote.get("low"),
+                    "close": quote.get("close"),
+                    "pre_close": quote.get("pre_close"),
+                    "pct_chg": quote.get("pct_chg"),
+                    "volume": quote.get("volume"),
+                    "amount": quote.get("amount"),
+                    "source": self.name,
+                })
+        if batches and failed == batches:
+            raise DataSourceError("腾讯快照全部批次都失败了（检查网络或代码表）")
+        return [row for row in rows if row["close"] and row["open"] and row["high"] and row["low"]]
 
     def intraday_snapshot(self, codes) -> list[dict]:
         """一次请求拿多只最新价（腾讯的 q= 接口支持逗号拼接）。

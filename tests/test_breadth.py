@@ -44,6 +44,76 @@ class SummarizeTests(unittest.TestCase):
         self.assertIsNone(breadth.summarize([], "d", "t"))
 
 
+class BoardStreakTests(unittest.TestCase):
+    """连板高度与炸板：只能靠本地日线跨日算，不许联网。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=root)
+        self.cfg["_db_path"] = str(root / "t.db")
+        self.conn = db.connect(self.cfg["_db_path"])
+        db.init_db(self.conn, PROJECT_ROOT / "schema.sql")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _bar(self, code, day, close, pre_close, high=None):
+        return {"code": code, "trade_date": day, "open": pre_close, "high": high or close,
+                "low": min(close, pre_close), "close": close, "pre_close": pre_close,
+                "pct_chg": round((close / pre_close - 1) * 100, 4) if pre_close else None,
+                "volume": 1000.0, "amount": 1e5, "source": "test"}
+
+    def test_counts_consecutive_limit_ups(self):
+        # 三连板：10 → 11 → 12.1 → 13.31（每天都是主板 10% 的涨停价）
+        rows = [
+            self._bar("SH600000", "2026-01-05", 10.0, 10.0),
+            self._bar("SH600000", "2026-01-06", 11.0, 10.0),
+            self._bar("SH600000", "2026-01-07", 12.10, 11.0),
+            self._bar("SH600000", "2026-01-08", 13.31, 12.10),
+        ]
+        db.upsert_rows(self.conn, "bars_daily", rows, ["code", "trade_date"])
+        out = breadth.board_streaks(self.conn, ["2026-01-06", "2026-01-07", "2026-01-08"])
+        self.assertEqual(out["2026-01-06"]["max_boards"], 1)
+        self.assertEqual(out["2026-01-07"]["max_boards"], 2)
+        self.assertEqual(out["2026-01-08"]["max_boards"], 3)
+
+    def test_a_broken_board_is_not_a_streak(self):
+        # 盘中摸到涨停价但收盘没封住 → 算炸板，不算涨停
+        rows = [
+            self._bar("SH600000", "2026-01-05", 10.0, 10.0),
+            self._bar("SH600000", "2026-01-06", 10.5, 10.0, high=11.0),
+        ]
+        db.upsert_rows(self.conn, "bars_daily", rows, ["code", "trade_date"])
+        out = breadth.board_streaks(self.conn, ["2026-01-06"])
+        self.assertEqual(out["2026-01-06"]["max_boards"], 0)
+        self.assertEqual(out["2026-01-06"]["broken_limit_count"], 1)
+
+    def test_board_limits_follow_the_code(self):
+        # 创业板 +10% 不是涨停，+20% 才是
+        rows = [
+            self._bar("SZ300001", "2026-01-05", 10.0, 10.0),
+            self._bar("SZ300001", "2026-01-06", 11.0, 10.0),   # +10%
+        ]
+        db.upsert_rows(self.conn, "bars_daily", rows, ["code", "trade_date"])
+        self.assertEqual(breadth.board_streaks(self.conn, ["2026-01-06"])["2026-01-06"]["max_boards"], 0)
+
+    def test_suspension_breaks_the_streak(self):
+        # 中间停牌几天（没有 K 线，但那几天是交易日）→ 连板断掉
+        rows = [
+            self._bar("SH600000", "2026-01-05", 11.0, 10.0),
+            self._bar("SH600000", "2026-01-09", 12.10, 11.0),
+        ]
+        db.upsert_rows(self.conn, "bars_daily", rows, ["code", "trade_date"])
+        db.upsert_rows(self.conn, "trade_calendar", [
+            {"trade_date": day, "is_trading_day": 1}
+            for day in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")
+        ], ["trade_date"])
+        out = breadth.board_streaks(self.conn, ["2026-01-09"])
+        self.assertEqual(out["2026-01-09"]["max_boards"], 1)   # 断过，重新数
+
+
 class LocalBreadthTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -470,6 +470,12 @@ def render_report(result: dict, top: int = 15) -> str:
     base20 = result["results"][0]["base20"]
     lines.append(f"基准（随便哪天买）：5 日 {_cell(base5, 2, '%', True)}，"
                  f"20 日 {_cell(base20, 2, '%', True)}")
+    # 风险层的期望值口径需要胜率输入——这里给出这批数据量出来的建议值
+    current_row = next((r for r in result["results"] if r["label"].startswith(current_label)), None)
+    if current_row and current_row.get("win20") is not None:
+        lines.append(f"当前参数的 20 日胜率 {current_row['win20']:.0f}%（{current_row['n20']} 次信号）"
+                     f"—— 建议把 config.yaml 的 risk.win_rate 设成 {current_row['win20'] / 100:.2f}"
+                     "（风险层用它算期望值）")
 
     table = result.get("plateau") or {}
     if table:

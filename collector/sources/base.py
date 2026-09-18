@@ -106,7 +106,9 @@ class BaseSource:
     def daily_bars(self, code: str, start: str, end: str, kind: str = "stock") -> list[dict]:
         self._missing("daily_bars")
 
-    def market_snapshot(self, trade_date: str | None = None) -> list[dict]:
+    def market_snapshot(self, trade_date: str | None = None, codes=None) -> list[dict]:
+        """全市场快照。需要枚举全市场的源（东财）可以忽略 codes；
+        只提供批量报价的源（腾讯）必须拿到 codes——它自己列不出代码表。"""
         self._missing("market_snapshot")
 
     def intraday_snapshot(self, codes: Iterable[str]) -> list[dict]:

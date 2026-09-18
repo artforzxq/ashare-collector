@@ -13,10 +13,12 @@ from pathlib import Path
 from . import (
     backtest as backtest_mod,
     breadth as breadth_mod,
+    candidates as candidates_mod,
     dashboard as dashboard_mod,
     db,
     dictionary as dictionary_mod,
     intraday as intraday_mod,
+    risk as risk_mod,
     promotion as promotion_mod,
     report as report_mod,
     review as review_mod,
@@ -26,7 +28,7 @@ from . import (
     tasks,
     warehouse as warehouse_mod,
 )
-from .config import load_config, use_fixture_sources
+from .config import load_config, use_fixture_sources, watchlist_codes
 from .sources import SOURCE_REGISTRY, build_source
 
 # 让启动脚本保持纯 ASCII 的一张表：批处理里写不出中文路径，就交给 Python 打开。
@@ -387,6 +389,97 @@ def cmd_shadow(args) -> int:
     return 0
 
 
+def cmd_riskstats(args) -> int:
+    """风险层分布：盈亏比到底在做什么、有多少被压在地板上。
+
+    用最新的关键带和日线**重算一遍**（不写库），所以它反映的是当前代码的行为，
+    而不是上次日终留下的数字。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM features_daily")
+    trade_date = row["d"] if row else None
+    if not trade_date:
+        print("还没有特征数据，先跑一次 3-每日任务")
+        conn.close()
+        return 1
+
+    codes = [item["code"] for item in watchlist_codes(cfg)]
+    items = []
+    for code in codes:
+        feature = db.query_one(
+            conn, "SELECT * FROM features_daily WHERE code=? AND trade_date=?", (code, trade_date))
+        bar = db.query_one(
+            conn, "SELECT close, high, low, volume FROM bars_daily WHERE code=? AND trade_date=?",
+            (code, trade_date))
+        bands = [dict(r) for r in db.query(
+            conn, "SELECT level_type, price_low, price_high, weight FROM levels WHERE code=? AND trade_date=?",
+            (code, trade_date))]
+        if not feature or not bar:
+            continue
+        merged = {**dict(feature), "close": bar["close"], "quality_flag": feature["data_quality_flag"]}
+        result = risk_mod.assess(merged, bands, cfg)
+        items.append({
+            "code": code,
+            "state": merged.get("state"),
+            "cap": result["position_cap"],
+            "old_cap": feature["position_cap"],
+            "rr": result["risk_reward"],
+            "expectancy": result.get("expectancy"),
+            "stop_pct": result["stop_pct"],
+            "reason": result["reason"],
+        })
+    conn.close()
+
+    if not items:
+        print("观察池里没有可算的标的")
+        return 1
+    items.sort(key=lambda x: (x["rr"] is None, x["rr"] or 0))
+    print(f"===== 风险层分布 {trade_date} =====")
+    print(f"{'代码':<10}{'状态':<7}{'盈亏比':>8}{'期望R':>8}{'止损%':>8}{'新仓位':>8}{'上次仓位':>9}")
+    for it in items:
+        rr = f"{it['rr']:.2f}" if it["rr"] is not None else "—"
+        exp = f"{it['expectancy']:+.2f}" if it.get("expectancy") is not None else "—"
+        stop = f"{it['stop_pct']:+.2f}" if it["stop_pct"] is not None else "—"
+        print(f"{it['code']:<10}{it['state'] or '—':<7}{rr:>8}{exp:>8}{stop:>8}"
+              f"{it['cap']:>8.3f}{it['old_cap'] if it['old_cap'] is not None else 0:>9.3f}")
+    values = [it["rr"] for it in items if it["rr"] is not None]
+    if values:
+        values.sort()
+        print("")
+        print(f"盈亏比：最小 {values[0]:.2f}  中位 {values[len(values) // 2]:.2f}  最大 {values[-1]:.2f}")
+    # 决定仓位的是期望值，不是盈亏比——"盈亏比低于某个数"这句话已经过时了。
+    risk_cfg = cfg.get("risk") or {}
+    target = float(risk_cfg.get("target_expectancy", 0.5))
+    win_rate = float(risk_cfg.get("win_rate", 0.5))
+    expectations = [it["expectancy"] for it in items if it.get("expectancy") is not None]
+    if expectations:
+        dead = [v for v in expectations if v <= 0]
+        thin = [v for v in expectations if 0 < v < target]
+        print(f"期望值：按胜率 {win_rate:.0%} 算，期望 ≤ 0 的 {len(dead)} 只（这些是 0 仓）；"
+              f"0 到 {target:g}R 之间的 {len(thin)} 只（仓位会被等比压缩）。")
+    missing = [it for it in items if it["rr"] is None]
+    if missing:
+        print(f"算不出盈亏比的：{len(missing)} 只（{'、'.join(it['code'] for it in missing)}）")
+    return 0
+
+
+def cmd_flows(args) -> int:
+    """结构化情绪数据：龙虎榜（按天数回补）+ 观察池的资金流。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    days = int(args.days or 1)
+    row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM bars_daily")
+    end = (row["d"] if row else None) or datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    lhb = tasks.collect_lhb(conn, cfg, start, end, verbose=True)
+    flow = tasks.collect_fund_flow(conn, cfg, verbose=True)
+    conn.close()
+    print(f"龙虎榜：{lhb.get('rows', 0)} 条（{lhb.get('message', 'ok')}）")
+    print(f"资金流：{flow.get('rows', 0)} 行（{flow.get('message', 'ok')}）")
+    return 0 if (lhb.get("ok") or flow.get("ok")) else 1
+
+
 def cmd_breadth(args) -> int:
     """用本地 K 线补市场广度：涨跌家数 / 涨跌停 / 中位数涨跌幅 / 成交额。
 
@@ -457,6 +550,20 @@ def cmd_add(args) -> int:
     if failed:
         print("失败明细：" + "；".join(failed[:5]))
     return 0 if added else 1
+
+
+def cmd_candidates(args) -> int:
+    """观察池候选清单：池子该进谁、谁该出来。
+
+    只读本地筛选结果和日线，不联网、不改配置——加不加进池子由人决定，
+    打印出来的那行 add 命令是给复制用的。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    result = candidates_mod.build(conn, cfg, days=args.days, min_hits=args.min_hits)
+    conn.close()
+    print(candidates_mod.report(result, top=args.top, cfg=cfg))
+    return 0 if result.get("ok") else 1
 
 
 def cmd_screen(args) -> int:
@@ -575,6 +682,15 @@ def build_parser() -> argparse.ArgumentParser:
     breadth.add_argument("--db", help="数据库路径")
     breadth.set_defaults(func=cmd_breadth)
 
+    riskstats = sub.add_parser("riskstats", help="风险层分布：盈亏比、止损距离、仓位上限")
+    riskstats.add_argument("--db", help="数据库路径")
+    riskstats.set_defaults(func=cmd_riskstats)
+
+    flows = sub.add_parser("flows", help="补结构化情绪数据：龙虎榜 + 观察池资金流")
+    flows.add_argument("--days", type=int, default=1, help="龙虎榜回补最近几个自然日（默认 1）")
+    flows.add_argument("--db", help="数据库路径")
+    flows.set_defaults(func=cmd_flows)
+
     sync = sub.add_parser("sync", help="全市场本地化：代码表 + 分批补历史（可反复跑）")
     sync.add_argument("--limit", type=int, help="本次最多补多少只，默认取配置 warehouse.batch_size")
     sync.add_argument("--days", type=int, help="首次回补拉多少天，默认取配置 warehouse.history_days")
@@ -609,6 +725,13 @@ def build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--no-save", action="store_true", help="只打印，不落库不写文件")
     screen.add_argument("--db", help="数据库路径")
     screen.set_defaults(func=cmd_screen)
+
+    candidates = sub.add_parser("candidates", help="观察池候选清单：谁该进池子、谁该出来")
+    candidates.add_argument("--days", type=int, help="回看多少个筛选日（默认取配置 candidates.days）")
+    candidates.add_argument("--top", type=int, help="打印多少条候选（默认取配置 candidates.top）")
+    candidates.add_argument("--min-hits", type=int, help="至少被命中几次才算候选")
+    candidates.add_argument("--db", help="数据库路径")
+    candidates.set_defaults(func=cmd_candidates)
 
     return parser
 

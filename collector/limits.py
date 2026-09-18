@@ -102,3 +102,18 @@ def at_limit_up(bar: dict, code: str = "", name: str | None = None) -> bool:
 
 def at_limit_down(bar: dict, code: str = "", name: str | None = None) -> bool:
     return at_limit(bar, code, name, up=False)
+
+
+def at_limit_price_hit(bar: dict, code: str = "", name: str | None = None, up: bool = True) -> bool:
+    """盘中是否**摸到过**涨（跌）停价：用最高价（最低价）比，不看收盘。
+
+    和 at_limit_up 的区别：那个问"收盘封没封住"，这个问"今天碰没碰到"。
+    两个一起用就能认出"炸板"——碰到了、但没封住。
+    """
+    price = bar.get("high") if up else bar.get("low")
+    pre_close = bar.get("pre_close")
+    if price is None or not pre_close:
+        return False                      # 没有最高价/前收就判不了，宁可为 False
+    pct = limit_pct(code or str(bar.get("code") or ""), name)
+    target = limit_price(float(pre_close), pct, up=up)
+    return float(price) + 1e-6 >= target if up else float(price) - 1e-6 <= target

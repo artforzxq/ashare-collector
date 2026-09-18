@@ -34,7 +34,9 @@ class FreshnessTests(unittest.TestCase):
         for key in ("daily", "features", "breadth", "intraday", "screen", "session", "trading"):
             self.assertIn(key, payload)
         self.assertIsNone(payload["daily"])
-        self.assertFalse(payload["trading"])          # 空库/非交易时段都不该是 True
+        # trading 取决于是不是交易时段，测试不该依赖运行时刻；这里只要它是布尔值
+        self.assertIsInstance(payload["trading"], bool)
+        self.assertIn(payload["session"], ("交易中", "午休", "已收盘", "未开盘", "非交易日"))
 
     def test_dates_come_from_the_tables(self):
         db.upsert_rows(self.conn, "bars_daily", [{

@@ -62,9 +62,15 @@ class RiskAssessTests(unittest.TestCase):
 
     def test_without_bands_falls_back_to_atr_stop(self):
         result = risk.assess(self.row, [], self.cfg)
-        self.assertGreater(result["position_cap"], 0)
         self.assertAlmostEqual(result["stop_level"], 100.0 - 2 * 2.0, places=3)
         self.assertIn("ATR", result["reason"])
+        # 没有关键带 → 目标按兜底的 1R 算 → 盈亏比 1.0；
+        # 1.0 的盈亏比配 50% 胜率期望正好是 0，所以这里是 0 仓（不是"跳过检查"）。
+        self.assertEqual(result["position_cap"], 0.0)
+        self.assertIn("期望", result["reason"])
+        # 胜率给高一点，同一个标的就能拿到仓位——证明决定权在期望值上
+        better = risk.assess(self.row, [], {"risk": {"win_rate": 0.6}})
+        self.assertGreater(better["position_cap"], 0)
 
     def test_config_can_override_base_cap(self):
         tight = risk.assess(self.row, self.bands, {"risk": {"base_cap": {"up": 0.4}}})
@@ -77,6 +83,59 @@ class RiskAssessTests(unittest.TestCase):
         self.assertIn("止损", text)
         self.assertIn("先不建仓",
                       risk.describe(risk.assess({**self.row, "state": "down"}, self.bands, self.cfg)))
+
+    def test_missing_resistance_band_does_not_skip_the_reward_risk_check(self):
+        """上方没有阻力带时，风控不能在"没有数据"的时候放行。
+
+        以前这种票会直接跳过盈亏比这一环——实测观察池里就有两只（有仓位、但头顶没有
+        识别出阻力带），等于没经过"上方还有多少空间"的检查就拿到了全额仓位。
+        现在按保守倍数估收益空间（config: risk.no_resistance_rr，默认 1R），缩放照常生效。
+        """
+        bands = [b for b in self.bands if b["level_type"] == "support"]
+        result = risk.assess(self.row, bands, self.cfg)
+        self.assertIsNotNone(result["risk_reward"])       # 不再是 None
+        self.assertAlmostEqual(result["risk_reward"], 1.0, places=2)
+        with_resistance = risk.assess(self.row, self.bands, self.cfg)
+        self.assertLess(result["position_cap"], with_resistance["position_cap"])
+        self.assertTrue(any("无阻力带" in note for note in result["notes"]))
+
+    def test_the_fallback_multiplier_is_configurable(self):
+        bands = [b for b in self.bands if b["level_type"] == "support"]
+        looser = risk.assess(self.row, bands, {"risk": {"no_resistance_rr": 2.0}})
+        self.assertAlmostEqual(looser["risk_reward"], 2.0, places=2)
+        self.assertGreater(looser["position_cap"], risk.assess(self.row, bands, self.cfg)["position_cap"])
+
+    def test_near_high_without_overhead_band_is_not_systematically_vetoed(self):
+        """实测回归：SZ000333 离 250 日高点只差 5.4%、头顶没有阻力带，旧规则长期 0 仓。
+
+        头顶没有阻力带有两种成因：贴着历史高点（成交密集区全在脚下，上方是真空）和
+        分箱没挑出头顶那段（数据缺失）。前者按保守 1R 算是错的——期望正好 0，
+        于是"越强的票越做不了"，等于把最强的标的系统性排除在外。
+        """
+        bands = [b for b in self.bands if b["level_type"] == "support"]
+        result = risk.assess({**self.row, "dist_to_high_250": -5.4}, bands, self.cfg)
+        self.assertGreater(result["position_cap"], 0)
+        self.assertGreater(result["risk_reward"], 1.0)
+        self.assertTrue(any("上方真空" in note for note in result["notes"]))
+
+    def test_far_from_high_target_is_capped_by_distance_to_high(self):
+        """离 250 日高点还远时，目标不超过"到高点的距离"——头顶一定有筹码，只是没被分箱挑出来。"""
+        bands = [b for b in self.bands if b["level_type"] == "support"]
+        row = {**self.row, "atr14": 8.0, "atr_pct": 8.0, "dist_to_high_250": -12.0}
+        result = risk.assess(row, bands, self.cfg)
+        # 到高点 12.0 元 vs 3 倍 ATR 24.0 元 → 取 12.0；下方风险 100 − 95×0.995 = 5.475 元
+        self.assertAlmostEqual(result["risk_reward"], 2.19, places=2)
+        self.assertTrue(any("较小者" in note for note in result["notes"]))
+        # 容差放宽到 15% 后，同一只票算"贴着高点"，改按波动率估目标
+        wider = risk.assess(row, bands, {"risk": {"open_space_high_tolerance_pct": 15.0}})
+        self.assertGreater(wider["risk_reward"], result["risk_reward"])
+
+    def test_open_space_multiple_is_configurable(self):
+        bands = [b for b in self.bands if b["level_type"] == "support"]
+        row = {**self.row, "atr14": 8.0, "atr_pct": 8.0, "dist_to_high_250": -40.0}
+        default = risk.assess(row, bands, self.cfg)                                    # 3 倍 ATR = 24 元
+        roomier = risk.assess(row, bands, {"risk": {"open_space_atr_multiple": 6.0}})  # 6 倍 ATR = 48 元
+        self.assertGreater(roomier["risk_reward"], default["risk_reward"])
 
 
 if __name__ == "__main__":

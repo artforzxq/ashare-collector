@@ -199,6 +199,12 @@ TIP
     run_py screen "$@"
     "$PY" run.py open screen
     ;;
+  candidates)
+    ensure_python || { pause; exit 1; }
+    echo "从已有的筛选结果里排出观察池候选（只读本地数据，不会自己改观察池）…"
+    echo
+    run_py candidates "$@"
+    ;;
   pack)
     ensure_python || { pause; exit 1; }
     echo "打包数据库（先确认没有程序正在用它；压缩 480MB 大约要一分钟）…"

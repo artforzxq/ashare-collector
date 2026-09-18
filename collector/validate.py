@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
+from . import limits
+
 
 @dataclass
 class MergeResult:
@@ -34,10 +36,37 @@ def _relative_diff(a: float | None, b: float | None) -> float:
     return abs(a - b) / base
 
 
+def _pct_of(row: dict) -> float | None:
+    """当日涨跌幅：优先用 pct_chg，没有就用 收盘/前收 现算。"""
+    value = row.get("pct_chg")
+    if value is not None:
+        return float(value)
+    close, pre_close = row.get("close"), row.get("pre_close")
+    if close and pre_close:
+        return (float(close) / float(pre_close) - 1) * 100
+    return None
+
+
+def _pct_points(a: float | None, b: float | None) -> float | None:
+    """两个涨跌幅差几个百分点；算不出来返回 None。"""
+    if a is None or b is None:
+        return None
+    return abs(a - b)
+
+
 def merge_two_sources(primary_rows: Sequence[dict], backup_rows: Sequence[dict], cfg: dict) -> MergeResult:
-    """以主源为基准合并备份源，逐日比对收盘价与成交额。"""
+    """以主源为基准合并备份源，逐日比对**涨跌幅**与成交额。
+
+    为什么不比绝对价：前复权价是相对"今天"倒推的，两个源的复权因子只要差一点点，
+    越久的历史差得越多——实测同一天两源收盘价 0.000% 一致，但往前几百个交易日会出现
+    成片"冲突"。那是复权口径差异，不是数据错误。所以横比看涨跌幅（复权无关），
+    绝对价不一致而涨跌幅一致时只记一条说明。
+    """
     tol_price = float(cfg["validation"].get("price_tol", 0.003))
     tol_amount = float(cfg["validation"].get("amount_tol", 0.03))
+    tol_pct = float(cfg["validation"].get("pct_tol", 0.3))     # 单位：百分点
+    # 有一边是估算值时（腾讯日线不返回成交额），用宽松容差——估算误差不该算数据冲突
+    tol_amount_estimated = float(cfg["validation"].get("amount_tol_estimated", 0.15))
 
     backup_by_date = {row["trade_date"]: row for row in backup_rows}
     merged: list[dict] = []
@@ -50,8 +79,40 @@ def merge_two_sources(primary_rows: Sequence[dict], backup_rows: Sequence[dict],
         peer = backup_by_date.get(row["trade_date"])
         if peer:
             price_diff = _relative_diff(row.get("close"), peer.get("close"))
+            level_diff = price_diff                       # 绝对价差：只用来判断"复权口径不同"
+            pct_diff = _pct_points(_pct_of(row), _pct_of(peer))
+            # 主源那天派生的涨跌幅不可能超过涨跌停上限（实测腾讯在除权日会拿错前收，
+            # 算出 +53% 这种数），而备份源正常 → 拿备份源的涨跌幅把主源修回来。
+            # 价格仍用主源（保持复权基准统一），前收按修正后的涨跌幅反推，序列依然自洽。
+            pct_self, pct_other = _pct_of(row), _pct_of(peer)
+            board_limit = limits.limit_pct(str(row.get("code") or "")) + 1.0
+            if (pct_self is not None and abs(pct_self) > board_limit
+                    and pct_other is not None and abs(pct_other) <= board_limit
+                    and row.get("close")):
+                fixed = float(pct_other)
+                record["pct_chg"] = round(fixed, 4)
+                record["pre_close"] = round(float(row["close"]) / (1 + fixed / 100), 4)
+                record["quality_flag"] = "suspect"
+                notes.append(
+                    f"{row['trade_date']} 主源涨跌幅 {pct_self:+.2f}% 超出涨跌停上限"
+                    f"（前收不可靠），已按备份源的 {fixed:+.2f}% 修正"
+                )
+                pct_diff = _pct_points(fixed, pct_other)
+            # 横比看涨跌幅（复权无关）；两边都算不出涨跌幅才退回比绝对价
+            price_bad = (pct_diff > tol_pct) if pct_diff is not None else (level_diff > tol_price)
             amount_diff = _relative_diff(row.get("amount"), peer.get("amount"))
-            if price_diff > tol_price or amount_diff > tol_amount:
+            if not price_bad and amount_diff <= tol_amount and level_diff > tol_price:
+                notes.append(
+                    f"{row['trade_date']} 两源绝对价差 {level_diff * 100:.2f}%（涨跌幅一致）"
+                    "—— 复权基准不同，不是数据错误"
+                )
+            # 只有两条都不一致才算冲突：
+            #   涨跌幅差 → 可能是复权口径差异，也可能是某一源的前收算错了（实测腾讯在除权日会错）
+            #   绝对价差 → 也可能只是复权基准不同
+            # 单独命中任一条都可能是"口径问题而非数据问题"，两条同时命中才值得报警。
+            estimated = bool(row.get("amount_estimated") or peer.get("amount_estimated"))
+            amount_limit = tol_amount_estimated if estimated else tol_amount
+            if (price_bad and level_diff > tol_price) or amount_diff > amount_limit:
                 record["quality_flag"] = "suspect"
                 conflicts.append(
                     {
@@ -60,6 +121,8 @@ def merge_two_sources(primary_rows: Sequence[dict], backup_rows: Sequence[dict],
                         "close": [row.get("close"), peer.get("close")],
                         "amount": [row.get("amount"), peer.get("amount")],
                         "price_diff": round(price_diff, 6),
+                        "pct_diff": round(pct_diff, 6) if pct_diff is not None else None,
+                        "level_diff": round(level_diff, 6),
                         "amount_diff": round(amount_diff, 6),
                     }
                 )
@@ -76,7 +139,9 @@ def merge_two_sources(primary_rows: Sequence[dict], backup_rows: Sequence[dict],
         notes.append(f"{row['trade_date']} 仅备份源有数据，已按可疑写入")
 
     merged.sort(key=lambda r: r["trade_date"])
-    flag = "suspect" if conflicts or notes else "ok"
+    # 只有真冲突才降级：notes 里既有"复权口径不同"这类说明，也有"仅备份源有数据"，
+    # 后者已经逐行标了 suspect，不该再把整段序列判成可疑。
+    flag = "suspect" if conflicts else "ok"
     if conflicts:
         notes.append(f"双源冲突 {len(conflicts)} 处")
     return MergeResult(rows=merged, quality_flag=flag, conflicts=conflicts, notes=notes)
