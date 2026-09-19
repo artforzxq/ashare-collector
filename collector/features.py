@@ -9,9 +9,12 @@ from __future__ import annotations
 from bisect import bisect_right
 from typing import Iterable, Sequence
 
+from . import candles as candles_mod
+
 # 摆动点（分型）的左右确认根数。右边要等这么多根才算确认，所以最近 span 根永远不是摆动点——
 # 这是"不用未来函数"的代价，也是它可信的原因。
-SWING_SPAN = 2
+# 口径只有一份：阈值与算法都在形态层（collector/candles.py），这里只是引用。
+SWING_SPAN = int(candles_mod.THRESHOLDS["swing_span"])
 
 
 # ---------- 基础序列工具 ----------
@@ -129,19 +132,12 @@ def _sign(value: float | None) -> float:
 
 
 def _swings(values: Sequence[float], span: int = SWING_SPAN, kind: str = "low") -> tuple[list[int], list[float]]:
-    """摆动点：左右各 span 根都不更低（更高）才算一个拐点。
+    """摆动点：算法在形态层（`candles.swings`），这里只做一层薄封装。
 
-    返回 (日期下标, 价格) 两条平行列表，下标天然递增，后面用二分查"到某天为止的最后一个"。
+    为什么不留两份：平台去重、span 口径这些细节两边各写一次，迟早会分叉，
+    而"结构低点"同时被影子因子和风险层止损候选用着——两边不一致就是隐患。
     """
-    days: list[int] = []
-    prices: list[float] = []
-    for index in range(span, len(values) - span):
-        window = values[index - span:index + span + 1]
-        extreme = min(window) if kind == "low" else max(window)
-        if values[index] == extreme:
-            days.append(index)
-            prices.append(float(values[index]))
-    return days, prices
+    return candles_mod.swings(values, span, kind)
 
 
 def _structure_at(swing_lows: tuple[list[int], list[float]],
@@ -196,9 +192,10 @@ def compute_feature_series(
     closes = [float(b.get("close_adj") or b.get("close")) for b in bars]
     highs = [float(b["high"]) for b in bars]
     lows = [float(b["low"]) for b in bars]
-    # 量能一律用"成交额"；指数拿不到成交额（成交量 × 点位不是金额），退回用成交量。
-    # 同一个标的内部口径统一，所以量比、z-score 这些相对指标仍然可比。
-    amounts = [float(b.get("amount") or b.get("volume") or 0.0) for b in bars]
+    # 量能的定义在形态层（`candles.flow`）：优先成交额，指数拿不到时退回成交量。
+    # 这里与形态层的"放量"共用同一个口径——以前两边各写一句，同一天会出现
+    # "特征层说放量、形态层说没放量"。
+    amounts = [candles_mod.flow(b) for b in bars]
     pcts = [b.get("pct_chg") for b in bars]
     # 换手率：只有 baostock 给（腾讯、新浪都不给），所以往下走的时候要容忍缺值
     turnovers: list[float | None] = []

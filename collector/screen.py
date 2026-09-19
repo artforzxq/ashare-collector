@@ -368,8 +368,11 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
             continue
         scanned += 1
         name = display_name(code, _db_name(conn, code)) or code
+        # 摆动点算一次、往下传：回放要在这条序列上跑上百次 analyze，
+        # 每次都重扫窗口的话，光摆动点就是几亿次比较（实测会拖慢一倍以上）。
+        ctx = candles_mod.context(bars)["graphic"]
         for position in range(max(0, len(bars) - days), len(bars)):
-            candle = candles_mod.analyze(bars, position)
+            candle = candles_mod.analyze(bars, position, None, ctx)
             row = build_row(code, name, series[position], bars[position], candle)
             trade_date = row.get("trade_date")
             if not trade_date:
