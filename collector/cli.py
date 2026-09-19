@@ -18,6 +18,7 @@ from . import (
     dashboard as dashboard_mod,
     db,
     dictionary as dictionary_mod,
+    doctor as doctor_mod,
     intraday as intraday_mod,
     newstock as newstock_mod,
     notify,
@@ -123,26 +124,14 @@ def cmd_sources(args) -> int:
     start = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
     print(f"数据源自检（用 {start} ~ {today} 的沪深300做探针）：")
 
-    for name in SOURCE_REGISTRY:
-        if name in ("fixture", "fixture_alt", "csv"):
-            continue
-        try:
-            source = build_source(name, cfg)
-            ok, note = source.is_available()
-        except Exception as exc:  # 构建期失败也要给出可读结论
-            print(f"  {name:<10} 装没装：否    {exc}")
-            continue
-        if not ok:
-            print(f"  {name:<10} 装没装：否    {note}")
-            continue
-        if "daily_bars" not in getattr(source, "capabilities", set()):
-            print(f"  {name:<10} 装没装：是    不支持日线接口")
-            continue
-        try:
-            rows = source.daily_bars("SH000300", start, today, "index")
-            print(f"  {name:<10} 装没装：是    ✅ 真取到 {len(rows)} 根日线")
-        except Exception as exc:
-            print(f"  {name:<10} 装没装：是    ❌ 取数失败：{type(exc).__name__} {str(exc)[:110]}")
+    # 实现只有一份：doctor.probe_sources（体检也用它）
+    for item in doctor_mod.probe_sources(cfg):
+        if not item["installed"]:
+            print(f"  {item['name']:<10} 装没装：否    {item['note']}")
+        elif item["ok"]:
+            print(f"  {item['name']:<10} 装没装：是    ✅ 真取到 {item['bars']} 根日线")
+        else:
+            print(f"  {item['name']:<10} 装没装：是    ❌ {item['note']}")
     print("")
     print("说明：列出的都是免费源，不需要账号。哪个显示 ✅ 就说明你的网络能连上它；")
     print("      主源连不上时，全市场同步会自动改用能连上的那个（见 config.yaml 的 sources）。")
@@ -169,6 +158,23 @@ def cmd_push(args) -> int:
         print("")
         print(result["content"])
     return 0 if result.get("ok") or result.get("skipped") else 1
+
+
+def cmd_doctor(args) -> int:
+    """环境体检：Python / 依赖 / 数据库 / 配置，只读，不修东西。"""
+    cfg = _prepare(args)
+    probe = bool(getattr(args, "sources", False))
+    if probe:
+        print("正在对每个数据源真取一次数（沪深300 当探针），大约 10~30 秒 …\n")
+    result = doctor_mod.report(cfg, db_path=args.db, probe=probe)
+    print(doctor_mod.render(result))
+    if not result["python"]["ok"] or not result["modules"]["ok"]:
+        return 1
+    if probe and not result["sources"]["usable"]:
+        return 1
+    if not result["database"]["ok"] and result["database"]["exists"]:
+        return 1          # 库在但有问题（缺表/损坏/空）→ 非零，好让脚本能判
+    return 0
 
 
 def cmd_listings(args) -> int:
@@ -832,6 +838,12 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--backtest", action="store_true", help="审最近一次回测的摘要")
     analyze.add_argument("--db", help="数据库路径")
     analyze.set_defaults(func=cmd_analyze)
+
+    doctor = sub.add_parser("doctor", help="环境体检：Python / 依赖 / 数据库 / 配置（只读）")
+    doctor.add_argument("--db", help="数据库路径（默认取配置）")
+    doctor.add_argument("--sources", action="store_true",
+                        help="顺便对每个数据源真取一次数（联网，10~30 秒）")
+    doctor.set_defaults(func=cmd_doctor)
 
     listings = sub.add_parser("listings", help="新股与次新：上市多久、几个板、上市以来涨了多少")
     listings.add_argument("--limit", type=int, help="每类最多读多少只（默认取配置 newstock.limit）")

@@ -2,7 +2,7 @@
 # ============================================================
 #  共享启动器（macOS 端）。Windows 端对应文件：win-run.bat
 #  用法：bash _mac-run.sh <步骤> [附加参数]
-#  步骤：setup init-db selftest daily report sources dashboard
+#  步骤：setup init-db selftest daily report sources dashboard doctor
 #        tables sql dictionary rebuild auto install-sources shortcut push
 #
 #  运行环境默认放在 ~/ashare-env，刻意不放进项目文件夹：
@@ -32,6 +32,14 @@ adapters_ready() {
   [ -f "$DEPS" ] || return 1
   head -n 1 "$DEPS" 2>/dev/null | grep -q '^ok' 2>/dev/null || return 1
   return 0
+}
+
+# 数据库：不校验"装没装"（它是文件，用到就建），但**缺了就顺手建**：
+# 全是 CREATE TABLE IF NOT EXISTS，跑一次 init-db 就有一张空库，之后跑日终才有数据。
+ensure_db() {
+  [ -f data/market.db ] && return 0
+  echo "还没有数据库，先建一张空库（之后跑 3-每日任务 才会有数据）…"
+  "$PY" run.py init-db >/dev/null
 }
 
 install_adapters() {
@@ -104,9 +112,48 @@ ensure_python() {
   setup_python
 }
 
-run_py() { "$PY" run.py "$@"; }
+run_py() { ensure_db; "$PY" run.py "$@"; }
+
+usage() {
+  cat <<'TIP'
+这是共享启动器，给带编号的 .command 文件调用，不用自己打开。
+要跑什么，双击 macos/ 里对应的那个：
+
+   0-安装环境      准备 Python 环境（每台电脑第一次）
+   2-自检          离线夹具跑通全链路
+   3-每日任务      抓行情 → 算状态 → 出提醒
+   7-看数据库      生成网页版表浏览器
+  11-生成字段说明  导出 字段说明.md
+  14-看盘页面      本地看盘界面（日常主力）
+  16-信号复盘      回填提醒的真实表现
+  17-参数回测      扫状态机参数，看哪组真有效
+  18-全市场同步    分批补全市场历史（可反复点）
+  19-影子因子体检  影子因子够不够格转正
+  20-全市场筛选    按形态扫本地全部标的
+  21-观察池候选    谁该进池子、谁该出来
+  22-历史重放      把筛选条件在过去每一天重跑
+  23-推送简报      把当天简报推到手机
+  24-自动运行      每个工作日收盘后自动跑（开关）
+  25-环境体检      Python / 依赖 / 数据库 / 配置 一次看全
+  10-创建桌面快捷方式
+
+命令行用法：bash macos/_mac-run.sh <步骤> [参数]
+  例如：bash macos/_mac-run.sh daily
+        bash macos/_mac-run.sh doctor
+        bash macos/_mac-run.sh push --test
+
+可用步骤：setup init-db selftest daily report sources dashboard doctor
+          tables sql dictionary rebuild auto install-sources shortcut push
+          web share review backtest sync shadow screen candidates replay pack
+TIP
+}
 
 case "$STEP" in
+  "")
+    usage
+    pause
+    exit 0
+    ;;
   setup)
     if [ -x "$PY" ] && "$PY" -c "import yaml" >/dev/null 2>&1; then
       echo "运行环境已经装好了：$VENV"
@@ -146,6 +193,13 @@ case "$STEP" in
   sources)
     ensure_python || { pause; exit 1; }
     run_py sources
+    ;;
+  doctor)
+    ensure_python || { pause; exit 1; }
+    echo "体检内容：Python / 依赖 / 数据源可用性 / 数据库 / 配置。只读，不会改任何东西。"
+    echo "会真的取一次数（沪深300 当探针）来看哪个数据源现在能用，大约 10~30 秒。"
+    echo
+    run_py doctor --sources
     ;;
   install-sources)
     ensure_python || { pause; exit 1; }
@@ -190,6 +244,9 @@ TIP
     ;;
   auto)
     ensure_python || exit 1
+    # 后台任务不看日志，所以这里要把它记下来：库缺了建库、环境有问题先说清楚
+    ensure_db
+    run_py doctor >/dev/null 2>&1 || echo "  [!] 环境体检有问题，跑一次 25-环境体检 看看"
     run_py daily --quiet
     run_py report
     run_py push

@@ -5,7 +5,7 @@ rem  This file lives in windows\; the project root is its parent folder.
 rem  Usage: call "%~dp0win-run.bat" <step> [extra args]
 rem  Steps: setup init-db selftest daily report sources dashboard
 rem         tables sql dictionary rebuild auto install-sources shortcut db-shortcut
-rem         web share review backtest sync shadow screen candidates pack push
+rem         web share review backtest sync shadow screen candidates pack push doctor
 rem
 rem  Keep this file pure ASCII. cmd.exe reads a .bat byte by byte using the
 rem  console code page, so a UTF-8 file containing Chinese gets mis-parsed and
@@ -173,6 +173,9 @@ echo   19   factor ledger health check
 echo   20   screen every stored symbol by pattern
 echo   21   watchlist candidates: who should be in, who should be out
 echo   22   replay the screen criteria over history (real 5/20-day results)
+echo   23   push today's briefing to the phone
+echo   24   turn the daily job into a scheduled task (on / off)
+echo   25   environment check: python / packages / database / config
 echo   10   create a desktop shortcut for the daily job
 echo.
 echo From a command line: win-run.bat STEP [args]   e.g.  win-run.bat daily
@@ -183,6 +186,12 @@ exit /b 0
 rem ---- dispatch ------------------------------------------------
 
 :dispatch
+rem A missing database is not an error: init-db creates an empty one (every
+rem statement is CREATE TABLE IF NOT EXISTS), the daily job fills it later.
+if not exist "data\market.db" (
+  echo No database yet - creating an empty one. Run 3-daily to fill it.
+  "%PY%" run.py init-db >nul 2>&1
+)
 if /i "%STEP%"=="init-db"         goto :init_db
 if /i "%STEP%"=="rebuild"         goto :rebuild
 if /i "%STEP%"=="selftest"        goto :selftest
@@ -207,6 +216,7 @@ if /i "%STEP%"=="candidates"      goto :candidates
 if /i "%STEP%"=="replay"          goto :replay
 if /i "%STEP%"=="pack"            goto :pack
 if /i "%STEP%"=="push"            goto :push
+if /i "%STEP%"=="doctor"          goto :doctor
 echo Unknown step: %STEP%
 exit /b 1
 
@@ -382,4 +392,13 @@ rem The token lives in data\pushplus.token (gitignored) or ASHARE_PUSHPLUS_TOKEN
 echo Pushing today's briefing to your phone ...
 echo.
 "%PY%" run.py push %EXTRA%
+exit /b %ERRORLEVEL%
+
+:doctor
+rem Environment check: python / packages / data sources / database / config.
+rem Read-only. The --sources flag really fetches once per adapter (takes ~10-30s).
+echo Checking the environment (python, packages, data sources, database, config) ...
+echo This really fetches data once per adapter to see which ones work right now.
+echo.
+"%PY%" run.py doctor --sources %EXTRA%
 exit /b %ERRORLEVEL%
