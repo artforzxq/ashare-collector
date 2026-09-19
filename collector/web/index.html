@@ -2094,7 +2094,9 @@ function stripOverflows(){
 function stripTick(){
   const el = $('freshness');
   if (!el) return;
-  if (document.hidden || el.matches(':hover') || el.matches(':focus-within')) return;
+  // 注意别在 tick 里判断 document.hidden：有些环境（无头浏览器、部分内嵌视图）
+  // 会一直报 hidden，滚动就永远不动。可见性交给下面的 visibilitychange 管。
+  if (el.matches(':hover') || el.matches(':focus-within')) return;
   if (!stripOverflows()){ el.scrollLeft = 0; return; }
   if (Date.now() < stripHoldUntil) return;
   if (el.scrollLeft + el.clientWidth >= el.scrollWidth - 1){
@@ -2111,9 +2113,18 @@ function applyStripScroll(){
   const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (stripTimer){ clearInterval(stripTimer); stripTimer = null; }
   if (calm){ el.style.overflowX = 'auto'; return; }   // 系统设了"减少动态效果"就别自己动
+  if (document.hidden) return;                        // 切到后台就先不跑，回来时再启动
   el.style.overflowX = 'hidden';
   stripTimer = setInterval(stripTick, 16);
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden){
+    if (stripTimer){ clearInterval(stripTimer); stripTimer = null; }
+  } else {
+    applyStripScroll();
+  }
+});
 /* 悬停 120ms 后才弹说明：划过时不会闪一下 */
 let popTimer = null;
 document.addEventListener('mouseover', ev => {
