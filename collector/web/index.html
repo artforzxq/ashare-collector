@@ -303,6 +303,7 @@ canvas{display:block;width:100%}
       <button data-view="market">市场与扫描</button>
       <button data-view="factors">因子台账</button>
       <button data-view="backtest">参数回测</button>
+      <button data-view="pool">筛选池</button>
     </nav>
   </header>
 
@@ -495,6 +496,42 @@ canvas{display:block;width:100%}
         <div class="hint">喂进去的是摘要：样本量、年数、成本、正超额组数、前几名与当前配置那行的邻域表现，
           <b>不是</b>整张表——网格调大之后表能有几百行，全喂进去只会让它抓不住重点。一次约 1.2k tokens。</div>
         <div id="btAiBody" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <!-- ===================== 筛选池 ===================== -->
+    <section id="viewPool" class="view" hidden>
+      <div class="block-head"><h2>① 口径</h2><span class="badge today" id="poolBadge">日终</span><span class="line"></span><span id="poolMeta"></span></div>
+      <div class="kpis" id="poolKpis"></div>
+      <div class="card panel">
+        <h3>筛选池怎么来的 <span class="kv">口径都在代码里，页面不发明规则</span></h3>
+        <div class="hint">
+          <b>标的池</b>：本地日线够长、且近 60 日均成交额过门槛的票才有资格被筛（指数默认不进，见
+          <code>universe.include_index</code>）。<br>
+          <b>形态</b>：条件写在 <code>config.yaml</code> 的 <code>screen.criteria</code>，一只票命中多个形态时按优先级定一个"主标签"。<br>
+          <b>候选</b>：回看最近若干个筛选日，同一只票<b>反复出现</b>（≥ <span id="poolMinHits">2</span> 次）才算候选——
+          一次命中是噪声，反复才是特征。排序只用三类可核实的证据：能不能建仓 → 反复程度 → 流动性，
+          外加"命中后 20 日超额"（有回填才看得到）。
+        </div>
+      </div>
+
+      <div class="block-head"><h2>② 候选进池</h2><span class="line"></span><span class="kv">机器排队，人点确认</span></div>
+      <div class="card panel">
+        <h3>候选清单 <span id="poolCandNote"></span></h3>
+        <div id="poolCandidates"></div>
+      </div>
+
+      <div class="block-head"><h2>③ 池内现状</h2><span class="line"></span><span class="kv">观察池里的票最近还有没有出现</span></div>
+      <div class="card panel">
+        <h3>观察池 <span id="poolMemberNote"></span></h3>
+        <div id="poolMembers"></div>
+      </div>
+
+      <div class="block-head"><h2>④ 形态表现</h2><span class="line"></span><span class="kv">筛出来之后到底涨没涨</span></div>
+      <div class="card panel">
+        <h3>命中后的真实表现 <span id="poolOutcomeNote"></span></h3>
+        <div id="poolOutcomes"></div>
+        <div class="hint" id="poolOutcomeHint"></div>
       </div>
     </section>
   </main>
@@ -1209,7 +1246,7 @@ function afterJob(last){
     loadWatchlist().then(() => { if (state.code) loadKline(); });
     loadRecentAlerts();
   }
-  if (last.key === 'screen'){ screenData = null; loadScreen(); loadMarket(); }
+  if (last.key === 'screen'){ screenData = null; poolData = null; loadScreen(); loadMarket(); }
   if (last.key === 'sync' || last.key === 'snapshot'){ marketData = null; if (!$('viewMarket').hidden) loadMarket(); }
   if (last.key === 'backtest'){ backtestData = null; if (!$('viewBacktest').hidden) loadBacktest(); }
   if (last.key === 'analyze'){ delete analysisCache[lastAnalyzeScope]; loadScopeAnalysis(lastAnalyzeScope); }
@@ -1220,6 +1257,7 @@ function switchView(name){
   $('viewMarket').hidden = name !== 'market';
   $('viewFactors').hidden = name !== 'factors';
   $('viewBacktest').hidden = name !== 'backtest';
+  $('viewPool').hidden = name !== 'pool';
   document.querySelectorAll('#viewTabs button').forEach(btn =>
     btn.classList.toggle('on', btn.dataset.view === name));
   if (name === 'market'){
@@ -1231,6 +1269,8 @@ function switchView(name){
   } else if (name === 'backtest'){
     loadBacktest();
     loadScopeAnalysis('backtest');
+  } else if (name === 'pool'){
+    loadPool();
   } else {
     draw();          // 隐藏时画布宽度为 0，切回来必须重画
   }
@@ -1483,6 +1523,137 @@ function renderFactors(){
 }
 
 /* ---------- 参数回测：哪组参数真有超额，哪组只是拟合出来的尖峰 ---------- */
+/* ---------- 筛选池：候选进池 / 池内现状 / 形态表现 ---------- */
+let poolData = null;
+
+async function loadPool(force){
+  if (poolData && !force){ renderPool(); return; }
+  $('poolKpis').innerHTML = '<div class="kpi"><span>读取中…</span><b>—</b></div>';
+  $('poolCandidates').innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  try{
+    poolData = await api('/api/pool');
+  }catch(e){
+    $('poolCandidates').innerHTML = `<div class="empty-state"><b>读不到筛选池</b>${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderPool();
+}
+
+function poolAmount(value){
+  if (value === null || value === undefined) return '<span class="sub">—</span>';
+  return (Number(value) / 1e8).toFixed(2) + ' 亿';
+}
+
+function poolRisk(item){
+  const cap = item.cap;
+  if (cap === null || cap === undefined) return '<span class="sub">—</span>';
+  if (!cap) return '<span class="sub">风险层：0 仓</span>';
+  return `<span class="sub">上限 ${(cap * 100).toFixed(0)}%</span>`;
+}
+
+function renderPool(){
+  const d = poolData || {};
+  if ($('poolMinHits')) $('poolMinHits').textContent = d.min_hits ?? 2;
+  const empty = id => { if ($(id)) $(id).innerHTML = ''; };
+
+  if (!d.ok){
+    $('poolMeta').textContent = '';
+    empty('poolKpis'); empty('poolMembers'); empty('poolOutcomes'); empty('poolOutcomeHint');
+    $('poolCandNote').textContent = '';
+    $('poolCandidates').innerHTML =
+      `<div class="empty-state"><b>${escapeHtml(d.message || '还没有筛选结果')}</b>` +
+      '先跑一次 20-全市场筛选。本地有日线的标的越多、筛得越全——18-全市场同步 可以反复点。</div>';
+    return;
+  }
+
+  const run = d.last_run || {};
+  $('poolMeta').textContent = d.trade_date
+    ? `最近筛选日 ${d.trade_date} · 回看 ${d.days} 个筛选日` + (run.scanned ? ` · 上次扫描 ${run.scanned} 只` : '')
+    : '';
+  $('poolKpis').innerHTML = [
+    `<div class="kpi"><span>候选进池</span><b>${(d.candidates || []).length}</b><small>至少命中 ${d.min_hits} 次</small></div>`,
+    `<div class="kpi"><span>观察池</span><b>${(d.members || []).length}</b><small>其中 ${(d.pooled_missing || []).length} 只最近没被筛到</small></div>`,
+    `<div class="kpi"><span>成交额门槛</span><b>${d.min_avg_amount ? (d.min_avg_amount / 1e4).toFixed(0) + ' 万' : '不限'}</b><small>与筛选、回测共用</small></div>`,
+    `<div class="kpi"><span>回看窗口</span><b>${d.window && d.window.length ? d.window.length : 0}</b><small>${d.window && d.window.length ? d.window[d.window.length - 1] + ' → ' + d.window[0] : '还没有筛选日'}</small></div>`,
+  ].join('');
+
+  // ② 候选进池
+  const cand = d.candidates || [];
+  $('poolCandNote').textContent = cand.length ? `共 ${cand.length} 只` : '';
+  $('poolCandidates').innerHTML = cand.length
+    ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+         <th>标的</th><th class="num">命中</th><th>命中的形态</th><th class="num">日均成交额</th>
+         <th class="num">命中后 20 日</th><th>风险层</th><th>操作</th>
+       </tr></thead><tbody>` + cand.map(item => {
+        const ex = item.excess_20d;
+        const exText = (ex === null || ex === undefined)
+          ? '<span class="sub">还没有回填</span>'
+          : posNeg(ex, signed(ex, 2) + '%') + `<div class="sub">${item.outcome_n} 个样本</div>`;
+        return `<tr>
+          <td><span class="name">${item.name || item.code}</span><div class="sub">${item.code}</div></td>
+          <td class="num">${item.hits} 次<div class="sub">${item.days} 个筛选日</div></td>
+          <td class="sub">${(item.criteria || []).join('、')}</td>
+          <td class="num">${poolAmount(item.avg_amount_60d)}${item.liquid ? '' : '<div class="sub">低于门槛</div>'}</td>
+          <td class="num">${exText}</td>
+          <td>${poolRisk(item)}</td>
+          <td><button class="ghost" data-add="${item.code}">加入自选</button></td>
+        </tr>`;
+      }).join('') + '</tbody></table></div>'
+    : `<div class="empty-state"><b>这次没有候选</b>回看 ${d.days} 个筛选日里，没有"池外 + 至少命中 ${d.min_hits} 次"的票。<br>
+       反复出现的票才会出现在这里——一次命中是噪声。</div>`;
+
+  // ③ 池内现状
+  const members = d.members || [];
+  $('poolMemberNote').textContent = members.length ? `共 ${members.length} 只` : '';
+  $('poolMembers').innerHTML = members.length
+    ? `<table class="tbl"><thead><tr>
+         <th>标的</th><th class="num">被筛出</th><th>形态</th><th>状态</th><th>风险层</th><th>操作</th>
+       </tr></thead><tbody>` + members.map(item => {
+        const latest = item.latest || {};
+        return `<tr>
+          <td><span class="name">${item.name || item.code}</span><div class="sub">${item.code} · ${item.type || ''}${item.role ? ' · ' + item.role : ''}</div></td>
+          <td class="num">${item.hits} 次<div class="sub">${latest.trade_date || ''}</div></td>
+          <td class="sub">${(item.criteria || []).join('、') || '最近没出现'}</td>
+          <td class="sub">${({up:'上升', down:'下跌', range:'震荡'})[item.state] || item.state || '—'}</td>
+          <td>${poolRisk(item)}</td>
+          <td><button class="ghost" data-drop="${item.code}">移出</button></td>
+        </tr>`;
+      }).join('') + '</tbody></table>'
+    : '<div class="empty-state">观察池是空的</div>';
+
+  // ④ 形态表现
+  const rows = d.outcomes || [];
+  $('poolOutcomeNote').textContent = rows.length ? `${rows.length} 个形态` : '';
+  $('poolOutcomes').innerHTML = rows.length
+    ? `<table class="tbl"><thead><tr>
+         <th>形态</th><th class="num">命中样本</th><th class="num">5 日均值</th><th class="num">5 日胜率</th>
+         <th class="num">20 日均值</th><th class="num">20 日胜率</th>
+       </tr></thead><tbody>` + rows.map(row => {
+        const win5 = row.done5 ? (row.win5 / row.done5 * 100) : null;
+        const win20 = row.done20 ? (row.win20 / row.done20 * 100) : null;
+        return `<tr>
+          <td><span class="name">${row.criterion}</span></td>
+          <td class="num">${row.n}<div class="sub">回填 ${row.done20 || 0}</div></td>
+          <td class="num">${posNeg(row.avg5, signed(row.avg5, 2) + '%')}</td>
+          <td class="num sub">${win5 === null ? '—' : win5.toFixed(1) + '%'}</td>
+          <td class="num">${posNeg(row.avg20, signed(row.avg20, 2) + '%')}</td>
+          <td class="num sub">${win20 === null ? '—' : win20.toFixed(1) + '%'}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>'
+    : '<div class="empty-state"><b>还没有回填表现</b>跑一次 16-信号复盘 或 22-历史重放，才知道这些形态后面到底涨没涨</div>';
+  $('poolOutcomeHint').innerHTML =
+    '这两列是<b>绝对</b>收益，还没减掉基准。要判断形态有没有信息量，得看它有没有跑赢"同一批日期里随便买一只票"——' +
+    '那是 22-历史重放 的活（README 里记着当前结论：所有形态都还没有正超额，当"看什么的清单"用，别当买入信号）。';
+
+  // 两个按钮：加入自选 / 移出，都走已有的接口，改完刷新这一页
+  $('poolCandidates').querySelectorAll('[data-add]').forEach(btn => {
+    btn.onclick = async () => { await addItem(btn.dataset.add); poolData = null; loadPool(true); };
+  });
+  $('poolMembers').querySelectorAll('[data-drop]').forEach(btn => {
+    btn.onclick = async () => { await removeItem(btn.dataset.drop); poolData = null; loadPool(true); };
+  });
+}
+
 let backtestData = null;
 
 function fmtNum(value, digits = 2){

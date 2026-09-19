@@ -347,6 +347,37 @@ class App:
 
     # ---- 页面上的任务按钮 ----
 
+    def pool(self) -> dict:
+        """筛选池：三段拼起来，回答"我现在该看什么"。
+
+        ① 口径：回看几个筛选日、至少命中几次、成交额门槛、上次扫描扫了多少只；
+        ② 候选进池 + 池内现状：`candidates.build` 已经算好的证据清单（页面只读，不自己排序）；
+        ③ 形态表现：每种形态命中后 5/20 日的实际表现（要回填过才有数）。
+
+        这里不做任何新计算——都是把已有的结果凑到一处，页面不发明口径。
+        """
+        from . import candidates as candidates_mod, screen as screen_mod, universe as universe_mod
+
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            payload = dict(candidates_mod.build(conn, self.cfg))
+            run = db.query_one(
+                conn,
+                "SELECT run_date, rows, error_msg FROM data_health WHERE task='screen' "
+                "ORDER BY run_date DESC LIMIT 1",
+            )
+            payload["last_run"] = (
+                {"trade_date": run["run_date"], "scanned": run["rows"], "note": run["error_msg"]}
+                if run else None
+            )
+            payload["min_avg_amount"] = universe_mod.min_avg_amount(self.cfg)
+            payload["outcomes"] = screen_mod.outcome_stats(conn)
+            return payload
+        except Exception as exc:            # 页面永远不该白屏
+            return {"ok": False, "message": f"筛选池读不出来：{type(exc).__name__} {exc}"}
+        finally:
+            conn.close()
+
     def job_state(self) -> dict:
         return self.jobs.state()
 
@@ -849,7 +880,7 @@ def _health_payload(cfg: dict) -> dict:
         "stale": newest > PROCESS_STARTED_TS,
         "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
                    "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
-                   "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis"],
+                   "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis", "/api/pool"],
     }
 
 
@@ -949,6 +980,8 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes(app.backtest())
             if path == "/api/analysis":
                 return _payload_bytes(app.analysis(query.get("code", ""), query.get("scope", "")))
+            if path == "/api/pool":
+                return _payload_bytes(app.pool())
             if path == "/api/meta":
                 return _payload_bytes(_meta_payload(app.cfg))
             if path == "/api/market":
