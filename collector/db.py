@@ -47,6 +47,11 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "turnover_20d": "REAL",
         "turnover_ratio": "REAL",
         "turnover_coverage": "REAL",
+        "swing_state": "REAL",
+        "swing_low_1": "REAL",
+        "swing_high_1": "REAL",
+        "dist_to_swing_low": "REAL",
+        "bars_since_swing_low": "INTEGER",
     },
     # 筛选结果也要能回填真实表现，才能回答"筛出来的票后来怎么样了"
     "screen_results": {

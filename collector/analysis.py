@@ -190,6 +190,10 @@ def snapshot(conn, cfg: dict, code: str, trade_date: str | None = None) -> dict:
         "vol_ratio_20": feature.get("vol_ratio_20"),
         "atr_pct": feature.get("atr_pct"),
         "candle_pattern": feature.get("candle_pattern"),
+        "swing_state": feature.get("swing_state"),
+        "swing_low_1": feature.get("swing_low_1"),
+        "dist_to_swing_low": feature.get("dist_to_swing_low"),
+        "bars_since_swing_low": feature.get("bars_since_swing_low"),
         "position_cap": feature.get("position_cap"),
         "stop_level": feature.get("stop_level"),
         "risk_reward": feature.get("risk_reward"),
@@ -222,6 +226,13 @@ def render(snap: dict) -> str:
     ]
     if snap.get("candle_pattern"):
         lines.append(f"K 线形态：{snap['candle_pattern']}")
+    structure = {1.0: "高低点同时抬升（HH+HL）", -1.0: "高低点同时下移（LH+LL）",
+                 0.0: "高低点不共振"}.get(snap.get("swing_state"))
+    if structure or snap.get("swing_low_1"):
+        lines.append(
+            f"摆动结构：{structure or '拐点还不够两个'}；最近结构低点 {num(snap.get('swing_low_1'))}"
+            f"（{snap.get('bars_since_swing_low')} 根前确认，距收盘 {num(snap.get('dist_to_swing_low'), 2)}%）"
+        )
     if snap.get("support"):
         band = snap["support"]
         lines.append(

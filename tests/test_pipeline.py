@@ -37,6 +37,21 @@ class PipelineTests(unittest.TestCase):
         info = self.summary["codes"]["SH000300"]
         self.assertEqual(info["conflicts"], 1)
 
+    def test_helper_columns_are_actually_persisted(self):
+        """辅助列要真的落库：它们曾经只活在内存里——特征算得对，库里却是 NULL，
+        页面和体检读到的就是空。这类"算了但没存"的 bug 只能靠端到端跑一遍兜住。"""
+        row = db.query_one(
+            self.conn,
+            """SELECT avg_amount_20d, turnover_ratio, swing_state, swing_low_1,
+                      bars_since_swing_low
+               FROM features_daily WHERE code='SH000300' AND swing_low_1 IS NOT NULL
+               ORDER BY trade_date DESC LIMIT 1""",
+        )
+        self.assertIsNotNone(row, "摆动结构没有落库")
+        self.assertIsNotNone(row["avg_amount_20d"])
+        self.assertIsNotNone(row["turnover_ratio"])
+        self.assertIn(row["swing_state"], (-1.0, 0.0, 1.0))
+
     def test_state_machine_reaches_uptrend(self):
         rows = db.query(
             self.conn,

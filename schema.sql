@@ -169,6 +169,11 @@ CREATE TABLE IF NOT EXISTS features_daily (
   turnover_20d       REAL,          -- 前 20 日平均换手率（%）：这只票自己的"常态"，允许缺值
   turnover_ratio     REAL,          -- 当日换手 ÷ 常态：换手放量倍数，剔除股本规模差异
   turnover_coverage  REAL,          -- 上面那个 20 日窗口里有效值的比例（换手率有缺失，得看得见）
+  swing_state        REAL,          -- 摆动结构：1 高低点同时抬升 / -1 同时下移 / 0 混合 / NULL 拐点不够
+  swing_low_1        REAL,          -- 最近一个已确认的摆动低点（结构低点）价格
+  swing_high_1       REAL,          -- 最近一个已确认的摆动高点价格
+  dist_to_swing_low  REAL,          -- 距结构低点的距离，单位：%（负值表示已跌破结构低点）
+  bars_since_swing_low INTEGER,     -- 结构低点是几根 K 线之前确认的（太旧的结构位不算数）
   code               TEXT NOT NULL, -- 标的代码
   trade_date         TEXT NOT NULL, -- 交易日
   ma20               REAL,          -- 20 日前复权收盘均线

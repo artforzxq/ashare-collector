@@ -6,7 +6,12 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from typing import Iterable, Sequence
+
+# 摆动点（分型）的左右确认根数。右边要等这么多根才算确认，所以最近 span 根永远不是摆动点——
+# 这是"不用未来函数"的代价，也是它可信的原因。
+SWING_SPAN = 2
 
 
 # ---------- 基础序列工具 ----------
@@ -116,6 +121,65 @@ def _sign(value: float | None) -> float:
     return 1.0 if value > 0 else (-1.0 if value < 0 else 0.0)
 
 
+# ---------- 摆动结构 ----------
+
+# 均线是"平滑后的价格"，摆动结构是**没被平滑过的原始序列**：更高的高点 + 更高的低点。
+# 趋势的定义本来就是这个，只是均线把它糊掉了。两条线一起看，才知道
+# "趋势分在涨"到底是结构真的在抬升，还是只是几根阳线把均值拉上去了。
+
+
+def _swings(values: Sequence[float], span: int = SWING_SPAN, kind: str = "low") -> tuple[list[int], list[float]]:
+    """摆动点：左右各 span 根都不更低（更高）才算一个拐点。
+
+    返回 (日期下标, 价格) 两条平行列表，下标天然递增，后面用二分查"到某天为止的最后一个"。
+    """
+    days: list[int] = []
+    prices: list[float] = []
+    for index in range(span, len(values) - span):
+        window = values[index - span:index + span + 1]
+        extreme = min(window) if kind == "low" else max(window)
+        if values[index] == extreme:
+            days.append(index)
+            prices.append(float(values[index]))
+    return days, prices
+
+
+def _structure_at(swing_lows: tuple[list[int], list[float]],
+                  swing_highs: tuple[list[int], list[float]],
+                  index: int, span: int = SWING_SPAN) -> dict:
+    """到第 index 根为止，**已经确认**的结构状态。
+
+    返回 {swing_state, swing_low_1, swing_high_1, bars_since_swing_low,
+          dist_to_swing_low, swing_low_2, swing_high_2}。
+    swing_state：1 = 高低点同时抬升（HH+HL，最原始的多头结构），
+                 -1 = 同时下移（LH+LL），0 = 混合，None = 摆动点还不够两个。
+    """
+    blanks = {"swing_state": None, "swing_low_1": None, "swing_high_1": None,
+              "swing_low_2": None, "swing_high_2": None,
+              "bars_since_swing_low": None, "dist_to_swing_low": None}
+    low_days, low_prices = swing_lows
+    high_days, high_prices = swing_highs
+    last_confirmed_low = bisect_right(low_days, index - span) - 1
+    last_confirmed_high = bisect_right(high_days, index - span) - 1
+    if last_confirmed_low < 0 or last_confirmed_high < 0:
+        return blanks
+    low_index, low_price = low_days[last_confirmed_low], low_prices[last_confirmed_low]
+    high_index, high_price = high_days[last_confirmed_high], high_prices[last_confirmed_high]
+    output = dict(blanks)
+    output["swing_low_1"] = low_price
+    output["swing_high_1"] = high_price
+    output["bars_since_swing_low"] = index - low_index
+    if last_confirmed_low >= 1 and last_confirmed_high >= 1:
+        prior_low = low_prices[last_confirmed_low - 1]
+        prior_high = high_prices[last_confirmed_high - 1]
+        output["swing_low_2"] = prior_low
+        output["swing_high_2"] = prior_high
+        rising = low_price > prior_low and high_price > prior_high
+        falling = low_price < prior_low and high_price < prior_high
+        output["swing_state"] = 1.0 if rising else (-1.0 if falling else 0.0)
+    return output
+
+
 def compute_feature_series(
     bars: Sequence[dict],
     cfg: dict,
@@ -150,6 +214,8 @@ def compute_feature_series(
     ma120 = sma(closes, 120)
     atr14 = atr_series(highs, lows, closes, 14)
     adx14 = adx_series(highs, lows, closes, 14)
+    swing_lows = _swings(lows, SWING_SPAN, "low")
+    swing_highs = _swings(highs, SWING_SPAN, "high")
 
     rows: list[dict] = []
     for index, bar in enumerate(bars):
@@ -199,6 +265,18 @@ def compute_feature_series(
         raw["turnover_20d"] = round(turn_mean, 4) if turn_mean else None
         raw["turnover_ratio"] = round(turn / turn_mean, 4) if (turn and turn_mean) else None
         raw["turnover_coverage"] = turn_cover
+
+        # 摆动结构：更高的高点 + 更高的低点，是趋势最原始的定义。
+        # 只认**已经确认**的拐点（右边要等 SWING_SPAN 根），所以不会用到未来数据。
+        structure = _structure_at(swing_lows, swing_highs, index)
+        raw["swing_state"] = structure["swing_state"]
+        raw["swing_low_1"] = structure["swing_low_1"]
+        raw["swing_high_1"] = structure["swing_high_1"]
+        raw["dist_to_swing_low"] = (
+            round((close - structure["swing_low_1"]) / close * 100, 4)
+            if structure["swing_low_1"] else None
+        )
+        raw["bars_since_swing_low"] = structure["bars_since_swing_low"]
 
         if index >= 20:
             prior_high = max(highs[index - 20:index])
@@ -270,6 +348,11 @@ def compute_feature_series(
                 "turnover_20d": raw["turnover_20d"],
                 "turnover_ratio": raw["turnover_ratio"],
                 "turnover_coverage": raw["turnover_coverage"],
+                "swing_state": raw["swing_state"],
+                "swing_low_1": raw["swing_low_1"],
+                "swing_high_1": raw["swing_high_1"],
+                "dist_to_swing_low": raw["dist_to_swing_low"],
+                "bars_since_swing_low": raw["bars_since_swing_low"],
                 "dist_to_high_250": raw["dist_to_high_250"],
                 "donchian_break": raw["donchian_break"],
                 "consolidation_days": consolidation_days,

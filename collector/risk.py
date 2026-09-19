@@ -47,6 +47,14 @@ DEFAULTS = {
         "factor": 0.6,
         "high_position_pct": None,
     },
+    # 结构低点止损：摆动低点是**没被平滑过**的支撑，比成交量密集带更贴近当下。
+    # 它只用来"收紧"止损（取更近的那个），不会把止损放得更远。
+    "structure_stop": {
+        "enabled": True,
+        "max_age": 60,        # 结构低点超过这么多根就不算数（太旧的位置早就换人了）
+        "buffer_pct": 0.5,    # 在结构低点下方再留一点，避免贴着整数位被扫
+        "min_risk_pct": 1.0,  # 离现价太近的止损是噪声，不如不放
+    },
 }
 
 
@@ -62,6 +70,36 @@ def _params(cfg: dict) -> dict:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def structure_stop(params: dict, row: dict, close: float) -> float | None:
+    """最近那个已确认摆动低点下方的止损位；不可用就返回 None。
+
+    为什么要有这一层：支撑带是成交量密集区聚类出来的，代表"历史上很多人在这个价位换过手"，
+    但它**天生滞后**——价格从底部抬起来 20% 之后，脚下那条带还在很远的地方。
+    摆动低点是这一波行情自己走出来的位置，用它当止损，离现价更近、也更贴近"这次上来的理由"。
+
+    规则上只做收紧：候选位比原止损更远就丢弃（见 `assess` 里的取更近者）。
+    """
+    conf = params.get("structure_stop") or {}
+    if not conf.get("enabled", True):
+        return None
+    low = row.get("swing_low_1")
+    age = row.get("bars_since_swing_low")
+    if not low:
+        return None
+    try:
+        low = float(low)
+    except (TypeError, ValueError):
+        return None
+    if age is None or float(age) < 1 or float(age) > float(conf.get("max_age", 60)):
+        return None
+    candidate = low * (1 - float(conf.get("buffer_pct", 0.5)) / 100)
+    if candidate >= close:
+        return None                                  # 结构低点已经破了，不拿它当止损
+    if (close - candidate) / close * 100 < float(conf.get("min_risk_pct", 1.0)):
+        return None                                  # 贴着现价的止损是噪声，挡不住任何东西
+    return candidate
 
 
 def turnover_discount(params: dict, row: dict, notes: list[str]) -> float | None:
@@ -132,6 +170,18 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
         atr = row.get("atr14") or close * 0.02
         stop = close - float(atr)
         stop_reason = "1 倍 ATR"
+
+    # ---- 结构低点参与止损候选：和上面的结构位/ATR 取**更近**的那个 ----
+    # 更近 = 风险预算更小 = 同样的仓位能承担更小的亏损。它只在"比原止损更近"时生效，
+    # 所以不会出现"拿一个很远的结构低点把风险放大"的情况。
+    candidate = structure_stop(params, row, close)
+    if candidate is not None and candidate > stop:
+        notes.append(
+            f"最近结构低点 {float(row['swing_low_1']):.3f}"
+            f"（{int(row['bars_since_swing_low'])} 根前确认）比{stop_reason}更近 → 止损上移到这里"
+        )
+        stop = candidate
+        stop_reason = "结构低点"
 
     risk_pct = (close - stop) / close * 100
     if risk_pct > float(params["max_stop_pct"]):

@@ -182,6 +182,14 @@ risk:
   open_space_atr_multiple: 3.0
   no_resistance_rr: 1.0
   cap_floor: 0.3             # 缩放系数的下限，避免直接归零
+  # 结构低点止损：摆动低点（左右各 2 根确认的分型）是**没被平滑过**的支撑，
+  # 比成交量密集带更贴近这一波行情。它只用来收紧止损——和支撑带/ATR 取更近的那个，
+  # 所以不会把止损放得更远；配置里可以整条关掉。
+  structure_stop:
+    enabled: true
+    max_age: 60        # 结构低点超过 60 根就不算数
+    buffer_pct: 0.5    # 在结构低点下方再留 0.5%
+    min_risk_pct: 1.0  # 离现价不足 1% 的止损是噪声，不采用
   # 换手放量折价（负向信号 → 走风险层，不进状态分）。
   # 门槛定在 3 倍而不是 2 倍，是照证据来的（400 只标的、2.1 年、12.9 万样本，
   # 按交易日聚合后）：
@@ -457,3 +465,27 @@ factors:
     status: shadow
     source_field: turnover_20d
     normalize: {type: linear, x0: 1.0, x1: 8.0}
+
+  # 摆动结构：更高的高点 + 更高的低点。均线是平滑后的价格，结构是没被平滑过的原始序列，
+  # 两者相关性高不高（残差 IC 会不会被吃掉）正是要看的——先影子，不进打分。
+  - factor_id: swing_state
+    name: 摆动结构
+    layer: state
+    role: modifier
+    category: structure
+    weight: 0.0
+    min_samples: 120
+    status: shadow
+    source_field: swing_state
+    normalize: {type: linear, x0: -1.0, x1: 1.0}
+
+  - factor_id: dist_to_swing_low
+    name: 距结构低点
+    layer: state
+    role: modifier
+    category: structure
+    weight: 0.0
+    min_samples: 120
+    status: shadow
+    source_field: dist_to_swing_low
+    normalize: {type: linear, x0: -12.0, x1: -1.0}   # 越贴近结构低点得分越高：止损近，盈亏比才好
