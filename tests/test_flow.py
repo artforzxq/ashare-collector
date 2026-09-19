@@ -92,6 +92,18 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("SH510300", snap["unpriced"])
         self.assertIsNone(snap["broad_etf"]["inflow"])
 
+    def test_mixed_sources_are_not_compared(self):
+        """同一段序列不能混源：拿甲家今天减乙家昨天，算出来的是两家口径的差，
+        不是申购赎回（深交所 63.29 亿 vs 东财 63.41 亿，差的就是这个）。"""
+        db.upsert_rows(self.conn, "etf_shares", [
+            {"code": "SH510300", "trade_date": "2026-09-17", "shares": 100e8, "nav": 4.0, "source": "sse"},
+            {"code": "SH510300", "trade_date": "2026-09-18", "shares": 101e8, "nav": 4.0, "source": "akshare"},
+        ], ["code", "trade_date"])
+        self.conn.commit()
+        snap = flow.snapshot(self.conn, self.cfg, "2026-09-18")
+        self.assertIn("SH510300", snap["mixed_source"])
+        self.assertIsNone(snap["broad_etf"]["inflow"])
+
     def test_empty_database_says_what_to_run(self):
         snap = flow.snapshot(self.conn, self.cfg)
         self.assertFalse(snap["ok"])

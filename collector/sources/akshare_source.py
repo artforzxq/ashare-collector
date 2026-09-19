@@ -432,6 +432,47 @@ class AkshareSource(BaseSource):
             rows.append(row)
         return rows
 
+    def etf_share_snapshot(self) -> list[dict]:
+        """全市场 ETF 份额快照（东财），**按它自己的数据日期落库**。
+
+        为什么单开一个方法：深交所那个接口只给"最新份额"、而且**无视日期参数**
+        （实测 09-17 和 09-18 两次请求返回一模一样），所以深市 ETF 的份额变化
+        没法补历史，只能"每天存一次快照"往前攒。而快照必须按它自己的数据日期存——
+        拿"今天"去盖，就会造出一串假的"较前一日 0.00%"（踩过）。
+
+        一次请求覆盖 1600+ 只 ETF（沪+深），成本和一个代码的查询一样。
+        """
+        from .base import exchange_of
+
+        ak = self._ak()
+        try:
+            frame = ak.fund_etf_spot_em()
+        except Exception as exc:
+            raise DataSourceError(f"东财 ETF 份额快照不可用：{exc}") from exc
+        rows: list[dict] = []
+        for record in frame.to_dict("records"):
+            symbol = _symbol(record.get("代码"))
+            shares = _num(record.get("最新份额"))
+            day = record.get("数据日期")
+            day = str(day)[:10] if day is not None else None
+            if not symbol or not shares or not day:
+                continue
+            market = exchange_of(symbol)
+            rows.append({
+                "code": f"{market}{symbol}",
+                "trade_date": day,
+                "shares": shares,
+                "nav": None,
+                "close": _num(record.get("最新价")),
+                "premium_rate": _num(record.get("基金折价率")),
+                "assets": None,
+                "is_estimated": 1,      # 东财快照，不是交易所按日披露的那份
+                "source": self.name,
+            })
+        if not rows:
+            raise DataSourceError("东财 ETF 份额快照是空的")
+        return rows
+
     def etf_shares(self, codes, trade_date: str) -> list[dict]:
         """ETF 份额与净值。
 

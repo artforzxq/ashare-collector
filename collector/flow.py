@@ -24,13 +24,13 @@ def _etf_flows(conn, cfg: dict, dates: list[str]) -> tuple[dict, list[str], int]
     补不出历史——拿它算"较前一日"会得到一串 0.00%，那是假的。
     """
     if len(dates) < 2:
-        return {}, [], 0
+        return {}, [], 0, []
     today, prev = dates[0], dates[1]
     rows = [
         dict(row)
         for row in db.query(
             conn,
-            """SELECT s.code, s.trade_date, s.shares, s.nav, b.close, i.type
+            """SELECT s.code, s.trade_date, s.shares, s.nav, s.source, b.close, i.type
                  FROM etf_shares s
                  LEFT JOIN bars_daily b ON b.code = s.code AND b.trade_date = s.trade_date
                  LEFT JOIN instruments i ON i.code = s.code
@@ -45,9 +45,16 @@ def _etf_flows(conn, cfg: dict, dates: list[str]) -> tuple[dict, list[str], int]
     totals: dict[str, float] = {}
     counts: dict[str, int] = {}
     unpriced: list[str] = []
+    mixed: list[str] = []
     for code, pair in by_code.items():
         now, before = pair.get(today), pair.get(prev)
         if not now or not before or not before.get("shares") or not now.get("shares"):
+            continue
+        # **同一序列不能混源**：深交所按日披露、东财是快照，两家的份额本来就差几个百分点
+        # （同一只深市 ETF：深交所 63.29 亿 vs 东财 63.41 亿）。拿甲家今天减乙家昨天，
+        # 算出来的不是"申购赎回"，是两家口径的差——等于在一段序列里换了把尺子。
+        if (now.get("source") or "") != (before.get("source") or ""):
+            mixed.append(code)
             continue
         price = now.get("nav") or now.get("close")
         if not price:
@@ -65,7 +72,7 @@ def _etf_flows(conn, cfg: dict, dates: list[str]) -> tuple[dict, list[str], int]
         kind: {"inflow": round(value / 1e8, 2), "count": counts.get(kind, 0)}
         for kind, value in totals.items()
     }
-    return flows, unpriced, len(by_code)
+    return flows, unpriced, len(by_code), mixed
 
 
 def _amount_context(conn, trade_date: str, window: int = 60) -> dict:
@@ -178,7 +185,7 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
             (trade_date,),
         )
     ]
-    flows, unpriced, covered = _etf_flows(conn, cfg, dates)
+    flows, unpriced, covered, mixed = _etf_flows(conn, cfg, dates)
     payload = {
         "ok": True,
         "trade_date": trade_date,
@@ -188,6 +195,7 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
         "amount": _amount_context(conn, trade_date),
         "margin": _margin_delta(conn, trade_date),
         "unpriced": unpriced[:10],
+        "mixed_source": mixed[:10],
         "covered": covered,
         "regime": regime.latest(conn, cfg, trade_date),
     }
@@ -208,7 +216,7 @@ def history(conn, cfg: dict, days: int = 20) -> list[dict]:
     out = []
     for index in range(len(dates) - 1):
         pair = dates[index:index + 2]
-        flows, _, _ = _etf_flows(conn, cfg, pair)
+        flows, _, _, _ = _etf_flows(conn, cfg, pair)
         out.append({
             "trade_date": pair[0],
             "broad_etf": flows.get("broad_etf", {}).get("inflow"),

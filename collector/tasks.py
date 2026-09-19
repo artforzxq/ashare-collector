@@ -525,7 +525,63 @@ def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose
             row["assets"] = round(row["shares"] * price, 2)
         row["updated_at"] = db.now_iso()
     db.upsert_rows(conn, "etf_shares", rows, ["code", "trade_date"])
+    _collect_etf_share_snapshot(conn, sources, trade_date, verbose)
     _topup_etf_share_history(conn, sources, etf_codes, trade_date, verbose)
+
+
+def _collect_etf_share_snapshot(conn, sources: list, trade_date: str, verbose: bool) -> int:
+    """全市场 ETF 份额快照：补上深市那 700 多只。
+
+    为什么需要它：上交所按日披露（能查历史），**深交所那个接口只给"最新份额"、
+    而且无视日期参数**（实测 09-17 与 09-18 两次请求返回一模一样）。所以深市
+    只能"每天存一次快照"往前攒历史——快照按它**自己的数据日期**落库，
+    绝不拿"今天"去盖，否则就会造出一串假的"较前一日 0.00%"（踩过一次）。
+
+    还有一层坑：东财这个"最新份额"标着当天的数据日期，**实际是上一个交易日的数**——
+    实测 6 只沪市 ETF（510050/510300/588000/510500/512100/510880），标称 09-18 的值
+    与交易所 09-17 完全一致。所以这里按**上一交易日**落库，并且**不覆盖交易所口径**
+    （沪市那 911 只以交易所为准，快照只补深市）。
+    """
+    previous = db.query_one(
+        conn,
+        """SELECT trade_date FROM trade_calendar
+            WHERE is_trading_day=1 AND trade_date<? ORDER BY trade_date DESC LIMIT 1""",
+        (trade_date,),
+    )
+    previous = previous["trade_date"] if previous else trade_date
+    protected = {
+        (row["code"], row["trade_date"])
+        for row in db.query(
+            conn,
+            """SELECT code, trade_date FROM etf_shares
+                WHERE COALESCE(source, '') IN ('sse', 'szse') AND trade_date>=?""",
+            (previous,),
+        )
+    }
+    for source in sources:
+        getter = getattr(source, "etf_share_snapshot", None)
+        if getter is None:
+            continue
+        try:
+            rows = getter()
+        except Exception as exc:
+            if verbose:
+                _log(f"      · ETF 份额快照不可用（{source.name}）：{str(exc)[:60]}", verbose)
+            continue
+        if not rows:
+            continue
+        rows = [{**row, "trade_date": previous} for row in rows]
+        rows = [row for row in rows if (row["code"], row["trade_date"]) not in protected]
+        if not rows:
+            if verbose:
+                _log("      · ETF 份额快照：没有需要补的（交易所口径已经覆盖）", verbose)
+            return 0
+        written = db.upsert_rows(conn, "etf_shares", rows, ["code", "trade_date"])
+        if verbose:
+            _log(f"      · ETF 份额快照（{source.name}）：补了 {written} 只（口径：上一交易日 {previous}）",
+                 verbose)
+        return written
+    return 0
 
 
 # 谁的数字更可信：**交易所 > 聚合源**。实测同一只深市 ETF，深交所给 63.29 亿份，

@@ -101,9 +101,10 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
                 thin.append(code)         # 有数据，但只有一天——不是"没数据"，是"还差一天"
             continue
         today, prev = rows[0], rows[1]
-        # 深交所只给"最新份额"，补出来的历史是连续几天同一个数——
-        # 拿它当"前一日"，算出来的 0.00% 会冒充"没变化"。所以估算值不当比较基准。
-        if prev.get("is_estimated") or prev.get("trade_date") == today.get("trade_date"):
+        # 只比"不同日期"的两行。曾经的坑是深交所快照被盖上了当天日期、补出一串
+        # 假历史（连续几天同一个数，"较前一日 0.00%"冒充"没变化"）；现在快照一律
+        # 按它自己的数据日期落库，所以这里只需要确认两天不是同一天。
+        if prev.get("trade_date") == today.get("trade_date"):
             thin.append(code)
             continue
         if not today["shares"] or not prev["shares"]:
