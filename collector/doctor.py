@@ -115,6 +115,21 @@ def check_database(db_path: str | Path, schema_path: str | Path) -> dict:
                         ORDER BY b.trade_date DESC"""
                 )
             ]
+        # 全市场成交额的量级：A 股一天大约 0.3–5 万亿（极端行情也就 3 万亿上下）。
+        # 2026-09 踩过一次：腾讯日线对科创板已经返回"股"，代码又乘了 100，
+        # 11 万行的成交额被放大 100 倍，全市场算出来 13 万亿——
+        # 而"近 60 日均成交额 ≥3000 万"那道流动性门槛对 688 的票就形同虚设了。
+        if "bars_daily" in tables and "instruments" in tables:
+            report["amount_scale"] = []
+            for row in conn.execute(
+                """SELECT b.trade_date AS d, SUM(b.amount) AS total
+                     FROM bars_daily b JOIN instruments i ON i.code = b.code
+                    WHERE i.type = 'stock' AND b.amount > 0
+                    GROUP BY b.trade_date ORDER BY b.trade_date DESC LIMIT 5"""
+            ):
+                total = float(row["total"] or 0)
+                if total > 5e12 or total < 2e11:
+                    report["amount_scale"].append((row["d"], round(total / 1e12, 2)))
         conn.close()
     except sqlite3.DatabaseError as exc:
         report["note"] = f"库打不开：{exc}（可能损坏，或正被别的工具锁着）"
@@ -131,6 +146,10 @@ def check_database(db_path: str | Path, schema_path: str | Path) -> dict:
         days = "、".join(report["off_calendar"][:3])
         problems.append(f"{len(report['off_calendar'])} 个非交易日却有行情（{days}）——"
                         "多半是数据源失败时把上一交易日的快照贴到了今天，先删掉再重跑")
+    if report.get("amount_scale"):
+        days = "、".join(f"{day} {total} 万亿" for day, total in report["amount_scale"][:3])
+        problems.append(f"全市场成交额量级不对（{days}）——"
+                        "A 股一天约 0.3–5 万亿，超出多半是某个板块的成交量单位错了")
     report["ok"] = not problems
     report["note"] = "；".join(problems)
     return report

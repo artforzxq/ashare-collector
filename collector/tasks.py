@@ -545,7 +545,11 @@ def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
     """
     target = int(target_days or ETF_SHARE_BACKFILL_DAYS)
     have = {row["trade_date"] for row in db.query(conn, "SELECT DISTINCT trade_date FROM etf_shares")}
-    if not codes or len(have) >= ETF_SHARE_MIN_DAYS:
+    # 只补沪市：上交所那个接口是**按日期**查的，能补历史；
+    # 深交所只给"最新份额"（列表页快照），拿它补历史会补出连续几天一模一样的数，
+    # 于是"较前一日 0.00%"看起来像"没变化"，其实是根本没变过——那是假的。
+    sh_codes = [code for code in codes if str(code).upper().startswith("SH")]
+    if not sh_codes or len(have) >= ETF_SHARE_MIN_DAYS:
         return 0
     days = [
         row["trade_date"]
@@ -572,7 +576,7 @@ def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
         merged: dict[str, dict] = {}
         for source in sources:
             try:
-                _merge_etf_rows(merged, source.etf_shares(codes, day), source)
+                _merge_etf_rows(merged, source.etf_shares(sh_codes, day), source)
             except Exception:
                 continue               # 补历史失败不影响当天：能补多少补多少
         if not merged:

@@ -58,6 +58,39 @@ class DoctorTests(unittest.TestCase):
         result = doctor.report(self.cfg, db_path=self.cfg["_db_path"])
         for key in ("python", "modules", "database", "config"):
             self.assertIn(key, result)
+
+    def test_absurd_market_turnover_is_flagged(self):
+        """全市场成交额量级不对要报警：A 股一天约 0.3–5 万亿。
+
+        踩过：科创板成交量被乘了 100，全市场算出来 13 万亿，
+        而流动性门槛（近 60 日均成交额 ≥3000 万）对 688 的票就形同虚设。
+        """
+        conn = db.connect(self.cfg["_db_path"])
+        db.init_db(conn, PROJECT_ROOT / "schema.sql")
+        db.upsert_rows(conn, "instruments",
+                       [{"code": "SH600000", "name": "浦发银行", "type": "stock"}], ["code"])
+        db.upsert_rows(conn, "bars_daily", [
+            {"code": "SH600000", "trade_date": "2026-09-18", "close": 10.0, "amount": 1.3e13},
+        ], ["code", "trade_date"])
+        conn.close()
+        report = doctor.check_database(self.cfg["_db_path"], PROJECT_ROOT / "schema.sql")
+        self.assertTrue(report.get("amount_scale"), "13 万亿应该被判为量级异常")
+        self.assertIn("成交额量级不对", report["note"])
+
+    def test_normal_turnover_is_not_flagged(self):
+        conn = db.connect(self.cfg["_db_path"])
+        db.init_db(conn, PROJECT_ROOT / "schema.sql")
+        db.upsert_rows(conn, "instruments",
+                       [{"code": "SH600000", "name": "浦发银行", "type": "stock"}], ["code"])
+        db.upsert_rows(conn, "bars_daily", [
+            {"code": "SH600000", "trade_date": "2026-09-18", "close": 10.0, "amount": 2.0e12},
+        ], ["code", "trade_date"])
+        conn.close()
+        report = doctor.check_database(self.cfg["_db_path"], PROJECT_ROOT / "schema.sql")
+        self.assertEqual(report.get("amount_scale"), [])
+
+    def test_render_names_every_part(self):
+        result = doctor.report(self.cfg, db_path=self.cfg["_db_path"])
         text = doctor.render(result)
         for label in ("Python", "必需依赖", "数据源适配器", "数据库", "配置"):
             self.assertIn(label, text)

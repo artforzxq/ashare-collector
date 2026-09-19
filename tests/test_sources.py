@@ -7,6 +7,30 @@ from collector.sources.akshare_source import _num, _symbol
 from collector.sources.baostock_source import _directory_rows as baostock_rows
 from collector.sources.base import classify_symbol, exchange_of, normalize_symbol
 from collector.sources.sina_source import _directory_rows as sina_rows
+from collector.sources.tencent_source import volume_factor
+
+
+class TencentVolumeUnitTests(unittest.TestCase):
+    """腾讯的成交量字段单位按板块不同：**科创板是"股"，其余是"手"**。
+
+    踩过：一律乘 100，科创板（688/689）的成交量和成交额被同时放大 100 倍，
+    库里 11 万行被污染——全市场成交额算出来 13 万亿（真实约 2 万亿），
+    "近 60 日均成交额 ≥3000 万"这道流动性门槛对 688 的票也就形同虚设。
+    逐只与 baostock 对照过：SH688766 腾讯 15,328,486 = baostock 15,328,486（倍数 1）；
+    SH600519 腾讯 2,489,100 vs baostock 2,489,087（倍数 100）。"""
+
+    def test_star_market_is_already_in_shares(self):
+        self.assertEqual(volume_factor("SH688766"), 1.0)
+        self.assertEqual(volume_factor("SH689009"), 1.0)
+
+    def test_other_boards_are_in_lots(self):
+        self.assertEqual(volume_factor("SH600519"), 100.0)
+        self.assertEqual(volume_factor("SZ000333"), 100.0)
+        self.assertEqual(volume_factor("SZ300750"), 100.0)
+        self.assertEqual(volume_factor("BJ830799"), 100.0)
+
+    def test_index_symbols_are_unaffected(self):
+        self.assertEqual(volume_factor("SH000300"), 100.0)
 
 
 class _FakeSource:

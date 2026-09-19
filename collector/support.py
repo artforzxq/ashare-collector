@@ -101,6 +101,11 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
                 thin.append(code)         # 有数据，但只有一天——不是"没数据"，是"还差一天"
             continue
         today, prev = rows[0], rows[1]
+        # 深交所只给"最新份额"，补出来的历史是连续几天同一个数——
+        # 拿它当"前一日"，算出来的 0.00% 会冒充"没变化"。所以估算值不当比较基准。
+        if prev.get("is_estimated") or prev.get("trade_date") == today.get("trade_date"):
+            thin.append(code)
+            continue
         if not today["shares"] or not prev["shares"]:
             continue
         delta = today["shares"] - prev["shares"]

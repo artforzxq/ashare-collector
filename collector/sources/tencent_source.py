@@ -44,6 +44,22 @@ def _to_float(value):
         return None
 
 
+def volume_factor(code: str) -> float:
+    """腾讯的成交量字段：**科创板已经是"股"，其余板块是"手"**。
+
+    实测（2026-09-18，逐只与 baostock 对照）：
+      SH688766（科创板）腾讯 15,328,486　baostock 15,328,486　→ 倍数 1
+      SH600519（沪主板）腾讯 2,489,100　　baostock 2,489,087　　→ 倍数 100（手→股）
+      SZ300750（创业板）腾讯 38,071,300　 baostock 38,071,252　 → 倍数 100
+
+    一律乘 100 会把科创板的成交量和成交额同时放大 100 倍：库里 11 万行被污染，
+    全市场成交额算出来 13 万亿（真实约 2 万亿），而"近 60 日均成交额 ≥3000 万"
+    这道流动性门槛对 688 的票形同虚设。
+    """
+    _, symbol = split_code(str(code or ""))
+    return 1.0 if symbol.startswith("688") or symbol.startswith("689") else 100.0
+
+
 def _parse_intraday(payload: dict, symbol: str, code: str) -> list[dict]:
     """把 minute/query 的返回解析成分钟线。
 
@@ -73,9 +89,9 @@ def _parse_intraday(payload: dict, symbol: str, code: str) -> list[dict]:
         clock, price = parts[0], _to_float(parts[1])
         if not price or len(clock) < 4:
             continue
-        cum_volume = _to_float(parts[2]) or 0.0              # 累计成交量（手）
+        cum_volume = _to_float(parts[2]) or 0.0              # 累计成交量（科创板是股，其余是手）
         cum_amount = _to_float(parts[3]) if len(parts) > 3 else None
-        volume = max(0.0, cum_volume - prev_volume) * 100    # 手 → 股，差分出这一分钟
+        volume = max(0.0, cum_volume - prev_volume) * volume_factor(code)   # 统一成股
         if cum_amount is None:
             amount = round(price * volume, 2)                # 接口没给才估算
         else:
@@ -160,7 +176,7 @@ class TencentSource(BaseSource):
             open_price, close = _to_float(item[1]), _to_float(item[2])
             high, low = _to_float(item[3]), _to_float(item[4])
             lots = _to_float(item[5])
-            volume = lots * 100 if lots is not None else None
+            volume = lots * volume_factor(code) if lots is not None else None
             if close is None:
                 continue
             average = ((high or close) + (low or close) + close) / 3
@@ -285,7 +301,8 @@ class TencentSource(BaseSource):
                 "high": _to_float(fields[33]) if len(fields) > 33 else None,
                 "low": _to_float(fields[34]) if len(fields) > 34 else None,
                 "pct_chg": _to_float(fields[32]) if len(fields) > 32 else None,
-                "volume": (_to_float(fields[36]) or 0.0) * 100 if len(fields) > 36 else None,
+                "volume": round((_to_float(fields[36]) or 0.0) * volume_factor(code), 2)
+                          if len(fields) > 36 else None,
                 "amount": (_to_float(fields[37]) or 0.0) * 1e4 if len(fields) > 37 else None,
                 "quote_time": (f"{when[:4]}-{when[4:6]}-{when[6:8]} {when[8:10]}:{when[10:12]}:{when[12:14]}"
                                if len(when) >= 14 else None),
