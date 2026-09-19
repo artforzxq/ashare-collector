@@ -232,7 +232,160 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
         "regime": regime.latest(conn, cfg, trade_date),
     }
     payload["verdict"] = verdict(payload)
+    payload["detail"] = etf_detail(conn, cfg, trade_date)
+    payload["divergence"] = divergence(conn, cfg)
     return payload
+
+
+def etf_detail(conn, cfg: dict, trade_date: str | None = None, limit: int = 6) -> dict:
+    """明细：今天被申购最多 / 被赎回最多的 ETF 各几只。
+
+    汇总只能看出"宽基在流出、行业在流入"，看不出**具体流到哪个方向**——
+    而后者才是"钱去了哪"的正题。明细是同一套数字往下钻一层，不加新口径。
+    """
+    if trade_date is None:
+        row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM etf_shares")
+        trade_date = row["d"] if row and row["d"] else None
+    if not trade_date:
+        return {"inflow_top": [], "outflow_top": []}
+    prev_row = db.query_one(
+        conn,
+        """SELECT trade_date FROM etf_shares WHERE trade_date<?
+            ORDER BY trade_date DESC LIMIT 1""",
+        (trade_date,),
+    )
+    if not prev_row:
+        return {"inflow_top": [], "outflow_top": []}
+    prev = prev_row["trade_date"]
+    rows = [
+        dict(row)
+        for row in db.query(
+            conn,
+            """SELECT s.code, s.trade_date, s.shares, s.nav, s.source, b.close, b.pct_chg,
+                      i.name, i.type
+                 FROM etf_shares s
+                 LEFT JOIN bars_daily b ON b.code = s.code AND b.trade_date = s.trade_date
+                 LEFT JOIN instruments i ON i.code = s.code
+                WHERE s.trade_date IN (?, ?)""",
+            (trade_date, prev),
+        )
+    ]
+    by_code: dict[str, dict] = {}
+    for row in rows:
+        by_code.setdefault(row["code"], {})[row["trade_date"]] = row
+    items: list[dict] = []
+    for code, pair in by_code.items():
+        now, before = pair.get(trade_date), pair.get(prev)
+        if not now or not before or not before.get("shares") or not now.get("shares"):
+            continue
+        if (now.get("source") or "") != (before.get("source") or ""):
+            continue                      # 混源不比（理由见 _etf_flows）
+        price = now.get("nav") or now.get("close")
+        if not price:
+            continue
+        delta = float(now["shares"]) - float(before["shares"])
+        if abs(delta) < 1e-6:
+            continue
+        items.append({
+            "code": code,
+            "name": (now.get("name") or code),
+            "kind": regime.KIND_LABEL.get(regime.kind_of(cfg, code, now.get("type")), ""),
+            "inflow": round(delta * float(price) / 1e8, 2),
+            "shares_pct": round(delta / float(before["shares"]) * 100, 2),
+            "pct_chg": now.get("pct_chg"),
+            "price": float(price),
+        })
+    items.sort(key=lambda item: -item["inflow"])
+    inflow_items = [item for item in items if item["inflow"] > 0]
+    outflow_items = [item for item in items if item["inflow"] < 0]
+    return {
+        "trade_date": trade_date,
+        "prev_date": prev,
+        "inflow_top": inflow_items[:limit],
+        "outflow_top": outflow_items[-limit:][::-1],
+    }
+
+
+# 宽基 ETF 名字 → 它跟踪的指数。用来算"一级市场申赎 vs 二级市场涨跌"的背离。
+# 为什么按名字：ETF 与指数的对应关系是发行时就定死的，我们没有那张表，
+# 但宽基 ETF 的简称里一定带着指数名（"华泰柏瑞沪深300ETF"）。行业 ETF 不参与——
+# 一个行业对应几十只指数，硬配会配错。
+BENCHMARK_HINTS = (
+    ("上证50", "SH000016"), ("沪深300", "SH000300"), ("中证500", "SH000905"),
+    ("中证1000", "SH000852"), ("科创50", "SH000688"), ("创业板", "SZ399006"),
+)
+
+
+def _benchmark_for(name: str) -> str | None:
+    text = str(name or "")
+    for hint, code in BENCHMARK_HINTS:
+        if hint in text:
+            return code
+    return None
+
+
+def divergence(conn, cfg: dict, days: int = 20) -> dict:
+    """一级市场（ETF 申赎）与二级市场（指数涨跌）的**背离**。
+
+    口径写死成两句话，免得这个数越读越玄：
+      · 当日：宽基 ETF 合计净流入的**符号** vs 沪深300 当日涨跌的**符号**；
+      · 窗口：近 N 个交易日累计净流入 vs 沪深300 同期累计涨跌幅。
+    方向相反 = 背离。**指数涨 + 宽基净赎回**，说明这波不是靠 ETF 申购推上去的
+    （钱更可能来自个股与杠杆）；**指数跌 + 宽基净申购**，说明有人在用宽基接。
+    """
+    bench = "SH000300"
+    rows = [
+        dict(row)
+        for row in db.query(
+            conn,
+            """SELECT trade_date, COALESCE(close_adj, close) AS close
+                 FROM bars_daily WHERE code=? ORDER BY trade_date DESC LIMIT ?""",
+            (bench, days + 1),
+        )
+    ]
+    if len(rows) < 2:
+        return {"ok": False, "message": "没有基准指数日线，算不出背离"}
+    rows.reverse()
+    window_start = rows[0]["trade_date"]
+    bench_change = (float(rows[-1]["close"]) / float(rows[0]["close"]) - 1) * 100
+
+    daily = history(conn, cfg, days)
+    window_flow = sum(item.get("broad_etf") or 0 for item in daily if item["trade_date"] > window_start)
+    today_flow = (daily[-1].get("broad_etf") if daily else None)
+    today_change = None
+    today_row = db.query_one(
+        conn, "SELECT pct_chg FROM bars_daily WHERE code=? AND trade_date=?", (bench, daily[-1]["trade_date"])
+    ) if daily else None
+    if today_row:
+        today_change = today_row["pct_chg"]
+
+    def opposed(flow_value, price_value) -> bool | None:
+        if flow_value is None or price_value is None:
+            return None
+        if abs(flow_value) < 1e-9 or abs(price_value) < 1e-9:
+            return None
+        return (flow_value > 0) != (price_value > 0)
+
+    daily_diverged = opposed(today_flow, today_change)
+    window_diverged = opposed(window_flow, bench_change)
+    notes = []
+    if daily_diverged is True:
+        notes.append("指数与宽基资金反向：上涨不是 ETF 申购推的" if (today_change or 0) > 0
+                     else "指数下跌而宽基被申购：有人在用宽基接")
+    elif daily_diverged is False:
+        notes.append("指数与宽基资金同向：ETF 申购与上涨/下跌方向一致")
+    if window_diverged is True:
+        notes.append(f"近 {days} 个交易日累计也背离（宽基 {window_flow:+.1f} 亿 vs 沪深300 {bench_change:+.2f}%）")
+    return {
+        "ok": True,
+        "days": days,
+        "benchmark": bench,
+        "window_start": window_start,
+        "daily": {"flow": today_flow, "index_pct": today_change, "diverged": daily_diverged},
+        "window": {"flow": round(window_flow, 2), "index_pct": round(bench_change, 2),
+                   "diverged": window_diverged},
+        "note": "；".join(notes) or "样本不足",
+    }
 
 
 def history(conn, cfg: dict, days: int = 20) -> list[dict]:

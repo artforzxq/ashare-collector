@@ -109,6 +109,21 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(snap["ok"])
         self.assertIn("3-每日任务", snap["message"])
 
+    def test_detail_ranks_inflows_and_outflows(self):
+        self._shares("SH510300", 100e8, 110e8)          # +40 亿
+        self._shares("SH512880", 50e8, 40e8)            # −40 亿
+        self.conn.commit()
+        detail = flow.etf_detail(self.conn, self.cfg, "2026-09-18")
+        self.assertEqual([item["code"] for item in detail["inflow_top"]], ["SH510300"])
+        self.assertEqual([item["code"] for item in detail["outflow_top"]], ["SH512880"])
+        self.assertAlmostEqual(detail["inflow_top"][0]["inflow"], 40.0, places=2)
+        self.assertAlmostEqual(detail["inflow_top"][0]["shares_pct"], 10.0, places=2)
+
+    def test_divergence_says_when_it_cannot_tell(self):
+        result = flow.divergence(self.conn, self.cfg)
+        self.assertFalse(result["ok"])
+        self.assertIn("背离", result["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

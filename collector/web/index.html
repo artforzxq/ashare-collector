@@ -1633,6 +1633,25 @@ function renderScopeAnalysis(scope){
 
 /* ---------- 资金去向：钱在宽基 / 行业 ETF / 成交额 / 融资余额之间怎么走 ---------- */
 /* 和"涨跌家数"放同一页：它们回答同一个问题——今天这波涨跌背后，钱是进来还是出去。 */
+// 明细：汇总只看出"宽基在流出、行业在流入"，看不出**具体流到哪个方向**。
+// 同一套数字往下钻一层，不加新口径。
+function detailRows(detail){
+  if (!detail || (!(detail.inflow_top || []).length && !(detail.outflow_top || []).length)) return '';
+  const row = item => `<tr>
+      <td><span class="name">${escapeHtml(item.name)}</span><div class="sub">${item.code}${item.kind ? ' · ' + item.kind : ''}</div></td>
+      <td class="num">${posNeg(item.inflow, signed(item.inflow, 2))}</td>
+      <td class="num sub">${signed(item.shares_pct, 2)}%</td>
+      <td class="num sub">${item.pct_chg == null ? '—' : signed(item.pct_chg, 2) + '%'}</td>
+    </tr>`;
+  return `<div class="hint" style="margin-top:12px"><b>明细（${detail.trade_date} vs ${detail.prev_date}）</b>`
+    + '：汇总只说明方向，明细才看得出钱具体涌进了哪个主题。</div>'
+    + '<div class="panels two" style="margin-top:6px">'
+    + `<div><table class="tbl"><thead><tr><th>净申购 Top</th><th class="num">净流入(亿)</th><th class="num">份额</th><th class="num">当日</th></tr></thead><tbody>`
+    + (detail.inflow_top || []).map(row).join('') + '</tbody></table></div>'
+    + `<div><table class="tbl"><thead><tr><th>净赎回 Top</th><th class="num">净流入(亿)</th><th class="num">份额</th><th class="num">当日</th></tr></thead><tbody>`
+    + (detail.outflow_top || []).map(row).join('') + '</tbody></table></div></div>';
+}
+
 function renderFlow(f){
   const box = $('flowBody');
   if (!f || !f.ok){
@@ -1649,6 +1668,7 @@ function renderFlow(f){
     ? `<span class="tag pos">${label}申购</span>` : (value < 0 ? `<span class="tag neg">${label}赎回</span>` : '<span class="sub">持平</span>');
   const broad = f.broad_etf || {}, sector = f.sector_etf || {}, amount = f.amount || {}, margin = f.margin || {};
   const regime = f.regime || {};
+  const dv = f.divergence || {};
   // 覆盖范围直接标在数字旁边：哪些市场进来了、哪些没进来，是一眼要看出来的前提。
   const scope = f.scope || {};
   const scopeText = (kind) => {
@@ -1685,8 +1705,18 @@ function renderFlow(f){
           <div class="sub">${(margin.by_market || []).map(m =>
             `${({SH:'沪市',SZ:'深市',BJ:'北交所'})[m.market] || m.market} ${m.data_date || '—'} `
             + (m.delta == null ? '缺前一日' : `${m.delta > 0 ? '+' : ''}${Number(m.delta).toFixed(1)} 亿`)).join('　')}</div></td></tr>
+      <tr><td><span class="name">量价背离</span><div class="sub">一级市场申赎 vs 指数涨跌</div></td>
+        <td class="num">${dv.ok ? `${dv.daily.flow == null ? '—' : (dv.daily.flow > 0 ? '+' : '') + Number(dv.daily.flow).toFixed(2)}` : '—'}</td>
+        <td>${!dv.ok ? '<span class="sub">—</span>'
+            : (dv.daily.diverged === true ? '<span class="tag neg">背离</span>'
+               : (dv.daily.diverged === false ? '<span class="tag pos">同向</span>' : '<span class="sub">—</span>'))}</td>
+        <td class="sub">当日：宽基资金 vs 沪深300 ${dv.ok && dv.daily.index_pct != null ? (dv.daily.index_pct > 0 ? '+' : '') + Number(dv.daily.index_pct).toFixed(2) + '%' : '—'}
+          <div class="sub">近 ${dv.days || 20} 日累计：宽基 ${dv.ok ? signed(dv.window.flow, 1) + ' 亿' : '—'} vs 沪深300 ${dv.ok ? signed(dv.window.index_pct, 2) + '%' : '—'}
+          ${dv.ok && dv.window.diverged === true ? '<span class="tag neg">也背离</span>' : ''}</div></td></tr>
     </tbody></table></div>
-    <div class="ai-answer" style="margin-top:10px"><b>读法</b>　${escapeHtml(f.verdict || '')}</div>`;
+    <div class="ai-answer" style="margin-top:10px"><b>读法</b>　${escapeHtml(f.verdict || '')}
+      ${dv.ok && dv.note ? `<br><b>背离</b>　${escapeHtml(dv.note)}` : ''}</div>
+    ${detailRows(f.detail)}`;
   $('flowHint').innerHTML =
     '<b>覆盖范围</b>：沪市 911 只按日披露、能算"较前一日"；'
     + '<b>深市暂缺</b>——深交所那个接口只给"最新份额"、而且无视日期参数（实测两个日期返回一模一样），'
