@@ -267,6 +267,10 @@ canvas{display:block;width:100%}
   .tbl .sub{color:var(--muted);font-size:11.5px}
   .tag{display:inline-block;padding:1px 6px;border-radius:var(--r-xs);font-size:10.5px;
        background:#f1f5f9;color:var(--muted);white-space:nowrap}
+
+  /* AI 分析正文：读起来像一段引用，而不是又一个"结论" */
+  .ai-answer{font-size:13px;line-height:1.95;color:var(--text-2);margin:2px 0 10px;
+             padding:2px 0 2px 12px;border-left:2px solid var(--accent-line)}
   .tag.active{background:var(--accent-soft);color:var(--accent-ink)}
   .tag.shadow{background:var(--warn-soft);color:var(--warn)}
   .pos{color:var(--up)} .neg{color:var(--down)}
@@ -393,6 +397,13 @@ canvas{display:block;width:100%}
         <div class="card panel"><h3>关键带 <span>距最新收盘</span></h3><div id="levels"></div></div>
         <div class="card panel"><h3>本标的提醒</h3><div id="alerts"></div></div>
       </div>
+
+      <div class="card panel">
+        <h3>AI 指标分析 <span class="tag">旁注 · 不参与打分</span><span id="aiMeta"></span>
+          <button class="ghost" id="aiBtn" style="float:right;padding:1px 8px">跑一次分析</button>
+        </h3>
+        <div id="aiBody"></div>
+      </div>
     </section>
 
     <!-- ===================== 全市场 ===================== -->
@@ -450,6 +461,15 @@ canvas{display:block;width:100%}
       </div>
       <div class="block-head"><h2>② 影子因子 · 转正进度</h2><span class="line"></span><span class="kv">样本够不够、跟老因子重不重、有没有独立预测力</span></div>
       <div class="panels" id="shadowList"></div>
+
+      <div class="card panel">
+        <h3>AI 审阅这张台账 <span class="tag">旁注 · 不参与打分</span><span id="ledgerAiMeta"></span>
+          <button class="ghost" id="ledgerAiBtn" style="float:right;padding:1px 8px">让模型看一遍</button>
+        </h3>
+        <div class="hint">喂进去的是每个因子的那几项统计（覆盖天数、IC、相关性、结论），
+          <b>不是</b>几万行明细——明细又贵又读不出东西。一次调用约 1.5k tokens。</div>
+        <div id="ledgerAiBody" style="margin-top:8px"></div>
+      </div>
     </section>
 
     <!-- ===================== 参数回测 ===================== -->
@@ -467,6 +487,15 @@ canvas{display:block;width:100%}
       </div>
       <div class="block-head"><h2>② 怎么读</h2><span class="line"></span></div>
       <div class="card panel"><div class="hint" id="btHelp"></div></div>
+
+      <div class="card panel">
+        <h3>AI 审阅这次回测 <span class="tag">旁注 · 不参与打分</span><span id="btAiMeta"></span>
+          <button class="ghost" id="btAiBtn" style="float:right;padding:1px 8px">让模型看一遍</button>
+        </h3>
+        <div class="hint">喂进去的是摘要：样本量、年数、成本、正超额组数、前几名与当前配置那行的邻域表现，
+          <b>不是</b>整张表——网格调大之后表能有几百行，全喂进去只会让它抓不住重点。一次约 1.2k tokens。</div>
+        <div id="btAiBody" style="margin-top:8px"></div>
+      </div>
     </section>
   </main>
 </div>
@@ -874,6 +903,7 @@ async function selectItem(code){
   await loadKline();
   if (state.chart === 'intraday'){ await loadIntraday(); draw(); }
   loadQuotes();                 // 盯盘区跟着切到这只标的
+  delete analysisCache.instrument; loadAnalysis();
 }
 
 /* 高亮当前标的：认 data-code，不再依赖模板里的类名——改文案不会再点不动 */
@@ -1122,12 +1152,12 @@ let marketData = null;
 /* ---------- 任务（页面上直接跑日终 / 同步 / 筛选） ---------- */
 let jobTimer = null;
 
-async function runJob(key){
+async function runJob(key, code, scope){
   let res;
   try {
     res = await api('/api/jobs', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({job:key})
+      body: JSON.stringify({job:key, code: code || '', scope: scope || ''})
     });
   } catch(e){ toast('启动失败：' + e.message); return; }
   if (!res.ok){ toast(res.message || '任务没启动'); return; }
@@ -1182,6 +1212,7 @@ function afterJob(last){
   if (last.key === 'screen'){ screenData = null; loadScreen(); loadMarket(); }
   if (last.key === 'sync' || last.key === 'snapshot'){ marketData = null; if (!$('viewMarket').hidden) loadMarket(); }
   if (last.key === 'backtest'){ backtestData = null; if (!$('viewBacktest').hidden) loadBacktest(); }
+  if (last.key === 'analyze'){ delete analysisCache[lastAnalyzeScope]; loadScopeAnalysis(lastAnalyzeScope); }
 }
 
 function switchView(name){
@@ -1196,8 +1227,10 @@ function switchView(name){
     loadScreen();
   } else if (name === 'factors'){
     loadFactors();
+    loadScopeAnalysis('ledger');
   } else if (name === 'backtest'){
     loadBacktest();
+    loadScopeAnalysis('backtest');
   } else {
     draw();          // 隐藏时画布宽度为 0，切回来必须重画
   }
@@ -1275,6 +1308,82 @@ function renderRank(id, items){
 }
 
 /* ---------- 搜索 / 增删 ---------- */
+/* ---------- AI 指标分析（百炼）：只读旁注，不进决策链路 ---------- */
+/* 三种口径共用一套渲染：单只标的 / 因子台账 / 回测摘要。
+   它们的共同点比不同点多——都是"读本地算好的数字，写一段旁注，原样留痕"。 */
+const AI_PANELS = {
+  instrument: {meta:'aiMeta', body:'aiBody', btn:'aiBtn'},
+  ledger:     {meta:'ledgerAiMeta', body:'ledgerAiBody', btn:'ledgerAiBtn'},
+  backtest:   {meta:'btAiMeta', body:'btAiBody', btn:'btAiBtn'},
+};
+const AI_EMPTY = {
+  instrument: '这只标的还没有分析过',
+  ledger: '这张台账还没有让模型读过',
+  backtest: '这次回测结果还没有让模型读过',
+};
+const analysisCache = {};
+let lastAnalyzeScope = 'instrument';
+
+function escapeHtml(text){
+  return String(text == null ? '' : text)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function loadScopeAnalysis(scope){
+  const ids = AI_PANELS[scope];
+  if (!ids || !$(ids.body)) return;
+  const code = scope === 'instrument' ? state.code : '';
+  if (scope === 'instrument' && !code){
+    $(ids.meta).textContent = '';
+    $(ids.btn).disabled = true;
+    $(ids.body).innerHTML = '<div class="empty">先选一只标的</div>';
+    return;
+  }
+  $(ids.meta).textContent = '读取中…';
+  $(ids.body).innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  try{
+    analysisCache[scope] = await api(
+      `/api/analysis?scope=${scope}` + (code ? `&code=${encodeURIComponent(code)}` : ''));
+  }catch(e){
+    $(ids.meta).textContent = '';
+    $(ids.body).innerHTML = `<div class="empty">读不到分析：${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderScopeAnalysis(scope);
+}
+
+function renderScopeAnalysis(scope){
+  const ids = AI_PANELS[scope];
+  const d = analysisCache[scope] || {};
+  const btn = $(ids.btn);
+  if (!d.enabled || !d.configured){
+    $(ids.meta).textContent = d.enabled ? '未配置 key' : '已关闭';
+    btn.disabled = true;
+    $(ids.body).innerHTML = d.enabled
+      ? '<div class="empty-state"><b>还没有配百炼的 key</b>把 key 写进 data/bailian.token（这个文件不进版本库），或设环境变量 DASHSCOPE_API_KEY</div>'
+      : '<div class="empty-state"><b>AI 分析已关闭</b>把 config.yaml 里 analysis.bailian.enabled 改成 true 就能用</div>';
+    return;
+  }
+  btn.disabled = false;
+  const item = d.item;
+  if (!item){
+    $(ids.meta).textContent = d.model || '';
+    $(ids.body).innerHTML =
+      `<div class="empty-state"><b>${AI_EMPTY[scope]}</b>点右上角跑一次（${escapeHtml(d.model)}），` +
+      '几秒钟出结果，提示词和回答都会存进 analysis_log，事后可以核对</div>';
+    return;
+  }
+  $(ids.meta).textContent =
+    `${item.model} · ${String(item.created_at).slice(5, 16)} · ${item.tokens} tokens · ${item.latency_ms}ms`;
+  $(ids.body).innerHTML =
+    `<div class="ai-answer">${escapeHtml(item.answer).replace(/\n/g, '<br>')}</div>` +
+    '<div class="hint">这几句话是模型读上面那批数字写的旁注，<b>不参与</b>状态分、关键带和提醒的计算——' +
+    '本地算出来的结论不会因为它而变化。想看它当时看到了什么数字，提示词也存在 analysis_log 里。</div>';
+}
+
+async function loadAnalysis(){ return loadScopeAnalysis('instrument'); }
+function renderAnalysis(){ return renderScopeAnalysis('instrument'); }
+
 /* ---------- 全市场筛选 ---------- */
 let screenData = null, screenCrit = null;
 
@@ -1423,7 +1532,7 @@ function renderBacktest(){
     sample.mode === 'watchlist' ? '观察池口径' : '全市场抽样',
     d.code_count ? `${d.code_count} 只标的` : '',
     d.years ? `${Number(d.years).toFixed(1)} 年` : '',
-    d.cost !== undefined ? `往返成本 ${(d.cost * 100).toFixed(3)}%` : '',
+    d.cost !== undefined ? `往返成本 ${Number(d.cost).toFixed(3)}%` : '',   // 后端给的就是百分数
     d.limit_check ? '已剔除涨停买不进/跌停卖不出' : '未做可成交性检查',
   ].filter(Boolean).join(' · ');
   $('btNote').textContent = `共 ${d.total || items.length} 组，按 20 日净超额排序`;
@@ -1602,6 +1711,10 @@ document.querySelectorAll('#chartTabs button').forEach(btn => {
 document.querySelectorAll('[data-job]').forEach(btn => {
   btn.onclick = () => runJob(btn.dataset.job);
 });
+/* AI 分析要带上当前标的，所以单独接一下（其余任务按钮不需要 code） */
+if ($('aiBtn')) $('aiBtn').onclick = () => { lastAnalyzeScope = 'instrument'; runJob('analyze', state.code); };
+if ($('ledgerAiBtn')) $('ledgerAiBtn').onclick = () => { lastAnalyzeScope = 'ledger'; runJob('analyze', '', 'ledger'); };
+if ($('btAiBtn')) $('btAiBtn').onclick = () => { lastAnalyzeScope = 'backtest'; runJob('analyze', '', 'backtest'); };
 $('helpBtn').onclick = () => toggleHelp();
 $('helpClose').onclick = () => toggleHelp();
 /* 悬停 120ms 后才弹说明：划过时不会闪一下 */

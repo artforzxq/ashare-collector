@@ -303,13 +303,58 @@ class App:
             "total": len(results),
         }
 
+    def analysis(self, code: str = "", scope: str = "") -> dict:
+        """最近一次 AI 分析（百炼）。没有就直说，不假装有。
+
+        注意定位：分析是**旁注**，读的是本地算好的数字，不回写任何结论。
+        所以这里只负责把存过的那一条拿出来，外加"能不能再跑"的开关状态。
+
+        scope：instrument 单只标的（要看 code）/ ledger 因子台账 / backtest 回测摘要。
+        """
+        from . import analysis as analysis_mod
+
+        scope = scope or analysis_mod.SCOPE_INSTRUMENT
+        if scope == analysis_mod.SCOPE_INSTRUMENT and not code:
+            return {"ok": False, "message": "没指定标的"}
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            conf = analysis_mod.settings(self.cfg)
+            key, source = analysis_mod.resolve_key(self.cfg)
+            row = analysis_mod.latest(conn, code, scope=scope)
+            return {
+                "ok": True,
+                "scope": scope,
+                "enabled": conf["enabled"],
+                "configured": bool(key),
+                "key_source": source,
+                "model": conf["model"],
+                "item": (
+                    {
+                        "code": row["code"] or ("因子台账" if scope == analysis_mod.SCOPE_LEDGER else "回测摘要"),
+                        "trade_date": row["trade_date"],
+                        "model": row["model"],
+                        "created_at": row["created_at"],
+                        "answer": row["answer"],
+                        "tokens": (row["prompt_tokens"] or 0) + (row["answer_tokens"] or 0),
+                        "latency_ms": row["latency_ms"],
+                    }
+                    if row
+                    else None
+                ),
+            }
+        finally:
+            conn.close()
+
     # ---- 页面上的任务按钮 ----
 
     def job_state(self) -> dict:
         return self.jobs.state()
 
-    def run_job(self, key: str) -> dict:
-        """页面按钮统一走这里：同一时刻只允许一个任务。"""
+    def run_job(self, key: str, code: str = "", scope: str = "") -> dict:
+        """页面按钮统一走这里：同一时刻只允许一个任务。
+
+        `code` / `scope` 只有 AI 分析用得到：单只看 code，台账与回测看 scope。
+        """
         cfg = self.cfg
 
         def daily():
@@ -393,6 +438,28 @@ class App:
             finally:
                 conn.close()
 
+        def analyze():
+            from . import analysis as analysis_mod
+
+            target_scope = scope or analysis_mod.SCOPE_INSTRUMENT
+            conn = db.connect(cfg["_db_path"])
+            try:
+                if target_scope == analysis_mod.SCOPE_INSTRUMENT:
+                    target = code or next((item["code"] for item in watchlist_codes(cfg)), "")
+                    if not target:
+                        raise RuntimeError("没指定标的，观察池也是空的")
+                else:
+                    target = ""
+                result = analysis_mod.run(conn, cfg, target_scope, code=target)
+                if not result.get("ok"):
+                    raise RuntimeError(result.get("note") or "分析失败")
+                usage = result.get("usage") or {}
+                label = target or ("因子台账" if target_scope == analysis_mod.SCOPE_LEDGER else "回测摘要")
+                return (f"{label} 分析完成（{result['model']}，"
+                        f"{usage.get('prompt_tokens')}+{usage.get('completion_tokens')} tokens）")
+            finally:
+                conn.close()
+
         table = {
             "daily": ("更新自选数据", daily),
             "sync": ("同步全市场", sync),
@@ -401,6 +468,7 @@ class App:
             "intraday": ("抓当日分时", intraday),
             "push": ("推送简报到手机", push),
             "backtest": ("跑参数回测", backtest),
+            "analyze": ("AI 分析这只标的", analyze),
         }
         entry = table.get(key)
         if entry is None:
@@ -781,7 +849,7 @@ def _health_payload(cfg: dict) -> dict:
         "stale": newest > PROCESS_STARTED_TS,
         "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
                    "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
-                   "/api/jobs", "/api/factors", "/api/backtest"],
+                   "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis"],
     }
 
 
@@ -879,6 +947,8 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes(app.factors())
             if path == "/api/backtest":
                 return _payload_bytes(app.backtest())
+            if path == "/api/analysis":
+                return _payload_bytes(app.analysis(query.get("code", ""), query.get("scope", "")))
             if path == "/api/meta":
                 return _payload_bytes(_meta_payload(app.cfg))
             if path == "/api/market":
@@ -905,7 +975,9 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 payload = json.loads(body or b"{}")
             except Exception:
                 payload = {}
-            return _payload_bytes(app.run_job(payload.get("job", "")))
+            return _payload_bytes(app.run_job(
+                payload.get("job", ""), payload.get("code", ""), payload.get("scope", "")
+            ))
         return _payload_bytes({"error": "接口不存在"}, 404)
     except Exception as exc:                      # 让页面能显示错误，而不是白屏
         return _payload_bytes({"error": f"{type(exc).__name__}: {exc}"}, 500)

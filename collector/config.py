@@ -75,6 +75,21 @@ DEFAULTS: Dict[str, Any] = {
             "state_file": "data/last-push.txt",
         }
     },
+    # AI 指标分析（阿里云百炼）：只读旁注层，不进决策链路，见 collector/analysis.py
+    "analysis": {
+        "bailian": {
+            "enabled": False,
+            "model": "qwen-plus",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "token": "",
+            "token_env": "DASHSCOPE_API_KEY",
+            "token_file": "data/bailian.token",
+            "max_tokens": 900,
+            "temperature": 0.2,
+            "timeout": 60,
+            "daily_limit": 20,
+        }
+    },
     "warehouse": {
         "snapshot_daily": True,
         "history_days": 750,

@@ -235,6 +235,28 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_date ON alerts (trade_date, level);
 
+-- AI 指标分析留痕（百炼 / DashScope）。注意：这张表**只记录**，不参与任何计算——
+-- 状态、关键带、仓位上限、提醒都是确定性代码算的，模型的话只当旁注。
+-- 存原始 prompt 与回答，是为了事后能回答"这句话当时是根据什么数字说出来的"。
+CREATE TABLE IF NOT EXISTS analysis_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT, -- 自增主键
+  created_at    TEXT NOT NULL, -- 调用时间
+  scope         TEXT,          -- 分析对象：instrument 单只标的 / ledger 因子台账 / backtest 回测结果
+  trade_date    TEXT,          -- 分析的交易日
+  code          TEXT,          -- 标的代码（台账与回测这两类为 NULL）
+  provider      TEXT,          -- 服务商：bailian（阿里云百炼）
+  model         TEXT,          -- 模型名，如 qwen-plus
+  prompt        TEXT,          -- 实际发出的提示词（含喂进去的全部数字）
+  answer        TEXT,          -- 模型回答原文
+  prompt_tokens INTEGER,       -- 输入 token 数
+  answer_tokens INTEGER,       -- 输出 token 数
+  latency_ms    INTEGER,       -- 往返耗时，单位：毫秒
+  status        TEXT,          -- ok 成功 / failed 失败
+  error_msg     TEXT           -- 失败原因（成功为 NULL）
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_code ON analysis_log (code, created_at);
+
 CREATE TABLE IF NOT EXISTS data_health (
   run_date     TEXT NOT NULL, -- 任务运行日
   source       TEXT NOT NULL, -- 数据源名称

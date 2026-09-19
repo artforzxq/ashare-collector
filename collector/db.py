@@ -53,6 +53,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     "market_breadth": {
         "coverage": "INTEGER",
     },
+    # AI 分析一开始只记单只标的，后来加了台账与回测两类，补一列标明对象
+    "analysis_log": {
+        "scope": "TEXT",
+    },
 }
 
 

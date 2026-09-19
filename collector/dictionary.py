@@ -29,12 +29,28 @@ TABLE_DOCS: dict[str, str] = {
     "factor_registry": "指标台账：每个因子的角色、权重、生命周期",
     "factor_contributions": "因子贡献：回答“结论是被谁拉过去的”",
     "arbitration_log": "仲裁日志：记录被压制或降级的信号，以及依据的规则",
+    "analysis_log": "AI 分析留痕：模型读过的数字与它说的话（只记录，不参与任何计算）",
     "rule_version": "规则版本：权重或规则每改一次都要留版本",
     "data_dictionary": "数据字典：表与字段的中文说明（本表）",
 }
 
 # 字段说明：(中文名/含义, 补充提示)
 FIELD_DOCS: dict[str, dict[str, tuple[str, str]]] = {
+    "analysis_log": {
+        "id": ("自增主键", ""),
+        "created_at": ("调用时间", "同一只标的同一天可以有多条"),
+        "trade_date": ("分析的交易日", "用的是当日日终算出来的数字"),
+        "code": ("标的代码", ""),
+        "provider": ("服务商", "bailian = 阿里云百炼（DashScope）"),
+        "model": ("模型名", "如 qwen-plus / qwen-max"),
+        "prompt": ("实际发出的提示词", "含喂给模型的全部数字，可核对它当时看到了什么"),
+        "answer": ("模型回答原文", "只是旁注，不参与状态分与提醒的计算"),
+        "prompt_tokens": ("输入 token 数", "按次计费的依据"),
+        "answer_tokens": ("输出 token 数", ""),
+        "latency_ms": ("往返耗时", "单位：毫秒"),
+        "status": ("结果", "ok 成功 / failed 失败"),
+        "error_msg": ("失败原因", "成功时为 NULL"),
+    },
     "instruments": {
         "code": ("标的代码，带交易所前缀", "如 SH510300、SZ159919、SH000300"),
         "name": ("标的名称", "未接名称源时与代码相同"),

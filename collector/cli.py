@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import (
+    analysis as analysis_mod,
     backtest as backtest_mod,
     breadth as breadth_mod,
     candidates as candidates_mod,
@@ -167,6 +168,85 @@ def cmd_push(args) -> int:
         print("")
         print(result["content"])
     return 0 if result.get("ok") or result.get("skipped") else 1
+
+
+def cmd_analyze(args) -> int:
+    """让百炼读一遍已经算好的指标，作为旁注。
+
+    注意它不是结论：状态、关键带、仓位上限、提醒都由本地确定性代码算，
+    模型只看、只说，不回写任何东西。没 key / 没网 / 模型抽风都只影响这一次调用。
+
+    三个口径：默认单只标的；`--ledger` 审整张因子台账；`--backtest` 审回测摘要。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        scope = (analysis_mod.SCOPE_LEDGER if args.ledger
+                 else analysis_mod.SCOPE_BACKTEST if args.backtest
+                 else analysis_mod.SCOPE_INSTRUMENT)
+
+        if args.show:
+            targets = ([args.code] if args.code else
+                       [item["code"] for item in watchlist_codes(cfg)] if scope == analysis_mod.SCOPE_INSTRUMENT
+                       else [None])
+            for code in targets:
+                row = analysis_mod.latest(conn, code, scope=scope)
+                if not row:
+                    continue
+                label = code or ("因子台账" if scope == analysis_mod.SCOPE_LEDGER else "回测摘要")
+                print(f"===== {label}（{row['model']}，{row['created_at']}）=====")
+                print(row["answer"])
+                print("")
+                return 0
+            print("本地还没有存过这类分析，先跑一次：python run.py analyze "
+                  + ("--ledger" if scope == analysis_mod.SCOPE_LEDGER else
+                     "--backtest" if scope == analysis_mod.SCOPE_BACKTEST else (args.code or "")))
+            return 0
+
+        if scope != analysis_mod.SCOPE_INSTRUMENT:
+            result = analysis_mod.run(conn, cfg, scope, model=args.model,
+                                      dry_run=args.dry_run, force=args.force)
+            if args.dry_run:
+                print(result.get("prompt", ""))
+                return 0
+            if not result.get("ok"):
+                print(result.get("note") or "分析失败")
+                return 1
+            usage = result.get("usage") or {}
+            print(f"===== {result.get('scope')}（{result['model']}，{result.get('latency_ms')}ms，"
+                  f"{usage.get('prompt_tokens')}+{usage.get('completion_tokens')} tokens）=====")
+            print(result["text"])
+            return 0
+
+        codes = [args.code] if args.code else [item["code"] for item in watchlist_codes(cfg)]
+        if not codes:
+            print("观察池是空的，先加标的或在命令里指定代码")
+            return 1
+        if not args.all and len(codes) > 1:
+            codes = codes[:1]          # 不指定 --all 时只分析第一只，免得手一抖刷掉整个观察池
+
+        failed = 0
+        for code in codes:
+            if args.dry_run:
+                result = analysis_mod.analyze(conn, cfg, code, trade_date=args.date, dry_run=True)
+                print(result.get("prompt", ""))
+                print("")
+                continue
+            result = analysis_mod.analyze(conn, cfg, code, trade_date=args.date,
+                                          model=args.model, force=args.force)
+            if not result.get("ok"):
+                failed += 1
+                print(f"{code}：{result.get('note') or '分析失败'}")
+                continue
+            usage = result.get("usage") or {}
+            print(f"===== {result['code']} {result.get('name') or ''} {result['trade_date']}"
+                  f"（{result['model']}，{result.get('latency_ms')}ms，"
+                  f"{usage.get('prompt_tokens')}+{usage.get('completion_tokens')} tokens）=====")
+            print(result["text"])
+            print("")
+        return 1 if failed else 0
+    finally:
+        conn.close()
 
 
 def cmd_daily(args) -> int:
@@ -696,6 +776,19 @@ def build_parser() -> argparse.ArgumentParser:
     push.add_argument("--print-content", action="store_true", help="把要推送的正文也打印出来")
     push.add_argument("--db", help="数据库路径")
     push.set_defaults(func=cmd_push)
+
+    analyze = sub.add_parser("analyze", help="让百炼读一遍指标（只读旁注，不改任何结论）")
+    analyze.add_argument("code", nargs="?", help="标的代码；不填就取观察池第一只")
+    analyze.add_argument("--all", action="store_true", help="观察池全部标的都跑一遍（会真的计费）")
+    analyze.add_argument("--date", help="交易日 YYYY-MM-DD")
+    analyze.add_argument("--model", help="换一个模型，如 qwen-max / qwen3-max")
+    analyze.add_argument("--dry-run", action="store_true", help="只打印会发出去的提示词，不调用")
+    analyze.add_argument("--force", action="store_true", help="无视每日调用上限")
+    analyze.add_argument("--show", action="store_true", help="只读本地存过的分析，不调用")
+    analyze.add_argument("--ledger", action="store_true", help="审整张因子台账（汇总，不喂明细）")
+    analyze.add_argument("--backtest", action="store_true", help="审最近一次回测的摘要")
+    analyze.add_argument("--db", help="数据库路径")
+    analyze.set_defaults(func=cmd_analyze)
 
     factors = sub.add_parser("factors", help="回放某只标的的因子贡献")
     factors.add_argument("code", help="标的代码，如 SH000300")

@@ -14,6 +14,7 @@
 
 - [快速开始](#快速开始) · [启动文件清单](#启动文件清单) · [自动运行与手机推送](#自动运行与手机推送)
   · [看盘页面](#看盘页面)
+- [AI 指标分析（百炼）](#ai-指标分析百炼)
 - [数据从哪来](#数据从哪来) · [决策链路](#决策链路)
 - [复盘与回测](#复盘与回测) · [全市场筛选](#全市场筛选) · [因子台账](#因子台账与影子因子)
 - [看数据](#看数据) · [目录结构](#目录结构) · [两台电脑](#两台电脑win--mac)
@@ -119,6 +120,7 @@ bash macos/24-自动运行.command off      # 关掉
 | 生成单文件 HTML 简报 | `python run.py dashboard` |
 | 生成可发微信的看板图 | `python run.py share` |
 | 把当天简报推到手机 | `python run.py push`（`--test` 只发测试消息、`--dry-run` 只演练） |
+| 让模型读一遍指标（旁注） | `python run.py analyze SH600487`，另有 `--ledger` / `--backtest` |
 | 全市场同步（分批补历史，可中断） | `python run.py sync` |
 | 全市场筛选 | `python run.py screen` |
 | 观察池候选（谁进谁出） | `python run.py candidates` |
@@ -155,6 +157,42 @@ bash macos/24-自动运行.command off      # 关掉
 
 后两个视图是只读的：因子台账直接读库里的 `factor_registry` + `factor_contributions`，
 回测视图读 `回测/回测结果-*.json`（跑过 CLI 或页面上的「跑一次回测」就会有）。
+
+## AI 指标分析（百炼）
+
+接了阿里云百炼（DashScope），让模型读一遍**本地已经算好的数字**，写一段人话旁注。
+用的是 OpenAI 兼容接口，走标准库 `urllib`，没有新增依赖。
+
+**它只接三处，而且全部手动触发：**
+
+| 接在哪 | 喂进去什么 | 不喂什么 | 一次成本 |
+|---|---|---|---|
+| 自选标的页底部 | 这一只的状态、趋势分、机会分、关键带、仓位上限/止损、因子贡献、提醒、数据质量 | —— | 约 1.0k tokens |
+| 因子台账页底部 | **每个因子的汇总**（覆盖天数、IC5/IC20、最大相关、系统给的结论） | 几万行 `factor_contributions` 明细 | 约 1.3k tokens |
+| 回测页底部 | **摘要**：样本量/年数/成本/正超额组数 + 前几名与当前配置那行的邻域表现 | 整张参数网格（几百行） | 约 1.3k tokens |
+
+**绝对没有接的地方，以及为什么：**
+
+- 不接进日终任务：每天给观察池每只票都问一遍，一年下来是几十万 tokens，而且大部分日子没人看；
+- 不接全市场（哪怕筛选后的几百只也不行）：一次就是几十万 tokens；
+- 不接打分、筛选、提醒——这是硬约束，不是省钱：模型的话一旦能改状态分，
+  同一份数据两次运行就会得出两个结论，整套审计立刻失去意义。
+
+另外两道闸门：默认**每天最多 20 次真实调用**（`analysis.bailian.daily_limit`，超了直接拒绝，
+`--force` 才能绕过），以及每次调用都原样落库（`analysis_log`：提示词、回答、token、耗时）。
+提示词里明确禁止给目标价、预测点位和买卖建议，要求"数据不足就直说"。
+
+key 放在 `data/bailian.token`（已被 `.gitignore` 排除，权限 600），或用环境变量 `DASHSCOPE_API_KEY`。
+**不要**写进 `config.yaml`。
+
+```
+python run.py analyze SH600487        # 单只标的
+python run.py analyze --ledger        # 审整张因子台账
+python run.py analyze --backtest      # 审最近一次回测摘要
+python run.py analyze --all           # 观察池全部（会真的计费，慎用）
+python run.py analyze --show          # 只看存过的，不调用
+python run.py analyze SH600487 --dry-run   # 只打印要发出去的提示词
+```
 
 ### 自选标的
 
