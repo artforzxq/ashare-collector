@@ -89,6 +89,62 @@ class QuotesTests(unittest.TestCase):
         self.assertEqual(payload["items"], [])
 
 
+class KlineCandleMarkTests(unittest.TestCase):
+    """K 线接口只给"关键位置上的明显形态"打标记，而不是每根都标。
+
+    页面每天早上开盘前是给人看的：一年 250 根 K 线，如果每根都挂个"十字星"，
+    标记就没有信息量了。口径定在 collector/candles.marks，接口只负责搬。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=root)
+        self.cfg["_db_path"] = str(root / "t.db")
+        conn = db.connect(self.cfg["_db_path"])
+        db.init_db(conn, PROJECT_ROOT / "schema.sql")
+        rows = []
+        for index in range(20):                        # 20 天横盘：9.8 ~ 10.2
+            rows.append(self._bar(index, 10.0, 10.2, 9.8, 10.0))
+        rows.append(self._bar(20, 9.9, 9.95, 9.4, 9.5))      # 破 20 日低 + 长阴（关键位置）
+        rows.append(self._bar(21, 9.5, 9.75, 9.45, 9.7))     # 区间中部（不是关键位置）
+        db.upsert_rows(conn, "bars_daily", rows, ["code", "trade_date"])
+        conn.commit()
+        conn.close()
+        self.app = server.App(self.cfg)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _bar(index: int, open_, high, low, close) -> dict:
+        return {
+            "code": "SH600000", "trade_date": f"2026-01-{index + 1:02d}",
+            "open": open_, "high": high, "low": low, "close": close,
+            "volume": 1_000_000.0, "amount": 10_000_000.0, "pct_chg": 0.0,
+            "quality_flag": "ok",
+        }
+
+    def test_only_key_position_bars_get_a_mark(self):
+        payload = self.app.kline("SH600000", days=60)
+        marked = {bar["trade_date"]: bar.get("candle") for bar in payload["bars"] if bar.get("candle")}
+        self.assertEqual(list(marked), ["2026-01-21"])
+        self.assertIn("破 20 日低", marked["2026-01-21"]["reasons"])
+        self.assertTrue(marked["2026-01-21"]["down"])
+
+    def test_bars_without_a_mark_stay_lean(self):
+        """没标记的 K 线不该多带字段——250 根 × 一堆字段会白白撑大返回值。"""
+        payload = self.app.kline("SH600000", days=60)
+        for bar in payload["bars"]:
+            if bar["trade_date"] == "2026-01-21":
+                continue
+            self.assertNotIn("candle", bar)
+
+    def test_unknown_code_still_answers(self):
+        payload = self.app.kline("SH999999", days=30)
+        self.assertEqual(payload["bars"], [])
+
+
 class RouteTests(unittest.TestCase):
     def test_new_routes_are_advertised(self):
         cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=PROJECT_ROOT)

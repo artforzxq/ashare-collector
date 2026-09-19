@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, market_time, notify, tasks, warehouse as warehouse_mod
+from . import candles as candles_mod, db, market_time, notify, tasks, warehouse as warehouse_mod
 from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
@@ -433,6 +433,8 @@ class App:
             )
             payload["min_avg_amount"] = universe_mod.min_avg_amount(self.cfg)
             payload["outcomes"] = screen_mod.outcome_stats(conn)
+            # 按交易日聚合 + 多重检验校正：8 个形态里最好的那个，t 值本身就被挑过一遍
+            payload["pattern_stats"] = screen_mod.pattern_stats(conn, self.cfg)
             self._pool_cache = (now, payload)
             return payload
         except Exception as exc:            # 页面永远不该白屏
@@ -725,6 +727,18 @@ class App:
                     (code, code),
                 )
             ]
+            # K 线形态标记：只给"关键位置 + 明显形态"的那些（口径在 candles.marks 里定死）。
+            # 每天画形态等于没画——250 根 K 线里每根都能被叫做"十字星"或"长阳"。
+            marks = {item["trade_date"]: item for item in candles_mod.marks(bars)}
+            for bar in bars:
+                mark = marks.get(bar["trade_date"])
+                if mark:
+                    bar["candle"] = {
+                        "pattern": mark["pattern"],
+                        "up": mark["up"],
+                        "down": mark["down"],
+                        "reasons": mark["reasons"],
+                    }
             alerts = [
                 dict(row)
                 for row in db.query(
@@ -926,7 +940,7 @@ def _meta_payload(cfg: dict) -> dict:
                  ("base_cap", "target_atr_pct", "stop_buffer_pct", "atr_stop_multiple",
                   "max_stop_pct", "win_rate", "target_expectancy",
                   "open_space_high_tolerance_pct", "open_space_atr_multiple",
-                  "no_resistance_rr", "cap_floor", "turnover_discount")},
+                  "no_resistance_rr", "cap_floor", "turnover_discount", "structure_stop")},
         "alerts": cfg.get("alerts") or {},
         "feature_version": (cfg.get("project") or {}).get("feature_version"),
         "factors": [

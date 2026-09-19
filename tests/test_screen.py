@@ -212,6 +212,90 @@ class OutcomeBackfillTests(unittest.TestCase):
         self.assertIn("突破", text)
 
 
+class PatternStatsTests(unittest.TestCase):
+    """形态统计：按交易日聚合 + 多重检验校正。
+
+    这是整个筛选池最容易被自己骗到的地方：同时看了 8 个形态，总有一个"看起来还行"；
+    同一天几十只票一起涨跌，按样本算误差棒又会窄得离谱。两件事都得治。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.conn = db.connect(str(root / "t.db"))
+        db.init_db(self.conn, PROJECT_ROOT / "schema.sql")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _add(self, criterion: str, day: str, outcome: float, samples: int = 1):
+        rows = [
+            {"trade_date": day, "criterion": criterion, "rank_no": index + 1,
+             "code": f"SH6000{index:02d}", "name": "测试", "close": 10.0, "pct_chg": 1.0,
+             "state": "range", "trend_score": 50.0, "vol_ratio": 1.5, "detail": "",
+             "outcome_5d": outcome, "outcome_20d": outcome, "created_at": "2026-09-19 15:00:00"}
+            for index in range(samples)
+        ]
+        db.upsert_rows(self.conn, "screen_results", rows, ["trade_date", "criterion", "code"])
+        self.conn.commit()
+
+    def test_daily_aggregation_weights_days_not_samples(self):
+        """一天 1 条 +3%、另一天 100 条 +2%：按日算应该是 2.5%，不是被 100 条压到 2.0%。"""
+        self._add("形态A", "2026-09-10", 3.0, samples=1)
+        self._add("形态A", "2026-09-11", 2.0, samples=100)
+        result = screen.pattern_stats(self.conn, baseline={"2026-09-10": 0.0, "2026-09-11": 0.0})
+        item = result["patterns"][0]
+        self.assertEqual(item["days"], 2)
+        self.assertAlmostEqual(item["excess"], 2.5, places=4)
+
+    def test_excess_is_measured_against_the_same_day_baseline(self):
+        self._add("形态A", "2026-09-10", 3.0)
+        self._add("形态A", "2026-09-11", 3.0)
+        result = screen.pattern_stats(self.conn, baseline={"2026-09-10": 1.0, "2026-09-11": 1.0})
+        self.assertAlmostEqual(result["patterns"][0]["excess"], 2.0, places=4)
+        self.assertEqual(result["baseline"], "market")
+
+    def test_pattern_count_is_penalised(self):
+        """同样的 t 值，看了 8 个形态之后就不再显著——这就是数据窥探的代价。"""
+        days = ["2026-09-10", "2026-09-11", "2026-09-12"]
+        for day, value in zip(days, (3.0, 2.0, 4.0)):
+            self._add("形态A", day, value)
+        one = screen.pattern_stats(self.conn, baseline={day: 0.0 for day in days})
+        for day, value in zip(days, (0.1, -0.1, 0.2)):
+            self._add("形态B", day, value)
+        many = screen.pattern_stats(self.conn, baseline={day: 0.0 for day in days})
+        self.assertEqual(many["tests"], 2)
+        self.assertAlmostEqual(many["crit_t"], 2.24, places=2)      # Bonferroni 口径的入门门槛
+        first = {item["criterion"]: item for item in many["patterns"]}["形态A"]
+        single = {item["criterion"]: item for item in one["patterns"]}["形态A"]
+        self.assertGreaterEqual(first["p_adj"], single["p_adj"])
+
+    def test_days_without_a_sample_are_skipped(self):
+        self._add("形态A", "2026-09-10", 3.0)
+        result = screen.pattern_stats(self.conn, baseline={"2026-09-10": 0.0, "2026-09-11": 0.0})
+        self.assertEqual(result["patterns"][0]["days"], 1)
+        self.assertIsNone(result["patterns"][0]["t"])               # 一天算不出 t，不硬给
+
+    def test_missing_benchmark_is_said_out_loud(self):
+        """基准序列取不到就直说，不能拿 0 当基准糊过去。"""
+        self._add("形态A", "2026-09-10", 3.0)
+        result = screen.pattern_stats(self.conn)
+        self.assertEqual(result["baseline"], "missing")
+        self.assertEqual(result["patterns"][0]["days"], 0)
+
+    def test_report_prints_the_corrected_block(self):
+        for index in range(5):
+            self._add("形态A", f"2026-09-1{index}", 3.0 + index)
+            self._add("形态B", f"2026-09-1{index}", -2.0 - index)
+        days = [f"2026-09-1{index}" for index in range(5)]
+        baseline = {"mean": 0.0, "per_date": {day: 0.0 for day in days}}
+        text = screen.performance_report(self.conn, baseline=baseline)
+        self.assertIn("按交易日聚合", text)
+        self.assertIn("校正后 |t| ≥", text)
+        self.assertIn("形态A", text)
+
+
 class LiquidityFilterTests(unittest.TestCase):
     """小票过滤：成交额不够的票根本不进筛选，而不是排在后面。
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import statistics
 import time
 
-from . import candles as candles_mod, db, features as features_mod, review, rules, universe
+from . import candles as candles_mod, db, features as features_mod, review, rules, stats as stats_mod, universe
 from .names import display_name
 from .registry import FactorRegistry
 
@@ -598,13 +598,94 @@ def equal_weight_baseline(conn, cfg: dict, dates: list[str], horizon: int = 20,
     means = [statistics.mean(per_date[day]) for day in dates if per_date[day]]
     medians = [statistics.median(per_date[day]) for day in dates if per_date[day]]
     if not means:
-        return {"mean": None, "median": None, "days": 0, "universe": len(picked["codes"])}
+        return {"mean": None, "median": None, "days": 0, "universe": len(picked["codes"]),
+                "per_date": {}}
     return {
         "mean": round(statistics.mean(means), 4),
         "median": round(statistics.mean(medians), 4),
         "days": len(means),
         "horizon": horizon,
         "universe": len(picked["codes"]),
+        # 逐日基准：形态统计要按交易日聚合，所以"每天的基准"必须逐日落下来
+        "per_date": {day: round(statistics.mean(values), 4)
+                     for day, values in per_date.items() if values},
+    }
+
+
+def pattern_stats(conn, cfg: dict | None = None, horizon: int = 20,
+                  baseline: dict | None = None) -> dict:
+    """每种形态的超额表现：**按交易日聚合**的 t 值 + 按形态个数做多重检验校正。
+
+    三件事一起做才算数：
+      1. 同一天被筛出来的几十只票不是独立观测（一起涨一起跌），先按日取均值再统计；
+      2. 同时看了 8 个形态，最好的那个的 t 值本身就被"挑"过一遍，要按形态数量惩罚；
+      3. 超额要减基准——减沪深300 只是及格线，减"全市场等权"才是形态自己的信息量
+         （全市场那套口径贵，只有 22-历史重放 会算；页面即时算时用沪深300）。
+
+    baseline 给 {交易日: 基准收益%} 就用它（全市场等权口径），没给就现算沪深300。
+    """
+    column = f"outcome_{horizon}d"
+    rows = [
+        dict(row)
+        for row in db.query(
+            conn,
+            f"""SELECT criterion, trade_date,
+                       AVG({column})  AS avg,
+                       COUNT({column}) AS done
+                FROM screen_results
+                GROUP BY criterion, trade_date
+                ORDER BY trade_date""",
+        )
+    ]
+    date_list = sorted({row["trade_date"] for row in rows})
+    if baseline is None:
+        baseline = _benchmark_returns(conn, date_list, horizon)
+        baseline_kind = "hs300"
+    else:
+        baseline_kind = "market"
+    if not baseline:
+        baseline_kind = "missing"          # 基准序列取不到 —— 直说，别拿 0 当基准
+
+    by_pattern: dict[str, dict[str, list[float]]] = {}
+    samples: dict[str, int] = {}
+    for row in rows:
+        samples[row["criterion"]] = samples.get(row["criterion"], 0) + int(row["done"] or 0)
+        base = baseline.get(row["trade_date"])
+        if base is None or row["avg"] is None or not row["done"]:
+            continue
+        by_pattern.setdefault(row["criterion"], {}).setdefault(row["trade_date"], []).append(
+            float(row["avg"]) - float(base)
+        )
+
+    tests = sum(1 for days in by_pattern.values() if days)
+    items = []
+    # 基准缺失、或者某个形态还没有回填结果时，也要把形态列出来（days=0），
+    # 否则页面上会变成"什么都没有"，看不出是"没数据"还是"没算"。
+    for criterion in sorted(samples):
+        by_day = by_pattern.get(criterion, {})
+        stats = stats_mod.daily_mean_stats(by_day)
+        p_value = stats_mod.two_sided_p(stats["t"])
+        items.append(
+            {
+                "criterion": criterion,
+                "days": stats["days"],
+                "samples": samples.get(criterion, 0),
+                "excess": round(stats["mean"], 4) if stats["mean"] is not None else None,
+                "excess_sd": round(stats["sd"], 4) if stats["sd"] is not None else None,
+                "ci95": stats["ci95"],
+                "t": stats["t"],
+                "p": p_value,
+                "p_adj": stats_mod.sidak_adjust(p_value, tests),
+            }
+        )
+    items.sort(key=lambda item: (item["excess"] is None, -(item["excess"] or 0)))
+    return {
+        "patterns": items,
+        "tests": tests,
+        "crit_t": stats_mod.crit_t(tests),
+        "baseline": baseline_kind,
+        "horizon": horizon,
+        "dates": len(date_list),
     }
 
 
@@ -657,4 +738,37 @@ def performance_report(conn, min_sample: int = 20, baseline: dict | None = None)
     thin = [row for row in stats if row["done20"] and row["done20"] < min_sample]
     if thin:
         lines.append(f"（另有 {len(thin)} 个形态的 20 日样本不足 {min_sample} 条，只能当方向看）")
+    lines.extend(_pattern_stats_lines(conn, cfg=None, baseline=baseline))
     return "\n".join(lines)
+
+
+def _pattern_stats_lines(conn, cfg: dict | None = None,
+                         baseline: dict | None = None, horizon: int = 20) -> list[str]:
+    """按交易日聚合 + 多重检验校正的那一段。报告里必须有，否则"最好的那个"没法看。"""
+    per_date = (baseline or {}).get("per_date") or None
+    result = pattern_stats(conn, cfg, horizon=horizon, baseline=per_date)
+    if not result["patterns"]:
+        return []
+    if result["baseline"] == "missing":
+        return ["", "按交易日聚合：算不出来——本地没有沪深300（SH000300）的日线，"
+                    "跑一次 18-全市场同步 补上基准序列。"]
+    kind = "全市场等权" if result["baseline"] == "market" else "沪深300"
+    lines = [
+        "",
+        f"按交易日聚合（基准：{kind}；同时看了 {result['tests']} 个形态，"
+        f"校正后 |t| ≥ {result['crit_t']:g} 才算显著）",
+        f"{'形态':<10}{'交易日':>7}{'按日超额':>10}{'95%区间':>16}{'t':>8}{'校正p':>9}  结论",
+    ]
+    for item in result["patterns"]:
+        if item["t"] is None:
+            lines.append(f"{item['criterion']:<10}{item['days']:>7}"
+                         f"{'—':>10}{'—':>16}{'—':>8}{'—':>9}  交易日不够")
+            continue
+        edge = f"±{item['ci95']:.2f}" if item["ci95"] is not None else "—"
+        verdict = ("显著为负" if item["excess"] < 0 else "显著为正") if (
+            item["p_adj"] is not None and item["p_adj"] < 0.05) else "不显著"
+        lines.append(f"{item['criterion']:<10}{item['days']:>7}{item['excess']:>+9.2f}%"
+                     f"{edge:>16}{item['t']:>8.2f}{item['p_adj']:>9.3f}  {verdict}")
+    lines.append("说明：按日超额 = 该形态当日命中标的的平均收益 − 当日基准，先按日取均值再求 t；"
+                 "同一天几十只票一起涨跌，按样本算误差棒会把噪声当结论。")
+    return lines

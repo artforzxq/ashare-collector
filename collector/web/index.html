@@ -310,6 +310,8 @@ canvas{display:block;width:100%}
              padding:2px 0 2px 12px;border-left:2px solid var(--accent-line)}
   .tag.active{background:var(--accent-soft);color:var(--accent-ink)}
   .tag.shadow{background:var(--warn-soft);color:var(--warn)}
+  .tag.pos{background:var(--up-soft);color:var(--up)}
+  .tag.neg{background:var(--down-soft);color:var(--down)}
   .pos{color:var(--up)} .neg{color:var(--down)}
   .prog{height:5px;border-radius:3px;background:var(--track);overflow:hidden;min-width:52px;margin-top:4px}
   .prog i{display:block;height:100%;background:var(--accent);border-radius:3px}
@@ -400,6 +402,7 @@ canvas{display:block;width:100%}
           <label class="toggle"><input type="checkbox" id="tMA" checked> 均线</label>
           <label class="toggle"><input type="checkbox" id="tBand" checked> 关键带</label>
           <label class="toggle"><input type="checkbox" id="tAlert" checked> 提醒</label>
+          <label class="toggle" title="只画落在关键位置的明显形态"><input type="checkbox" id="tPattern" checked> 形态</label>
           <label class="toggle"><input type="checkbox" id="tVol" checked> 成交量</label>
           <button id="dailyBtn" class="ghost" data-job="daily">更新自选数据</button>
           <button id="helpBtn" class="ghost">指标说明</button>
@@ -429,6 +432,8 @@ canvas{display:block;width:100%}
           <span><i style="background:var(--band-resistance-edge)"></i>阻力带</span>
           <span><i style="background:var(--up);border-radius:99px;width:8px;height:8px"></i>P0</span>
           <span><i style="background:var(--warn);border-radius:99px;width:8px;height:8px"></i>P1</span>
+          <span><i style="background:var(--up);clip-path:polygon(50% 0,100% 100%,0 100%);width:11px;height:8px"></i>形态·反转向上</span>
+          <span><i style="background:var(--down);clip-path:polygon(0 0,100% 0,50% 100%);width:11px;height:8px"></i>形态·反转向下</span>
         </div>
       </div>
 
@@ -703,9 +708,12 @@ function buildHelp(m){
     },
     candle: {
       label: 'K 线形态',
-      what: '今天这根 K 线长什么样，以及它是否构成反转确认。',
+      what: '今天这根 K 线长什么样、它是否构成反转确认，以及它长在什么位置上。',
       how: '看实体与影线比例、是否放量、是否吞没前一根、是否跳空、是否站上前 10 日高点。至少两个独立信号同时出现才算"反转确认"，避免单根 K 线就下结论。',
       use: '均线和 ATR 都是平滑后的指标，天生滞后；形态是它们之前先动的部分。下跌趋势里只有出现反转确认，风险层才允许试探仓。'
+        + '<b>图上的形态标记只画关键位置</b>：20 日区间上下沿 / 破 20 日高或低 / 均线附近或穿越 / 20 日新低新的分型。'
+        + '而且形态本身要够硬（反转确认、吞没、跳空、放量长实体）——一年 250 根 K 线里每根都能被叫做"十字星"或"长阳"，'
+        + '每天都画等于没画。标记不带任何预测：它说的是"这里出现了什么"，不是"该买还是该卖"。'
     },
     rr: {
       label: '盈亏比',
@@ -1207,6 +1215,33 @@ function draw(){
     });
   }
 
+  // 形态标记：只画"关键位置上的明显形态"（口径在后端 candles.marks，页面不自己判断）。
+  // 反转确认画三角，其余的关键位置形态画小点——一年下来三十来个，不会把图铺满。
+  let shapeCount = 0;
+  if ($('tPattern').checked){
+    bars.forEach((b,i)=>{
+      const c = b.candle; if (!c) return;
+      shapeCount++;
+      const x = xs(i);
+      const isUp = c.up, isDown = c.down;
+      const color = isUp ? C.up : (isDown ? C.down : C.axis);
+      ctx.fillStyle = color;
+      if (isUp || isDown){
+        const y = isUp ? Math.max(yOf(b.low) + 8, priceTop + 7) : Math.min(yOf(b.high) - 8, priceBottom - 7);
+        const dir = isUp ? 1 : -1;                       // 向上形态画在 K 线下方，向下形态画在上方
+        ctx.beginPath();
+        ctx.moveTo(x, y + 4*dir);
+        ctx.lineTo(x - 4.5, y - 4*dir);
+        ctx.lineTo(x + 4.5, y - 4*dir);
+        ctx.closePath(); ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.arc(x, Math.min(yOf(b.low) + 7, priceBottom - 3), 2.2, 0, Math.PI*2);
+        ctx.fill();
+      }
+    });
+  }
+
   // 成交量
   if (showVol){
     bars.forEach((b,i)=>{
@@ -1231,6 +1266,12 @@ function draw(){
     ctx.fillText(label, x-14, H-padB+5);
   }
 
+  // 形态标记的条数：标了多少处，得让人一眼看到（口径是"关键位置"，不是全部形态）
+  if ($('tPattern').checked && shapeCount){
+    ctx.fillStyle = C.axis; ctx.textBaseline = 'top';
+    ctx.fillText(`形态标记 ${shapeCount} 处 · 仅关键位置`, padL + 2, padT + 2);
+  }
+
   // 十字光标
   if (state.hover != null && bars[state.hover]){
     const i = state.hover, b = bars[i], x = Math.round(xs(i))+.5;
@@ -1244,6 +1285,7 @@ function draw(){
     tip.innerHTML = `${b.trade_date}<br>开 ${fmt(b.open)} 高 ${fmt(b.high)}<br>低 ${fmt(b.low)} 收 ${fmt(b.close)}<br>` +
                     `涨跌 ${pct(b.pct_chg)} 量比 ${fmt(b.vol_ratio_20,2)}<br>` +
                     `趋势 ${fmt(b.trend_score,1)} ${b.state?STATE_NAME[b.state]:''}` +
+                    (b.candle ? `<br><b>形态</b> ${b.candle.pattern}<br><span style="color:var(--muted)">${(b.candle.reasons||[]).join('、')}</span>` : '') +
                     (d.alerts.some(a=>a.trade_date===b.trade_date) ? '<br><b>有提醒</b>' : '');
     const left = Math.min(x + 14, W - 150);
     tip.style.left = left + 'px';
@@ -1904,27 +1946,45 @@ function renderPool(){
 
   // ④ 形态表现
   const rows = d.outcomes || [];
+  const ps = d.pattern_stats || {};
+  const byKey = {};
+  (ps.patterns || []).forEach(item => { byKey[item.criterion] = item; });
   $('poolOutcomeNote').textContent = rows.length ? `${rows.length} 个形态` : '';
   $('poolOutcomes').innerHTML = rows.length
     ? `<table class="tbl"><thead><tr>
          <th>形态</th><th class="num">命中样本</th><th class="num">5 日均值</th><th class="num">5 日胜率</th>
          <th class="num">20 日均值</th><th class="num">20 日胜率</th>
+         <th class="num">按日超额</th><th class="num">t</th><th class="num">校正 p</th>
        </tr></thead><tbody>` + rows.map(row => {
         const win5 = row.done5 ? (row.win5 / row.done5 * 100) : null;
         const win20 = row.done20 ? (row.win20 / row.done20 * 100) : null;
+        const st = byKey[row.criterion] || {};
+        const edge = (st.excess === null || st.excess === undefined) ? null : st.excess;
+        const verdict = (st.t === null || st.t === undefined)
+          ? '<span class="sub">交易日不够</span>'
+          : (st.p_adj !== null && st.p_adj !== undefined && st.p_adj < 0.05
+             ? `<span class="tag ${edge > 0 ? 'pos' : 'neg'}">${edge > 0 ? '显著为正' : '显著为负'}</span>`
+             : '<span class="sub">不显著</span>');
         return `<tr>
           <td><span class="name">${row.criterion}</span></td>
-          <td class="num">${row.n}<div class="sub">回填 ${row.done20 || 0}</div></td>
+          <td class="num">${row.n}<div class="sub">回填 ${row.done20 || 0} · ${st.days || 0} 天</div></td>
           <td class="num">${posNeg(row.avg5, signed(row.avg5, 2) + '%')}</td>
           <td class="num sub">${win5 === null ? '—' : win5.toFixed(1) + '%'}</td>
           <td class="num">${posNeg(row.avg20, signed(row.avg20, 2) + '%')}</td>
           <td class="num sub">${win20 === null ? '—' : win20.toFixed(1) + '%'}</td>
+          <td class="num">${edge === null ? '—' : posNeg(edge, signed(edge, 2) + '%')}<div class="sub">${verdict}</div></td>
+          <td class="num">${st.t === null || st.t === undefined ? '—' : signed(st.t, 2)}</td>
+          <td class="num">${st.p_adj === null || st.p_adj === undefined ? '—' : Number(st.p_adj).toFixed(3)}</td>
         </tr>`;
       }).join('') + '</tbody></table>'
     : '<div class="empty-state"><b>还没有回填表现</b>跑一次 16-信号复盘 或 22-历史重放，才知道这些形态后面到底涨没涨</div>';
   $('poolOutcomeHint').innerHTML =
-    '这两列是<b>绝对</b>收益，还没减掉基准。要判断形态有没有信息量，得看它有没有跑赢"同一批日期里随便买一只票"——' +
-    '那是 22-历史重放 的活（README 里记着当前结论：所有形态都还没有正超额，当"看什么的清单"用，别当买入信号）。';
+    `前六列是<b>绝对</b>收益（没减基准）。最后三列才是形态自己的信息量：`
+    + `按日超额 = 该形态当日命中标的的平均收益 − 当日${ps.baseline === 'market' ? '全市场等权' : '沪深300'}基准，`
+    + `<b>先按交易日取均值再算 t</b>——同一天几十只票一起涨跌，按样本算误差棒会把噪声当成结论。`
+    + `同时看了 ${ps.tests || 0} 个形态，所以校正后 |t| ≥ ${ps.crit_t || '—'} 才算显著（Šidák 校正）：`
+    + `挑最好的那个，本身就是在数据里挑噪声。<br>结论怎么看：<b>校正 p &lt; 0.05 且超额为负</b>的形态，`
+    + `是"看到就知道要躲"的清单；不显著的形态只能当"今天该看哪些票"的线索，不能当买入信号。`;
 
   // 两个按钮：加入自选 / 移出，都走已有的接口，改完刷新这一页
   $('poolCandidates').querySelectorAll('[data-add]').forEach(btn => {
@@ -2301,7 +2361,7 @@ document.querySelectorAll('#rangeSeg button').forEach(btn=>{
     btn.classList.add('on'); state.days = Number(btn.dataset.days); loadKline();
   };
 });
-['tMA','tBand','tAlert','tVol'].forEach(id => $(id).onchange = draw);
+['tMA','tBand','tAlert','tPattern','tVol'].forEach(id => $(id).onchange = draw);
 
 const canvas = $('chart');
 canvas.addEventListener('mousemove', ev=>{
