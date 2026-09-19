@@ -80,6 +80,13 @@ def _connect(cfg: dict):
     return conn
 
 
+def _apply_index_choice(cfg: dict, args) -> dict:
+    """`--include-index`：这一次临时把指数放回标的池（默认配置是不放的）。"""
+    if getattr(args, "include_index", False):
+        cfg.setdefault("universe", {})["include_index"] = True
+    return cfg
+
+
 def cmd_init_db(args) -> int:
     cfg = _prepare(args)
     db_path = Path(cfg["_db_path"])
@@ -326,7 +333,7 @@ def cmd_review(args) -> int:
 
 def cmd_backtest(args) -> int:
     """扫状态机参数网格，看哪组真的有效。"""
-    cfg = _prepare(args)
+    cfg = _apply_index_choice(_prepare(args), args)
     conn = _connect(cfg)
     grid = None
     if args.enter_up:
@@ -595,7 +602,7 @@ def cmd_replay(args) -> int:
 
     没有未来函数——每一天只用截至那天的数据；收益口径与 16-信号复盘 一致。
     """
-    cfg = _prepare(args)
+    cfg = _apply_index_choice(_prepare(args), args)
     conn = _connect(cfg)
     result = screen_mod.replay(conn, cfg, days=int(args.days or 120), top=args.top,
                                min_bars=args.min_bars, verbose=True)
@@ -622,7 +629,7 @@ def cmd_replay(args) -> int:
 
 def cmd_screen(args) -> int:
     """全市场筛选：把本地有历史的票按形态扫一遍。"""
-    cfg = _prepare(args)
+    cfg = _apply_index_choice(_prepare(args), args)
     conn = _connect(cfg)
     result = screen_mod.scan(conn, cfg, min_bars=args.min_bars, limit=args.limit)
     if result.get("ok"):
@@ -731,6 +738,8 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--universe", choices=("market", "watchlist"),
                           help="样本口径：market 全市场抽样（默认取配置）/ watchlist 只看观察池")
     backtest.add_argument("--sample", type=int, help="全市场抽样时抽多少只（默认取配置 backtest.sample）")
+    backtest.add_argument("--include-index", action="store_true",
+                          help="把指数也放进样本（默认按 universe.include_index=false 剔除）")
     backtest.add_argument("--no-save", action="store_true", help="不写报告文件")
     backtest.add_argument("--db", help="数据库路径")
     backtest.set_defaults(func=cmd_backtest)
@@ -785,6 +794,8 @@ def build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--min-bars", type=int, help="至少多少根日线才参与（默认取配置 screen.min_bars）")
     screen.add_argument("--top", type=int, help="每个条件保留多少条（默认取配置 screen.top）")
     screen.add_argument("--limit", type=int, help="只扫前 N 只（调试用）")
+    screen.add_argument("--include-index", action="store_true",
+                        help="把指数也扫进来（默认按 universe.include_index=false 剔除）")
     screen.add_argument("--no-save", action="store_true", help="只打印，不落库不写文件")
     screen.add_argument("--db", help="数据库路径")
     screen.set_defaults(func=cmd_screen)
@@ -800,6 +811,8 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--days", type=int, help="重放多少个交易日（默认 120）")
     replay.add_argument("--top", type=int, help="每个条件每天保留多少条（默认取配置 screen.top）")
     replay.add_argument("--min-bars", type=int, help="至少多少根日线才参与（默认取配置 screen.min_bars）")
+    replay.add_argument("--include-index", action="store_true",
+                        help="把指数也重放一遍（默认按 universe.include_index=false 剔除）")
     replay.add_argument("--db", help="数据库路径")
     replay.set_defaults(func=cmd_replay)
 

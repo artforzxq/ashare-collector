@@ -123,6 +123,9 @@ class BacktestTests(unittest.TestCase):
             cfg["_db_path"] = str(root / "market.db")
             cfg["_config_path"] = str(cfg_path)
             cfg["watchlist"] = {"indices": ["SH000300"], "etfs": [], "stocks": []}
+            # 合成数据里只有这一个指数，要验的是"当前参数有没有被标出来"，
+            # 所以这次把指数放回标的池（默认是剔除的，见 universe.include_index）。
+            cfg["universe"]["include_index"] = True
             conn = db.connect(cfg["_db_path"])
             db.init_db(conn, Path(__file__).resolve().parents[1] / "schema.sql")
             # 陡一点：趋势分要能站上 70 才有信号，平缓的合成数据本来就该没信号
@@ -349,8 +352,18 @@ class UniverseTests(unittest.TestCase):
         self.assertEqual(picked["dropped_liquidity"], 1)
 
     def test_index_is_not_judged_by_amount(self):
+        """指数没有成交额可比，所以默认**不进池子**——不是免检，是不参与。"""
         picked = universe.select_codes(self.conn, self.cfg, min_bars=80)
-        self.assertIn("SH000300", picked["codes"])        # 指数没有成交额可比
+        self.assertNotIn("SH000300", picked["codes"])
+        self.assertEqual(picked["dropped_index"], 1)
+
+        self.cfg["universe"]["include_index"] = True
+        try:
+            opened = universe.select_codes(self.conn, self.cfg, min_bars=80)
+        finally:
+            self.cfg["universe"]["include_index"] = False
+        self.assertIn("SH000300", opened["codes"])        # 打开开关才进池，且过流动性免检
+        self.assertEqual(opened["dropped_index"], 0)
 
     def test_threshold_zero_keeps_everything(self):
         picked = universe.select_codes(self.conn, {"universe": {"min_avg_amount_60d": 0}}, min_bars=80)

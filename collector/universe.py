@@ -9,7 +9,12 @@
 它们不是"机会"，是成交不了、复权数据也经不起看的噪声。放它们进回测，
 等于让回测专门去挑那些"事后涨得最猛"的幽灵票，结论会系统性偏乐观。
 
-指数不参与流动性过滤——指数的 amount 是成交量或者根本取不到，拿它比没有意义。
+**指数默认不进这道池子**（`universe.include_index: false`）。两个理由：
+  1. 指数不参与流动性过滤——它的 amount 是成交量或者根本取不到，拿它比没有意义，
+     于是"不过滤"就等于"永远入选"；
+  2. 回测的基准是"同一批标的里随便买一只"，指数混进来会让基准和信号一起变成指数的事，
+     而指数既不是股票、也不是能直接下单的东西（要买得通过 ETF）。
+想看指数就把它加进观察池，或者把 include_index 打开。
 """
 
 from __future__ import annotations
@@ -30,6 +35,13 @@ def min_avg_amount(cfg: dict | None) -> float:
     if value is None:
         return float(DEFAULT_MIN_AVG_AMOUNT_60D)
     return float(value)
+
+
+def include_index(cfg: dict | None) -> bool:
+    """指数要不要进标的池。默认**不进**，理由见文件头。"""
+    section = (cfg or {}).get("universe") or {}
+    value = section.get("include_index")
+    return False if value is None else bool(value)
 
 
 def looks_like_index(code: str) -> bool:
@@ -62,19 +74,24 @@ def select_codes(conn, cfg: dict | None, min_bars: int, limit: int | None = None
                  seed: int | None = None, verbose: bool = False) -> dict:
     """按"历史够长 + 成交额够大"筛出可用标的，可再随机抽样。
 
-    返回 {codes, total, dropped_liquidity, threshold, sampled}。抽样用固定种子，
+    返回 {codes, total, dropped_liquidity, dropped_index, threshold, sampled}。抽样用固定种子，
     同一份数据每次抽到的票一样——回测结果要能复现，否则调参就是在追噪声。
     """
     threshold = min_avg_amount(cfg)
+    keep_index = include_index(cfg)
     rows = db.query(conn, _recent_adv_sql(), (min_bars,))
 
     codes: list[str] = []
     dropped = 0
+    dropped_index = 0
     for row in rows:
         adv = row["adv"]
         kind = (row["kind"] or "").strip().lower()
         code = row["code"]
         if kind == "index" or (not kind and looks_like_index(code)):
+            if not keep_index:
+                dropped_index += 1
+                continue
             codes.append(code)                      # 指数不参与流动性过滤
             continue
         if threshold > 0 and (adv is None or float(adv) < threshold):
@@ -85,13 +102,18 @@ def select_codes(conn, cfg: dict | None, min_bars: int, limit: int | None = None
     total = len(codes)
     if limit and limit < total:
         codes = sorted(random.Random(seed).sample(codes, limit))
-    if verbose and dropped:
-        print(f"    标的池：{total} 只可用，另有 {dropped} 只因"
-              f"近 {AVG_DAYS} 日均成交额低于 {threshold / 1e4:,.0f} 万被剔除")
+    if verbose and (dropped or dropped_index):
+        parts = [f"{total} 只可用"]
+        if dropped_index:
+            parts.append(f"{dropped_index} 只指数已剔除（universe.include_index=false）")
+        if dropped:
+            parts.append(f"{dropped} 只因近 {AVG_DAYS} 日均成交额低于 {threshold / 1e4:,.0f} 万被剔除")
+        print("    标的池：" + "，".join(parts))
     return {
         "codes": codes,
         "total": total,
         "dropped_liquidity": dropped,
+        "dropped_index": dropped_index,
         "threshold": threshold,
         "sampled": bool(limit and limit < total),
     }

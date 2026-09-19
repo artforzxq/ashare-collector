@@ -17,6 +17,8 @@ DEFAULTS: Dict[str, Any] = {
         "timezone": "Asia/Shanghai",
     },
     "watchlist": {"indices": [], "etfs": [], "stocks": []},
+    # 标的池：筛选与回测共用。指数默认不进池子（理由见 collector/universe.py 头部）。
+    "universe": {"min_avg_amount_60d": 30_000_000, "include_index": False},
     "sources": {
         "primary": "fixture",
         "backup": "fixture_alt",
