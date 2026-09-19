@@ -1649,6 +1649,15 @@ function renderFlow(f){
     ? `<span class="tag pos">${label}申购</span>` : (value < 0 ? `<span class="tag neg">${label}赎回</span>` : '<span class="sub">持平</span>');
   const broad = f.broad_etf || {}, sector = f.sector_etf || {}, amount = f.amount || {}, margin = f.margin || {};
   const regime = f.regime || {};
+  // 覆盖范围直接标在数字旁边：哪些市场进来了、哪些没进来，是一眼要看出来的前提。
+  const scope = f.scope || {};
+  const scopeText = (kind) => {
+    const ex = (kind && kind.by_exchange) || {};
+    const parts = Object.entries(ex).sort().map(([market, n]) => `${({SH:'沪市',SZ:'深市',BJ:'北交所'})[market] || market} ${n}`);
+    const missing = (scope.missing_exchange || []).map(m => ({SH:'沪市',SZ:'深市',BJ:'北交所'})[m] || m);
+    if (!parts.length) return '这个市场暂缺';
+    return parts.join(' · ') + (missing.length ? `（${missing.join('、')}暂缺）` : '');
+  };
   $('flowMeta').textContent = `${f.trade_date}（对比 ${f.prev_date || '—'}）· 覆盖 ${f.covered || 0} 只 ETF`;
   $('flowNote').textContent = regime.score != null
     ? `市场层 ${Number(regime.score).toFixed(2)}（${regime.stance}）` : '';
@@ -1657,10 +1666,12 @@ function renderFlow(f){
     </tr></thead><tbody>
       <tr><td><span class="name">宽基 ETF</span><div class="sub">份额净流入，亿元</div></td>
         <td class="num">${yi(broad.inflow)}</td><td>${kind(broad.inflow || 0, '宽基')}</td>
-        <td class="sub">${broad.count || 0} 只有变化：被人用真金白银申购/赎回，方向明确</td></tr>
+        <td class="sub">${broad.count || 0} 只有变化：被人用真金白银申购/赎回，方向明确
+          <div class="sub">覆盖：${scopeText(broad)}</div></td></tr>
       <tr><td><span class="name">行业 / 主题 ETF</span><div class="sub">份额净流入，亿元</div></td>
         <td class="num">${yi(sector.inflow)}</td><td>${kind(sector.inflow || 0, '行业')}</td>
-        <td class="sub">${sector.count || 0} 只有变化：与宽基反向时，这就是"轮动"的直接证据</td></tr>
+        <td class="sub">${sector.count || 0} 只有变化：与宽基反向时，这就是"轮动"的直接证据
+          <div class="sub">覆盖：${scopeText(sector)}</div></td></tr>
       <tr><td><span class="name">全市场成交额</span><div class="sub">万亿 / 放量倍数</div></td>
         <td class="num">${amount.amount == null ? '—' : Number(amount.amount).toFixed(2)}</td>
         <td>${amount.amount_ratio == null ? '<span class="sub">—</span>'
@@ -1670,13 +1681,19 @@ function renderFlow(f){
         <td class="num">${margin.balance == null ? '—' : Number(margin.balance).toFixed(3)}</td>
         <td>${margin.delta == null ? '<span class="sub">—</span>'
             : `<span class="tag ${margin.delta > 0 ? 'pos' : 'neg'}">${margin.delta > 0 ? '加杠杆' : '降杠杆'} ${Number(margin.delta).toFixed(0)} 亿</span>`}</td>
-        <td class="sub">披露到 ${margin.data_date || '—'}（T+1，深市常滞后一天）</td></tr>
+        <td class="sub">两市合计；T+1 披露，各自按自己的披露日算
+          <div class="sub">${(margin.by_market || []).map(m =>
+            `${({SH:'沪市',SZ:'深市',BJ:'北交所'})[m.market] || m.market} ${m.data_date || '—'} `
+            + (m.delta == null ? '缺前一日' : `${m.delta > 0 ? '+' : ''}${Number(m.delta).toFixed(1)} 亿`)).join('　')}</div></td></tr>
     </tbody></table></div>
     <div class="ai-answer" style="margin-top:10px"><b>读法</b>　${escapeHtml(f.verdict || '')}</div>`;
   $('flowHint').innerHTML =
-    '口径：份额净流入 = 份额变化 × 价格（净值优先、退回收盘价）；'
-    + '<b>深市 ETF 只给"最新份额"</b>（交易所接口如此），补不出历史，所以资金流的角度只算沪市 '
-    + `（这次覆盖 ${f.covered || 0} 只，其中 ${f.unpriced ? f.unpriced.length : 0} 只缺价格未计入）。`
+    '<b>覆盖范围</b>：沪市 911 只按日披露、能算"较前一日"；'
+    + '<b>深市暂缺</b>——深交所那个接口只给"最新份额"、而且无视日期参数（实测两个日期返回一模一样），'
+    + '补不出历史，所以深市的份额变化这里看不到（已开始每天存一次快照，攒够两天就会自动出现）。'
+    + `<br>其余口径：份额净流入 = 份额变化 × 价格（净值优先、退回收盘价）；`
+    + `这次共覆盖 ${f.covered || 0} 只，其中 ${f.unpriced ? f.unpriced.length : 0} 只缺价格未计入、`
+    + `${f.mixed_source ? f.mixed_source.length : 0} 只因"前后两天数据来自不同源"不参与比较。`
     + '份额减少只发生在<b>一级市场赎回</b>（二级市场卖出不改变份额）；但"钱离开 ETF 之后去了哪"这里看不到——'
     + '那要靠行业 ETF 与融资余额一起读。';
 }

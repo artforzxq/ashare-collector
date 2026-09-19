@@ -44,6 +44,7 @@ def _etf_flows(conn, cfg: dict, dates: list[str]) -> tuple[dict, list[str], int]
 
     totals: dict[str, float] = {}
     counts: dict[str, int] = {}
+    by_exchange: dict[str, dict[str, int]] = {}
     unpriced: list[str] = []
     mixed: list[str] = []
     for code, pair in by_code.items():
@@ -68,8 +69,12 @@ def _etf_flows(conn, cfg: dict, dates: list[str]) -> tuple[dict, list[str], int]
             continue
         totals[kind] = totals.get(kind, 0.0) + delta * float(price)
         counts[kind] = counts.get(kind, 0) + 1
+        market = str(code)[:2].upper()
+        by_exchange.setdefault(kind, {})
+        by_exchange[kind][market] = by_exchange[kind].get(market, 0) + 1
     flows = {
-        kind: {"inflow": round(value / 1e8, 2), "count": counts.get(kind, 0)}
+        kind: {"inflow": round(value / 1e8, 2), "count": counts.get(kind, 0),
+               "by_exchange": by_exchange.get(kind, {})}
         for kind, value in totals.items()
     }
     return flows, unpriced, len(by_code), mixed
@@ -101,46 +106,61 @@ def _amount_context(conn, trade_date: str, window: int = 60) -> dict:
 
 
 def _margin_delta(conn, trade_date: str) -> dict:
-    """融资余额变化（亿元）。交易所 T+1 披露，所以按**有数据的交易日**往前找两天。"""
-    dates = [
-        row["trade_date"]
+    """融资余额与变化（亿元）——**按每个市场自己的披露日对齐**。
+
+    交易所是 T+1 披露的，而且两市的节奏不一样：实测 09-18 那行，沪市的 data_date 是
+    09-18、深市还是 09-17。如果直接拿"今天合计 − 昨天合计"，深市那一块会因为两天用
+    的是同一个数而抵消掉，结果看起来是"两市变化"，实际只是**沪市的变化**。
+    所以这里按市场分别取它自己最近两个披露日再相减，加起来才是两市的变化。
+    """
+    rows = [
+        dict(row)
         for row in db.query(
             conn,
-            """SELECT DISTINCT trade_date FROM margin WHERE trade_date<=?
-                ORDER BY trade_date DESC LIMIT 2""",
+            """SELECT trade_date, market, data_date, financing_balance, securities_lending
+                 FROM margin WHERE trade_date<=? ORDER BY trade_date DESC""",
             (trade_date,),
         )
     ]
-    if not dates:
+    if not rows:
         return {}
-    totals: dict[str, float] = {}
-    for day in dates:
-        rows = [
-            dict(row)
-            for row in db.query(
-                conn,
-                """SELECT market, financing_balance, securities_lending, data_date
-                     FROM margin WHERE trade_date=?""",
-                (day,),
-            )
-        ]
-        total = sum(float(row.get("financing_balance") or 0) + float(row.get("securities_lending") or 0)
-                    for row in rows)
-        if total:
-            totals[day] = total
-    ordered = sorted(totals)
-    if not ordered:
-        return {}
-    latest = ordered[-1]
+    by_market: dict[str, list[dict]] = {}
+    for row in rows:
+        by_market.setdefault(row["market"], []).append(row)
+
+    balance = 0.0
+    delta = 0.0
+    details: list[dict] = []
+    has_delta = False
+    for market, items in sorted(by_market.items()):
+        # 同一个 data_date 可能被多个 trade_date 重复记录（补历史时就是这样），按披露日去重
+        seen: dict[str, dict] = {}
+        for item in items:
+            day = item.get("data_date") or item["trade_date"]
+            seen.setdefault(day, item)
+        ordered = sorted(seen)
+        latest = ordered[-1]
+        current = seen[latest]
+        current_total = float(current.get("financing_balance") or 0) + float(current.get("securities_lending") or 0)
+        balance += current_total
+        entry = {"market": market, "data_date": latest,
+                 "balance": round(current_total / 1e12, 3)}
+        if len(ordered) >= 2:
+            previous = seen[ordered[-2]]
+            previous_total = (float(previous.get("financing_balance") or 0)
+                              + float(previous.get("securities_lending") or 0))
+            entry["delta"] = round((current_total - previous_total) / 1e8, 2)
+            entry["prev_date"] = ordered[-2]
+            delta += current_total - previous_total
+            has_delta = True
+        details.append(entry)
     info = {
-        "trade_date": latest,
-        "balance": round(totals[latest] / 1e12, 3),          # 万亿
-        "data_date": db.query_one(
-            conn, "SELECT MAX(data_date) AS d FROM margin WHERE trade_date=?", (latest,))["d"],
+        "balance": round(balance / 1e12, 3),          # 万亿
+        "data_date": max(entry["data_date"] for entry in details),
+        "by_market": details,
     }
-    if len(ordered) >= 2:
-        info["delta"] = round((totals[latest] - totals[ordered[-2]]) / 1e8, 2)   # 亿元
-        info["prev_date"] = ordered[-2]
+    if has_delta:
+        info["delta"] = round(delta / 1e8, 2)
     return info
 
 
@@ -186,6 +206,17 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
         )
     ]
     flows, unpriced, covered, mixed = _etf_flows(conn, cfg, dates)
+    # 口径标注：这份统计里**哪些市场进来了、哪些没进来**，就写在数字旁边——
+    # "沪市 911 只"和"深市暂缺（交易所只给最新份额）"是一眼要看出来的前提，
+    # 藏在说明小字里等于没说。
+    scope = {
+        "dates": dates,
+        "codes": covered,
+        "by_exchange": (flows.get("broad_etf", {}).get("by_exchange") or {}),
+        "missing_exchange": [] if any(
+            (flows.get(kind, {}).get("by_exchange") or {}).get("SZ")
+            for kind in ("broad_etf", "sector_etf")) else ["SZ"],
+    }
     payload = {
         "ok": True,
         "trade_date": trade_date,
@@ -197,6 +228,7 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
         "unpriced": unpriced[:10],
         "mixed_source": mixed[:10],
         "covered": covered,
+        "scope": scope,
         "regime": regime.latest(conn, cfg, trade_date),
     }
     payload["verdict"] = verdict(payload)
