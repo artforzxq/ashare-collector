@@ -809,6 +809,9 @@ def cmd_replay(args) -> int:
     print("")
     print(f"重放完成：{result['days']} 个交易日（{result['first']} → {result['last']}），"
           f"扫了 {result['scanned']} 只，写入 {result['written']} 条，用时 {result['seconds']} 秒")
+    if result.get("stale_removed"):
+        print(f"  另外清掉了 {result['stale_removed']} 条窗口之外的旧结果"
+              f"（来自更早一次重放或真实筛选——不清理的话，统计会把两版口径混在一起算）")
     screen_mod.sync_criteria(conn, cfg, result["last"])
     print("")
     print("回填之后的真实表现（信号日收盘确认 → 次日收盘建仓 → 持有 N 个交易日）：")

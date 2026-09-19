@@ -405,6 +405,16 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
         conn.execute("DELETE FROM screen_results WHERE trade_date=?", (trade_date,))
         db.upsert_rows(conn, "screen_results", payload, ["trade_date", "criterion", "code"])
         written += len(payload)
+    # 窗口之外的旧结果要清掉。这张表的含义是"按当前这套条件重放出来的历史"；
+    # 混进上一次重放（可能是另一版形态口径）或更早的行，统计就会悄悄掺假——
+    # 实测只差一天两行，但"看起来差不多"的错误最难发现，而这正是回放要防的事。
+    stale = 0
+    dates_all = sorted(by_date)
+    if dates_all:
+        stale = conn.execute(
+            "DELETE FROM screen_results WHERE trade_date < ? OR trade_date > ?",
+            (dates_all[0], dates_all[-1]),
+        ).rowcount
     conn.commit()
 
     dates = sorted(by_date)
@@ -420,6 +430,7 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
         "first": dates[0] if dates else None,
         "last": dates[-1] if dates else None,
         "written": written,
+        "stale_removed": stale,
         "seconds": round(time.time() - started, 1),
         "universe": picked,
     }
