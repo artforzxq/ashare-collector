@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from collector import db, promotion, warehouse
 from collector.config import load_config, use_fixture_sources
@@ -43,6 +44,73 @@ class WarehouseTests(unittest.TestCase):
         result = warehouse.sync_history(self.conn, self.cfg, limit=1, verbose=False)
         self.assertEqual(result["done"], 1)
         self.assertEqual(result["remaining"], 1)          # 剩下的下次再补
+
+    def test_universe_sync_merges_sources_and_labels_types(self):
+        """代码表是并出来的：新浪给北交所，baostock 给 ETF 和指数。"""
+
+        class SinaLike:
+            name = "sina"
+
+            def symbol_directory(self):
+                return [{"code": "BJ920000", "name": "安徽凤凰", "type": "stock"}]
+
+        class BaostockLike:
+            name = "baostock"
+
+            def symbol_directory(self):
+                return [
+                    {"code": "SH600000", "name": "浦发银行", "type": "stock"},
+                    {"code": "SH510300", "name": "沪深300ETF", "type": "etf"},
+                    {"code": "SH000300", "name": "沪深300", "type": "index"},
+                ]
+
+        with mock.patch.object(warehouse, "directory_sources", lambda cfg: [SinaLike(), BaostockLike()]):
+            result = warehouse.sync_universe(self.conn, self.cfg, verbose=False)
+
+        self.assertTrue(result["ok"], result.get("message"))
+        self.assertEqual(result["codes"], 4)
+        self.assertEqual(result["sources"], ["sina", "baostock"])
+        self.assertEqual(result["by_type"], {"stock": 2, "etf": 1, "index": 1})
+        kinds = {
+            row["code"]: row["type"]
+            for row in db.query(self.conn, "SELECT code, type FROM instruments")
+        }
+        self.assertEqual(kinds["SH510300"], "etf")
+        self.assertEqual(kinds["SH000300"], "index")
+        self.assertEqual(kinds["BJ920000"], "stock")
+
+    def test_universe_sync_keeps_going_when_one_source_is_broken(self):
+        class Broken:
+            name = "akshare"
+
+            def symbol_directory(self):
+                raise RuntimeError("东财接口被断连")
+
+        class Good:
+            name = "baostock"
+
+            def symbol_directory(self):
+                return [{"code": "SH600000", "name": "浦发银行", "type": "stock"}]
+
+        with mock.patch.object(warehouse, "directory_sources", lambda cfg: [Broken(), Good()]):
+            result = warehouse.sync_universe(self.conn, self.cfg, verbose=False)
+
+        self.assertTrue(result["ok"], result.get("message"))
+        self.assertEqual(result["sources"], ["baostock"])
+
+    def test_universe_sync_reports_every_failure_when_all_are_down(self):
+        class Broken:
+            name = "sina"
+
+            def symbol_directory(self):
+                raise RuntimeError("超时")
+
+        with mock.patch.object(warehouse, "directory_sources", lambda cfg: [Broken()]):
+            result = warehouse.sync_universe(self.conn, self.cfg, verbose=False)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("sina", result["message"])
+        self.assertIn("超时", result["message"])
 
     def test_snapshot_writes_market_but_not_codes_with_real_data(self):
         db.upsert_rows(

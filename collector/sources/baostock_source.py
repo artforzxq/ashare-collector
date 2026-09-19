@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import atexit
 import socket
+from datetime import datetime, timedelta
 
-from .base import BaseSource, DataSourceError
+from .base import BaseSource, DataSourceError, classify_symbol, exchange_of, normalize_symbol
 from . import split_code
 
 FIELDS = "date,code,open,high,low,close,volume,amount,turn,pctChg"
@@ -22,7 +23,7 @@ SOCKET_TIMEOUT = 30
 
 class BaostockSource(BaseSource):
     name = "baostock"
-    capabilities = {"daily_bars", "trade_calendar"}
+    capabilities = {"daily_bars", "trade_calendar", "symbol_directory"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -91,6 +92,37 @@ class BaostockSource(BaseSource):
         except DataSourceError as exc:
             return False, str(exc)
 
+    def symbol_directory(self) -> list[dict]:
+        """全市场证券清单：个股 + ETF + 指数。
+
+        baostock 的 query_all_stock 按交易日返回当天**所有证券**（实测 7401 行，
+        含指数、ETF、场内货币基金；债券和 B 股不在里面），落库前按代码段分类。
+        它不覆盖北交所，那部分靠新浪补。
+        """
+        bs = self._login()
+        day = self._directory_day()
+        try:
+            result = bs.query_all_stock(day=day)
+            records: list[dict] = []
+            while result.error_code == "0" and result.next():
+                records.append(dict(zip(result.fields, result.get_row_data())))
+            if result.error_code != "0":
+                raise DataSourceError(f"baostock 代码表查询失败：{result.error_msg}")
+        except Exception:
+            self.logout()
+            raise
+        return _directory_rows(records)
+
+    def _directory_day(self) -> str:
+        """query_all_stock 只认交易日：传周末/节假日它会返回空表。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
+        try:
+            days = [row["trade_date"] for row in self.trade_calendar(start, today) if row["is_trading_day"]]
+        except Exception:
+            return today
+        return days[-1] if days else today
+
     @staticmethod
     def _bs_code(code: str) -> str:
         exchange, symbol = split_code(code)
@@ -153,6 +185,25 @@ class BaostockSource(BaseSource):
             if row["pre_close"] is None and index:
                 row["pre_close"] = rows[index - 1]["close"]
         return rows
+
+
+def _directory_rows(records) -> list[dict]:
+    """baostock 的行 → 全市场清单（个股 / ETF / 指数，其它丢掉）。"""
+    rows: list[dict] = []
+    for record in records:
+        raw = record.get("code")
+        symbol = normalize_symbol(raw)
+        kind = classify_symbol(raw)
+        if kind == "other":
+            continue
+        rows.append(
+            {
+                "code": exchange_of(raw) + symbol,
+                "name": str(record.get("code_name") or "").strip(),
+                "type": kind,
+            }
+        )
+    return rows
 
 
 def _to_float(value):

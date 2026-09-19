@@ -36,6 +36,10 @@ sources:
   # 新浪能拿到北交所的历史，代价是不复权。
   extra: [sina]
   min_interval_sec: 0.5   # 免费源请求间隔下限
+  # 全市场代码表：这几个源的结果**并起来**用，不是第一个成功就收工。
+  # 实测覆盖：sina 5564 只（唯一有北交所）、baostock 7401 行（有 ETF 和指数、没有北交所）、
+  # akshare 走东财（本网络不通，换台机器可能是它最全）。
+  directory: [sina, baostock, akshare]
 
 collection:
   daily_after: "15:30"

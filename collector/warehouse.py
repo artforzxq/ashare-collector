@@ -32,6 +32,40 @@ DEFAULT_BATCH = 800
 THIN_HISTORY = 20
 
 
+def directory_sources(cfg: dict) -> list:
+    """能拉"全市场代码表"的源，按 sources.directory 的顺序。
+
+    和日线源分开排队，因为这两件事的覆盖面不一样：
+      - 新浪（hs_a）是这里唯一能拿到北交所的源，5500+ 只；
+      - baostock 的 query_all_stock 有 ETF 和指数，但一只北交所都没有；
+      - akshare 走东财，接口在部分网络上直接断连。
+    所以代码表是**几个源并起来**的结果，谁挂了都能靠其余的凑齐。
+    """
+    names = list(cfg["sources"].get("directory") or [])
+    for name in (
+        cfg["sources"].get("primary"),
+        cfg["sources"].get("backup"),
+        cfg["sources"].get("fallback"),
+        *(cfg["sources"].get("extra") or []),
+    ):
+        if name and name not in names:
+            names.append(name)
+
+    out: list = []
+    seen: set[str] = set()
+    for name in names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            source = build_source(name, cfg)
+        except Exception:
+            continue
+        if "symbol_directory" in getattr(source, "capabilities", set()):
+            out.append(source)
+    return out
+
+
 def _source_for(cfg: dict, capability: str):
     """按能力挑源（和 tasks 里逻辑一致，这里独立实现以免循环导入）。"""
     seen: set[str] = set()
@@ -100,33 +134,64 @@ def universe_codes(conn, include_watchlist: bool = True) -> list[str]:
 
 
 def sync_universe(conn, cfg, verbose: bool = True) -> dict:
-    """拉全市场代码与名称，写进 instruments（in_watchlist=0 表示只是目录）。"""
-    source = _source_for(cfg, "market_snapshot")
-    directory = getattr(source, "symbol_directory", None) if source else None
-    if directory is None:
-        return {"ok": False, "message": "当前数据源不支持拉全市场代码表（需要 akshare）"}
-    try:
-        rows = source.symbol_directory()
-    except Exception as exc:
-        return {"ok": False, "message": f"拉代码表失败：{exc}"}
-    if not rows:
-        return {"ok": False, "message": "代码表为空"}
+    """拉全市场代码与名称，写进 instruments（in_watchlist=0 表示只是目录）。
+
+    **几个源并起来用**，不是"第一个成功就收工"：新浪有北交所，baostock 有 ETF 和指数，
+    谁挂了都不至于让整条腿断掉——以前这里只认 akshare，它连不上就等于全市场同步没法开始。
+    同一个代码出现多次时以先到的那份为准（名称、类型都按代码段判定，不会打架）。
+    """
+    candidates = directory_sources(cfg)
+    if not candidates:
+        return {"ok": False, "message": "没有能拉全市场代码表的数据源（sina / akshare / baostock 都不可用）"}
+
+    merged: dict[str, dict] = {}
+    used: list[str] = []
+    notes: list[str] = []
+    for source in candidates:
+        try:
+            rows = source.symbol_directory()
+        except Exception as exc:
+            notes.append(f"{source.name} 失败：{type(exc).__name__} {exc}")
+            continue
+        if not rows:
+            notes.append(f"{source.name} 返回空表")
+            continue
+        used.append(source.name)
+        for item in rows:
+            code = item.get("code")
+            if not code or code in merged:
+                continue
+            merged[code] = {
+                "code": code,
+                "name": item.get("name") or code,
+                "type": item.get("type") or "stock",
+            }
+
+    if not merged:
+        return {"ok": False, "message": "；".join(notes) or "拉代码表失败"}
 
     payload = [
         {
             "code": item["code"],
             "name": item["name"],
-            "type": "stock",
+            "type": item["type"],
             "exchange": item["code"][:2],
             "in_watchlist": 0,
             "updated_at": db.now_iso(),
         }
-        for item in rows
+        for item in merged.values()
     ]
     db.upsert_rows(conn, "instruments", payload, ["code"])
+
+    counts: dict[str, int] = {}
+    for item in payload:
+        counts[item["type"]] = counts.get(item["type"], 0) + 1
     if verbose:
-        print(f"  代码表：{len(payload)} 只")
-    return {"ok": True, "codes": len(payload)}
+        detail = "、".join(f"{name} {count} 只" for name, count in sorted(counts.items()))
+        print(f"  代码表：{len(payload)} 只（{detail}），来自 {' + '.join(used)}")
+        for note in notes:
+            print(f"    ! {note}")
+    return {"ok": True, "codes": len(payload), "sources": used, "by_type": counts}
 
 
 def sync_history(conn, cfg, codes: list[str] | None = None, limit: int | None = None,

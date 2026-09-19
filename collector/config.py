@@ -22,6 +22,8 @@ DEFAULTS: Dict[str, Any] = {
         "backup": "fixture_alt",
         "fallback": "baostock",
         "extra": [],
+        # 全市场代码表按这个顺序并起来（覆盖面见 warehouse.directory_sources）
+        "directory": ["sina", "akshare", "baostock"],
         "min_interval_sec": 0.5,
     },
     "collection": {

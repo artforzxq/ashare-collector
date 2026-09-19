@@ -76,6 +76,11 @@ def exchange_of(symbol: str) -> str:
     text = str(symbol or "").strip().upper()
     if text[:2] in ("SH", "SZ", "BJ"):
         return text[:2]
+    if "." in text:
+        # sh.600000：前缀说了算，不能只看号段（sh.000300 是指数，sz.000300 不存在但号段会判成深市）
+        head = text.split(".")[0]
+        if head in ("SH", "SZ", "BJ"):
+            return head
     text = text.split(".")[0].zfill(6)
     head = text[:2]
     if head in ("60", "68", "90") or text.startswith(("5", "11", "13")):
@@ -85,6 +90,74 @@ def exchange_of(symbol: str) -> str:
     if head in ("43", "83", "87", "88", "92"):
         return "BJ"
     return "SH"
+
+
+def normalize_symbol(value: str) -> str:
+    """把各家接口的写法统一成 6 位数字代码。
+
+    sh.600000 / sh600000 / SH600000 / 600000 / 600000.SH 都会变成 600000。
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if "." in text:
+        # sh.600000 取后半段；600000.sh 取前半段
+        head, _, tail = text.partition(".")
+        text = tail if head in ("sh", "sz", "bj") else head
+    if text[:2] in ("sh", "sz", "bj"):
+        text = text[2:]
+    return text.zfill(6)
+
+
+def _exchange_hint(value: str) -> str:
+    """值本身带交易所就听它的（sh.000001 是指数，000001 是平安银行，不能混）。"""
+    text = str(value or "").strip().upper()
+    head = text[:2]
+    if head in ("SH", "SZ", "BJ"):
+        return head
+    if "." in text:
+        head = text.split(".")[0]
+        if head in ("SH", "SZ", "BJ"):
+            return head
+    return ""
+
+
+# 个股 / ETF（含 LOF、场内货币基金）/ 指数的代码段。债券、B 股、逆回购不在里面——
+# 全市场代码表要的是"能看能买的品种"，不是"这个市场里所有能报价的东西"。
+_STOCK_HEADS_SH = ("600", "601", "603", "605", "688", "689")
+_STOCK_HEADS_SZ = ("000", "001", "002", "003", "300", "301", "302")
+_STOCK_HEADS_BJ = ("43", "83", "87", "88", "92")
+_FUND_HEADS_SZ = ("15", "16", "18")
+
+
+def classify_symbol(value: str) -> str:
+    """6 位代码 → stock 个股 / etf 场内基金 / index 指数 / other 其它。
+
+    指数和个股在代码上会撞车（sh.000001 是上证指数，sz.000001 是平安银行），
+    所以带不带交易所前缀必须认真对待：带了就听它的，没带才按号段猜。
+    """
+    symbol = normalize_symbol(value)
+    if len(symbol) != 6 or not symbol.isdigit():
+        return "other"
+    exchange = _exchange_hint(value) or exchange_of(symbol)
+
+    if exchange == "SH":
+        if symbol.startswith("000"):
+            return "index"                      # 上证指数系列
+        if symbol.startswith("5"):
+            return "etf"                        # 51x/56x/58x 等 ETF 与场内基金
+        return "stock" if symbol.startswith(_STOCK_HEADS_SH) else "other"
+    if exchange == "SZ":
+        if symbol.startswith("399"):
+            return "index"
+        if symbol.startswith(_FUND_HEADS_SZ):
+            return "etf"                        # 159 ETF / 16x LOF / 18x 封闭式
+        return "stock" if symbol.startswith(_STOCK_HEADS_SZ) else "other"
+    if exchange == "BJ":
+        if symbol.startswith("899"):
+            return "index"                      # 北证 50 这类
+        return "stock" if symbol.startswith(_STOCK_HEADS_BJ) else "other"
+    return "other"
 
 
 class BaseSource:

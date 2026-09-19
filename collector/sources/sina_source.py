@@ -15,10 +15,14 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
-from .base import BaseSource, DataSourceError
+from .base import BaseSource, DataSourceError, classify_symbol, exchange_of, normalize_symbol
 from . import split_code
 
 DAILY_URL = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+# 全市场股票列表：node=hs_a 是全部 A 股（实测 5564 只，**含北交所**，是这里唯一能拿到北交所的源）
+LIST_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+COUNT_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount"
+PAGE_SIZE = 100          # 一页最多给 100 条，再大也不会多返回
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -35,9 +39,24 @@ def _to_float(value):
         return None
 
 
+def _directory_rows(items) -> list[dict]:
+    """新浪的行 → 清单（顺手去重、标类型）。"""
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        raw = item.get("symbol") or item.get("code")
+        symbol = normalize_symbol(raw)
+        kind = classify_symbol(raw)
+        if kind == "other" or symbol in seen:
+            continue
+        seen.add(symbol)
+        rows.append({"code": exchange_of(raw) + symbol, "name": str(item.get("name") or "").strip(), "type": kind})
+    return rows
+
+
 class SinaSource(BaseSource):
     name = "sina"
-    capabilities = {"daily_bars"}
+    capabilities = {"daily_bars", "symbol_directory"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -63,6 +82,44 @@ class SinaSource(BaseSource):
         except DataSourceError as exc:
             return False, str(exc)
         return True, "已安装"
+
+    def symbol_directory(self) -> list[dict]:
+        """全市场 A 股代码与名称，含北交所。
+
+        这个列表接口一页最多 100 条，翻完 5500+ 只要 56 个请求，中间按 min_interval_sec
+        限速。这是"偶尔跑一次"的操作，慢一点没关系，被限流才麻烦。
+        """
+        requests = self._requests()
+        total = self._directory_total(requests)
+        pages = (total + PAGE_SIZE - 1) // PAGE_SIZE if total else 80
+        items: list[dict] = []
+        for page in range(1, pages + 1):
+            self._throttle()
+            try:
+                response = requests.get(
+                    LIST_URL,
+                    params={"page": page, "num": PAGE_SIZE, "sort": "symbol", "asc": 1, "node": "hs_a"},
+                    headers=HEADERS,
+                    timeout=20,
+                )
+                batch = response.json()
+            except Exception as exc:
+                raise DataSourceError(f"新浪代码表请求失败（第 {page} 页）：{exc}") from exc
+            if not batch:
+                break
+            items.extend(batch)
+            if len(batch) < PAGE_SIZE:
+                break
+        return _directory_rows(items)
+
+    def _directory_total(self, requests) -> int:
+        """先问总数，好知道要翻几页；问不到就按 80 页（约 8000 只）估。"""
+        try:
+            self._throttle()
+            response = requests.get(COUNT_URL, params={"node": "hs_a"}, headers=HEADERS, timeout=20)
+            return int(str(response.text).strip().strip('"'))
+        except Exception:
+            return 0
 
     def daily_bars(self, code: str, start: str, end: str, kind: str = "stock") -> list[dict]:
         requests = self._requests()
