@@ -597,7 +597,7 @@ canvas{display:block;width:100%}
       <div class="card panel">
         <h3>这批票为什么单独放 <span class="kv">它们进不了筛选池</span></h3>
         <div class="hint">
-          筛选要求至少 80 根日线（回测 120 根），刚上市的票**天然不满足**——不是被筛掉，是没法参与。
+          筛选要求至少 80 根日线（回测 120 根），刚上市的票<b>天然不满足</b>——不是被筛掉，是没法参与。
           但它们恰恰是关注度最高、最容易被"涨停板故事"带偏的一批，所以单独列出来看事实：
           上市多久、几个板、上市以来涨跌、现在能不能建仓。<br>
           判定用的是<b>本地日线的第一根</b>：同步一次要 750 天，某个代码只拿到 N 根，就说明它上市约 N 个交易日。
@@ -656,6 +656,7 @@ let meta = {}, help = {};
 /* ---------- 指标说明（阈值全部取自 config，改了配置说明跟着变） ---------- */
 function buildHelp(m){
   const st = m.state || {}, rk = m.risk || {}, cap = rk.base_cap || {};
+  const td = rk.turnover_discount || {};
   const band = st.neutral_band != null ? st.neutral_band : 0.1;
   const f = n => (n == null ? '—' : n);
   const pc = n => (n == null ? '—' : (n * 100).toFixed(0) + '%');
@@ -707,6 +708,16 @@ function buildHelp(m){
       what: '往上的空间 ÷ 往下的空间，再按胜率折成"期望值"。',
       how: `（最近阻力带中心 − 收盘）÷（收盘 − 止损位）。上方没有识别出阻力带时分两种：贴着 250 日高点（${f(rk.open_space_high_tolerance_pct)}% 以内）算"上方真空"，按 ${f(rk.open_space_atr_multiple)} 倍 ATR 估目标；离得还远就取"到 250 日高点的距离"和"波动率给的空间"里较小的那个——头顶一定有筹码，只是分箱没挑出来。`,
       use: `决定仓位的是期望值 = 胜率 ${pc(rk.win_rate)} × 盈亏比 − (1 − 胜率)：期望 ≤ 0 直接 0 仓，0 到 ${f(rk.target_expectancy)} R 之间等比缩小。只看盈亏比会误判——0.8 的盈亏比配 70% 胜率是赚的，3.0 配 20% 胜率是亏的。`
+    },
+    turnover: {
+      label: '换手放量折价',
+      what: '换手率突然放大时，风险层把仓位上限打个折——放量之后短期往往偏弱。',
+      how: `当日换手率 ÷ 近 20 日平均换手率 ≥ ${f(td.ratio)} 时，仓位上限 ×${f(td.factor)}`
+        + `${td.high_position_pct == null ? '。' : `（只在距 250 日高点 ${f(td.high_position_pct)}% 以内时触发）。`}`
+        + `换手率口径：成交量 ÷ 流通股本，只有 baostock 给（腾讯、新浪不给），所以缺数据的标的不会被误判成"缩量"。`,
+      use: '这是<b>负向信号</b>，所以放在风险层而不是趋势分里：它只回答"做多大"，不回答"值不值得做"。'
+        + '依据是本地回测实测：200 只标的、2.1 年、7 万个样本——换手放大到 2 倍以上之后 5 日平均跑输同批标的 0.68pp，'
+        + '3 倍以上跑输 1.73pp、20 日胜率从 52% 掉到 48%。完整分档见「参数回测 → 换手率分组」。'
     }
   };
 }
@@ -738,7 +749,9 @@ function showPop(key, anchor){
 function hidePop(){ $('pop').style.display = 'none'; }
 
 function renderHelpPanel(){
-  const rows = ['state','trend','opp','vol','cap','stop','rr'].map(key => {
+  // 顺序就是页面上的阅读顺序；加了新的说明条目要记得加进来，
+  // 否则 buildHelp 里写了、面板上却不显示（换手折价就踩过这个坑）。
+  const rows = ['state','trend','opp','vol','candle','cap','stop','rr','turnover'].map(key => {
     const item = help[key];
     return `<tr><td>${item.label}</td>
       <td><span class="lbl">是什么</span>${item.what}<span class="lbl">怎么算</span>${item.how}
@@ -2036,7 +2049,9 @@ function renderTurnover(t){
     '分档用「当日换手 ÷ 自己近 20 日均值」，所以剔除了股本规模差异——小盘股不会因为天生换手高就整档算进"暴力放量"。' +
     '口径与参数回测一致：次日建仓、扣同一笔成本、涨停买不进的样本剔除。' +
     '<br>看<b>超额</b>（比"同一批日期随便买一只"强不强）和<b>单调性</b>：放量越大之后越弱才叫反转效应；' +
-    '忽高忽低多半是噪声。样本几百个以下的档别单独下结论。';
+    '忽高忽低多半是噪声。样本几百个以下的档别单独下结论。' +
+    '<br><b>这条结论已经接进风险层</b>：当日换手 ≥ 自己 20 日常态 2 倍时，仓位上限打 6 折' +
+    '（只缩仓位、不否决）——它是负向信号，所以不塞进趋势分，只回答"做多大"。阈值在 config.yaml 的 risk.turnover_discount 里。';
 }
 
 async function loadScreen(){

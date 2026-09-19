@@ -43,6 +43,21 @@ class PageStaticTests(unittest.TestCase):
         for anchor in ("helpPanel", "helpBtn", "helpBody"):
             self.assertIn(anchor, self.html)
 
+    def test_every_help_entry_is_rendered(self):
+        """buildHelp 里写了的条目，renderHelpPanel 里必须列出来。
+
+        踩过的坑：加了「换手放量折价」的说明，但面板是**按固定顺序**渲染的，
+        忘了加进那个数组，于是定义写了、页面上看不到——静态检查能兜住这类漏。
+        """
+        script = self.script
+        defined = set(re.findall(r"^\s{4}([a-z_]+):\s*\{", script, re.M))
+        order = re.search(r"const rows = \[([^\]]+)\]\.map", script)
+        self.assertIsNotNone(order, "renderHelpPanel 的渲染顺序丢了？")
+        rendered = set(re.findall(r"'([a-z_]+)'", order.group(1)))
+        self.assertTrue(defined, "没解析到任何说明条目，检查 buildHelp 的缩进")
+        self.assertEqual(sorted(defined - rendered), [],
+                         "这些说明写了但没渲染出来：见 renderHelpPanel 的数组")
+
 
 if __name__ == "__main__":
     unittest.main()

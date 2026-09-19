@@ -182,6 +182,15 @@ risk:
   open_space_atr_multiple: 3.0
   no_resistance_rr: 1.0
   cap_floor: 0.3             # 缩放系数的下限，避免直接归零
+  # 换手放量折价（负向信号 → 走风险层，不进状态分）。
+  # 实证：当日换手 ≥ 自己 20 日常态 2 倍 → 之后 5 日平均跑输同批标的 0.68pp；
+  #       3 倍以上 → 跑输 1.73pp、20 日胜率从 52% 掉到 48%（run.py turnover 实测）。
+  # 只缩仓位、不否决——它是"少做一点"的证据，不是"不能做"。
+  turnover_discount:
+    enabled: true
+    ratio: 2.0            # 触发门槛：当日换手 ÷ 近 20 日常态
+    factor: 0.6           # 仓位上限乘这个系数
+    high_position_pct: null   # 想只在高位放量时打折就填 5（距 250 日高点 5% 以内）；null = 不设这个条件
 
 # 值得盯的形态：筛选条件全部写成数据，加一条就是加一段配置，不用改代码。
 # 支持的运算：== != > >= < <= between in not_in contains startswith exists

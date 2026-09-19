@@ -40,6 +40,13 @@ DEFAULTS = {
     "open_space_high_tolerance_pct": 8.0,
     "cap_floor": 0.3,
     "max_stop_pct": 8.0,     # 止损离现价超过这个百分比就不做（位置太远，风险预算不够）
+    # 换手放量折价：实证依据见 turnover_discount 的注释
+    "turnover_discount": {
+        "enabled": True,
+        "ratio": 2.0,
+        "factor": 0.6,
+        "high_position_pct": None,
+    },
 }
 
 
@@ -55,6 +62,40 @@ def _params(cfg: dict) -> dict:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def turnover_discount(params: dict, row: dict, notes: list[str]) -> float | None:
+    """换手放量时把仓位上限打折；不触发就返回 None。
+
+    实证依据（`run.py turnover`，200 只标的、2.1 年、7 万个样本）：
+    当日换手超过自己 20 日常态 **2 倍**时，之后 5 日平均跑输同批标的 0.68 个百分点；
+    **3 倍**以上跑输 1.73 个百分点，20 日胜率从 52% 掉到 48%。放量之后短期偏弱。
+
+    所以这里**只缩仓位、不否决**：它是"少做一点"的证据，不是"不能做"。
+    注意这是负向信号——按规格它进不了状态分（台账的转正判定只认正向 IC），
+    放在风险层正合适：风险层本来就回答"做多大"。
+
+    `high_position_pct` 是可选收窄条件（只在高位放量时打折）：**我们没测过它**，
+    默认关着；想用就填 5（距 250 日高点 5% 以内）。
+    """
+    conf = params.get("turnover_discount") or {}
+    if not conf.get("enabled"):
+        return None
+    ratio = row.get("turnover_ratio")
+    if ratio is None:
+        return None
+    threshold = float(conf.get("ratio", 2.0))
+    if float(ratio) < threshold:
+        return None
+    high_pct = conf.get("high_position_pct")
+    if high_pct is not None:
+        near = row.get("dist_to_high_250")
+        if near is None or float(near) < -abs(float(high_pct)):
+            return None
+    factor = float(conf.get("factor", 0.6))
+    notes.append(f"换手放量 {float(ratio):.1f} 倍（≥{threshold:g}）→ 仓位上限 ×{factor:g}"
+                 f"（实证：这类放量后 5 日平均跑输同批标的）")
+    return factor
 
 
 def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict | None = None) -> dict:
@@ -183,6 +224,11 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
     elif upside <= 0:
         notes.append("上方紧贴阻力带，空间不足")
 
+    # ---- 换手放量折价：只缩仓位，不否决 ----
+    discount = turnover_discount(params, row, notes)
+    if discount:
+        cap *= discount
+
     return {
         "position_cap": round(_clamp(cap, 0.0, 1.0), 3),
         "stop_level": round(stop, 4),
@@ -190,7 +236,9 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
         "risk_reward": reward_risk,
         "expectancy": expectancy,
         "reason": f"{state}趋势，止损放{stop_reason}"
-                  + ("（反转确认，试探仓）" if state == "down" else ""),
+                  + ("（反转确认，试探仓）" if state == "down" else "")
+                  + (f"；换手放量 {float(row.get('turnover_ratio')):.1f} 倍 → 仓位上限 ×{discount:g}"
+                     if discount else ""),
         "notes": notes,
     }
 
@@ -202,4 +250,9 @@ def describe(result: dict) -> str:
     text = f"仓位上限 {result['position_cap']:.0%}，止损 {result['stop_level']:.3f}（{result['stop_pct']:+.2f}%）"
     if result.get("risk_reward"):
         text += f"，盈亏比 {result['risk_reward']:.2f}"
+    # 打折的原因要跟着走：只看到"仓位变小了"却不知道为啥，等于把结论藏起来
+    for note in result.get("notes") or []:
+        if "换手放量" in note:
+            text += "，" + note.split("（实证")[0].strip()
+            break
     return text

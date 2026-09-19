@@ -926,7 +926,7 @@ def _meta_payload(cfg: dict) -> dict:
                  ("base_cap", "target_atr_pct", "stop_buffer_pct", "atr_stop_multiple",
                   "max_stop_pct", "win_rate", "target_expectancy",
                   "open_space_high_tolerance_pct", "open_space_atr_multiple",
-                  "no_resistance_rr", "cap_floor")},
+                  "no_resistance_rr", "cap_floor", "turnover_discount")},
         "alerts": cfg.get("alerts") or {},
         "feature_version": (cfg.get("project") or {}).get("feature_version"),
         "factors": [
