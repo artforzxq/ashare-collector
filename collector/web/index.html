@@ -486,6 +486,7 @@ canvas{display:block;width:100%}
           <button class="ghost" id="flowAiBtn" style="float:right;padding:1px 8px">让模型读一遍</button>
         </h3>
         <div id="flowBody"></div>
+        <canvas id="flowChart" style="width:100%;height:132px;display:block;margin-top:10px"></canvas>
         <div class="hint" id="flowHint"></div>
         <div class="hint" id="flowAiMeta" style="margin-top:6px"></div>
         <div id="flowAiBody"></div>
@@ -1636,6 +1637,91 @@ function renderScopeAnalysis(scope){
 // 明细：汇总只看出"宽基在流出、行业在流入"，看不出**具体流到哪个方向**。
 // 同一套数字往下钻一层，不加新口径。
 // 按指数看背离：只看沪深300 会把"科创50ETF 在赎回、而科创50 指数在涨"这类结构差异盖掉。
+// 迷你趋势：两段各自独立的坐标（上下叠），因为"净流入多少亿"和"集中度百分之几"
+// 是两个量纲，硬塞进一个纵轴必然误读。缺数据的点断开——不连成一条假的直线。
+function drawFlowChart(rows){
+  const canvas = $('flowChart');
+  if (!canvas) return;
+  const wrap = canvas.parentElement;
+  const W = Math.max(320, wrap.clientWidth - 4), H = 132;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(W*dpr); canvas.height = Math.round(H*dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.font = '10px sans-serif';
+  const usable = rows.filter(r => r && r.trade_date);
+  if (usable.length < 3){
+    ctx.fillStyle = C.axis; ctx.textBaseline = 'middle';
+    ctx.fillText('趋势要攒几天才画得出来（资金去向每天日终落一行）', 6, H/2);
+    return;
+  }
+  const padL = 44, padR = 46, gap = 16;
+  const topH = (H - gap) * 0.58, botH = (H - gap) - topH;
+  const topTop = 6, botTop = topTop + topH + gap;
+  const plotW = W - padL - padR;
+  const n = usable.length;
+  const xs = i => padL + plotW * (i + 0.5) / n;
+  const barW = Math.max(2, Math.min(10, plotW / n * 0.6));
+
+  // 上：宽基 ETF 每日净流入（正=申购，负=赎回）。单位亿元，围绕 0 画。
+  const flows = usable.map(r => r.broad_etf_inflow).filter(v => v != null);
+  ctx.fillStyle = C.axis; ctx.textBaseline = 'top';
+  ctx.fillText('宽基 ETF 每日净流入（亿）', padL, topTop - 2);
+  if (!flows.length){
+    ctx.fillStyle = C.axis; ctx.textBaseline = 'middle';
+    ctx.fillText('ETF 份额历史还不够', padL, topTop + topH/2);
+  } else {
+    const lo = Math.min(0, ...flows), hi = Math.max(0, ...flows);
+    const span = (hi - lo) || 1;
+    const yOf = v => topTop + 12 + (topH - 16) * (1 - (v - lo) / span);
+    const zero = Math.round(yOf(0)) + .5;
+    ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(padL, zero); ctx.lineTo(W-padR, zero); ctx.stroke();
+    ctx.fillStyle = C.axis; ctx.textBaseline = 'middle';
+    ctx.fillText(fmt(hi, 0), 4, yOf(hi)); ctx.fillText(fmt(lo, 0), 4, yOf(lo));
+    usable.forEach((r, i) => {
+      const v = r.broad_etf_inflow;
+      if (v == null) return;
+      const y = yOf(v);
+      ctx.fillStyle = v >= 0 ? C.up : C.down;
+      ctx.fillRect(xs(i) - barW/2, Math.min(y, zero), barW, Math.max(1, Math.abs(zero - y)));
+    });
+  }
+
+  // 下：成交额集中度（前 100 只占比，%）。这条能回溯到有日线的地方，所以一般更长。
+  const pcts = usable.map(r => r.top100_pct).filter(v => v != null);
+  ctx.fillStyle = C.axis; ctx.textBaseline = 'top';
+  ctx.fillText('成交额前 100 只占比（%）', padL, botTop - 2);
+  if (pcts.length >= 2){
+    const lo = Math.min(...pcts), hi = Math.max(...pcts);
+    const span = (hi - lo) || 1;
+    const yOf = v => botTop + 12 + (botH - 16) * (1 - (v - lo) / span);
+    ctx.fillStyle = C.axis; ctx.textBaseline = 'middle';
+    ctx.fillText(fmt(hi, 1), 4, yOf(hi)); ctx.fillText(fmt(lo, 1), 4, yOf(lo));
+    // 中位数参考线：集中度只看分位，参考线就是"这段时间的常态"
+    const sorted = [...pcts].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    ctx.save(); ctx.setLineDash([3,3]); ctx.strokeStyle = C.grid;
+    const my = Math.round(yOf(median)) + .5;
+    ctx.beginPath(); ctx.moveTo(padL, my); ctx.lineTo(W-padR, my); ctx.stroke(); ctx.restore();
+    ctx.strokeStyle = C.ma20; ctx.lineWidth = 1.4; ctx.beginPath();
+    let started = false;
+    usable.forEach((r, i) => {
+      const v = r.top100_pct;
+      if (v == null){ started = false; return; }        // 缺数据断开，不连假线
+      const x = xs(i), y = yOf(v);
+      started ? ctx.lineTo(x, y) : (ctx.moveTo(x, y), started = true);
+    });
+    ctx.stroke();
+    ctx.fillStyle = C.axis; ctx.textBaseline = 'middle';
+    ctx.fillText(`中位 ${median.toFixed(1)}`, W-padR+4, my);
+  }
+  // 日期：首尾两个就够，横轴再密也读不清
+  ctx.fillStyle = C.axis; ctx.textBaseline = 'top';
+  ctx.fillText(String(usable[0].trade_date).slice(5), padL, H-11);
+  ctx.fillText(String(usable[n-1].trade_date).slice(5), W-padR-30, H-11);
+}
+
 function benchmarkRows(dv){
   const rows = (dv && dv.by_benchmark) || [];
   if (!rows.length) return '';
@@ -1760,6 +1846,7 @@ function renderFlow(f){
     ${benchmarkRows(dv)}
     ${detailRows(f.detail)}
     ${stockRows(con)}`;
+  drawFlowChart(f.flow_series || []);
   $('flowHint').innerHTML =
     '<b>覆盖范围</b>：沪市 911 只按日披露、能算"较前一日"；'
     + '<b>深市暂缺</b>——深交所那个接口只给"最新份额"、而且无视日期参数（实测两个日期返回一模一样），'

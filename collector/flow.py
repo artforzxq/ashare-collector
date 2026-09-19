@@ -238,6 +238,9 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
     payload["detail"] = etf_detail(conn, cfg, trade_date)
     payload["divergence"] = divergence(conn, cfg)
     payload["concentration"] = concentration(conn, cfg, trade_date)
+    # 迷你趋势要的序列：ETF 申赎只有 20 来个交易日，集中度能拉更长——
+    # 两条线放在一张图上，各自画各自的（缺数据的地方断开，不连成一条假的直线）。
+    payload["flow_series"] = series(conn, 20)
     return payload
 
 
