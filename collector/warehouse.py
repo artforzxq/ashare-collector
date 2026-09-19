@@ -322,11 +322,19 @@ def sync_history(conn, cfg, codes: list[str] | None = None, limit: int | None = 
 
 
 def snapshot_bars(conn, cfg, trade_date: str | None = None, verbose: bool = True) -> dict:
-    """用一次全市场快照，给观察池以外的股票补上当日 K 线。"""
+    """用一次全市场快照，给观察池以外的股票补上当日 K 线。
+
+    **写入前必须确认那天真的是交易日**：快照接口在周末/节假日照样会返回
+    "最后一个交易日"的收盘数据（它不告诉你那是哪天的）。少了这道闸门，
+    周六跑一次日终，就会把周五的行情按周六写进 bars_daily——凭空多出一根假 K 线，
+    而且四价与周五完全相同，肉眼很难发现，均线和形态却已经全错了。
+    """
+    trade_date = trade_date or latest_trade_date(conn, cfg)
+    if not market_time.is_trading_day(conn, trade_date):
+        return {"ok": False, "message": f"{trade_date} 不是交易日，不写快照 K 线"}
     source = _source_for(cfg, "market_snapshot")
     if source is None:
         return {"ok": False, "message": "没有支持全市场快照的数据源"}
-    trade_date = trade_date or latest_trade_date(conn, cfg)
     # 本地代码表：腾讯那种"只能批量报价"的源需要它（东财自己能列，会忽略这个参数）
     codes = [row["code"] for row in db.query(conn, "SELECT code FROM instruments")]
     try:

@@ -101,6 +101,20 @@ def check_database(db_path: str | Path, schema_path: str | Path) -> dict:
         if "bars_daily" in tables:
             row = conn.execute("SELECT MAX(trade_date) AS d FROM bars_daily").fetchone()
             report["latest_bar"] = row["d"] if row else None
+        # 非交易日不该有行情。踩过：数据源失败时兜底成了"今天"，周六的日终把周五的
+        # 快照贴上周六的日期写了进来——多出来的那根假 K 线肉眼看不出四价有什么问题，
+        # 但均线、形态、回放全跟着错。这里专门盯它。
+        if "bars_daily" in tables and "trade_calendar" in tables:
+            report["off_calendar"] = [
+                row["trade_date"]
+                for row in conn.execute(
+                    """SELECT DISTINCT b.trade_date
+                         FROM bars_daily b
+                         JOIN trade_calendar t ON t.trade_date = b.trade_date
+                        WHERE COALESCE(t.is_trading_day, 1) = 0
+                        ORDER BY b.trade_date DESC"""
+                )
+            ]
         conn.close()
     except sqlite3.DatabaseError as exc:
         report["note"] = f"库打不开：{exc}（可能损坏，或正被别的工具锁着）"
@@ -113,6 +127,10 @@ def check_database(db_path: str | Path, schema_path: str | Path) -> dict:
         problems.append(f"缺 {len(report['missing_tables'])} 张表（跑一次 init-db 会自动补）")
     if not report["rows"].get("bars_daily"):
         problems.append("日线表是空的（跑一次 3-每日任务）")
+    if report.get("off_calendar"):
+        days = "、".join(report["off_calendar"][:3])
+        problems.append(f"{len(report['off_calendar'])} 个非交易日却有行情（{days}）——"
+                        "多半是数据源失败时把上一交易日的快照贴到了今天，先删掉再重跑")
     report["ok"] = not problems
     report["note"] = "；".join(problems)
     return report

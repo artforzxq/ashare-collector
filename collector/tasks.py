@@ -58,21 +58,44 @@ def _log(message: str, verbose: bool) -> None:
         print(message, flush=True)
 
 
-def resolve_trade_date(source, cfg: dict, provided: str | None) -> str:
+def resolve_trade_date(source, cfg: dict, provided: str | None, conn=None) -> str:
+    """这次日终按哪个交易日算。
+
+    规矩只有一条：**不能拿"今天"当兜底**。
+    2026-09-19 是周六，那天腾讯接口恰好抽风（数据源返回了非 JSON 的空响应），
+    原来的实现静默退回"今天"，于是整个日终把周六当成交易日跑了一遍，
+    还把周五的快照数据贴上了周六的日期——凭空多出一根假 K 线，
+    均线、形态、关键带、历史回放全跟着错。这类错误比"今天没跑"严重得多：
+    少一天数据只是缺，多一根假数据是**污染**，而且看不出来。
+
+    拿不到日历时按"本地认得的最新交易日 → 今天之前最近的工作日"退，别再退到今天。
+    """
     if provided:
         return provided
     if hasattr(source, "_dates") and source._dates:  # 夹具源
         return source._dates[-1]
-    end = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     try:
-        calendar = source.trade_calendar(start, end)
-        days = [row["trade_date"] for row in calendar if row.get("is_trading_day")]
+        calendar = source.trade_calendar(start, today)
+        days = [row["trade_date"] for row in calendar
+                if row.get("is_trading_day") and row.get("trade_date", "") <= today]
         if days:
-            return days[-1]
+            return max(days)                      # 源可能乱序，取最大的那天
     except (DataSourceError, NotImplementedError):
         pass
-    return end
+    except Exception:
+        pass                                      # 源抛别的异常也不能退回"今天"
+    if conn is not None:
+        # 注意：`latest_trade_date` 在本地什么都没有时会返回"今天"，所以必须再验一次
+        # 它到底是不是交易日——不然等于绕了一圈又回到"拿今天顶替"。
+        local = warehouse.latest_trade_date(conn, cfg)
+        if local and market_time.is_trading_day(conn, local):
+            return local
+    moment = datetime.now()                       # 连本地都没有：至少别落在周末
+    while moment.weekday() >= 5:
+        moment -= timedelta(days=1)
+    return moment.strftime("%Y-%m-%d")
 
 
 def feature_version(cfg: dict) -> str:
@@ -129,16 +152,33 @@ def _all_sources_for(pool: list, capability: str) -> list:
 
 # ---------- 日终任务 ----------
 
-def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int = 460, verbose: bool = True) -> dict:
+def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int = 460,
+              verbose: bool = True, allow_non_trading: bool = False) -> dict:
     registry = FactorRegistry(cfg.get("factors", []), feature_version(cfg))
     primary = build_source(cfg["sources"]["primary"], cfg)
     backup = build_source(cfg["sources"]["backup"], cfg)
     pool = _source_pool(cfg)
-    trade_date = resolve_trade_date(primary, cfg, trade_date)
+    trade_date = resolve_trade_date(primary, cfg, trade_date, conn=conn)
     start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=history_days)).strftime("%Y-%m-%d")
 
     summary = {"trade_date": trade_date, "codes": {}, "breadth": None, "alerts": [], "issues": []}
     _log(f"[1/7] 交易日 {trade_date}，主源 {primary.name}，备份源 {backup.name}", verbose)
+
+    # 前置闸门：非交易日不跑日终。
+    # 上一道闸门（resolve_trade_date）尽量给出正确的交易日，但**兜底出来的日期必须再验一次**——
+    # 只要不是交易日，日终算出来的每一个结论（状态、关键带、提醒、回放基准）都建立在
+    # 一根不存在的 K 线上。宁可这次不跑，也不能把上一交易日的行情贴到今天。
+    if not allow_non_trading and not market_time.is_trading_day(conn, trade_date):
+        moment = datetime.strptime(trade_date, "%Y-%m-%d")
+        message = (f"{trade_date}（{['周一','周二','周三','周四','周五','周六','周日'][moment.weekday()]}）"
+                   "不是交易日，日终任务不执行。"
+                   "要补历史请显式指定交易日；拿不到交易日历时不能拿今天顶替，"
+                   "那会把上一交易日的行情贴到今天。")
+        summary["issues"].append(message)
+        _log(f"      ! {message}", verbose)
+        db.log_health(conn, trade_date, "local", "daily", "failed", 0, 0.0, 0, message)
+        summary["missing_grade"] = "L3"
+        return summary
 
     # 盘中跑日终会拿到"半根日线"：状态机、关键带、提醒全都建立在一个没收盘的价上。
     # 数据会在收盘后重跑时被覆盖（按主键 upsert），但结论得等人重跑一次，所以这里要说清楚。
@@ -827,7 +867,10 @@ def collect_instrument(
     if not pool:
         return {"ok": False, "message": "没有可用数据源"}
     primary, backup = pool[0], pool[1] if len(pool) > 1 else pool[0]
-    trade_date = resolve_trade_date(primary, cfg, trade_date)
+    trade_date = resolve_trade_date(primary, cfg, trade_date, conn=conn)
+    if not market_time.is_trading_day(conn, trade_date):
+        return {"ok": False, "trade_date": trade_date,
+                "message": f"{trade_date} 不是交易日，单只补齐也不执行（避免把上一交易日的行情贴到今天）"}
     start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=460)).strftime("%Y-%m-%d")
 
     summary: dict = {"issues": []}
