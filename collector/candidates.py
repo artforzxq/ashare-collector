@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import unicodedata
 
-from . import candles as candles_mod, db, features as features_mod, risk as risk_mod, universe
+from . import (candles as candles_mod, db, features as features_mod, regime as regime_mod,
+               risk as risk_mod, universe)
 from .config import watchlist_codes
 from .levels import build_levels
 from .registry import FactorRegistry
@@ -320,7 +321,20 @@ def build(conn, cfg: dict, days: int | None = None, min_hits: int | None = None)
         )
 
     candidates = [item for item in items if item["code"] not in pooled and item["hits"] >= min_hits]
-    candidates.sort(key=_sort_key)
+    # 资产选择：市场层决定"眼下该用哪类工具表达"，只影响**排序**，不改筛选口径。
+    # 依据（`run.py regime`，297 个交易日）：防守日筛出来的票 20 日超额 −3.04%，
+    # 进取日 −0.90%，差 2.13pp（t=−2.41，校正后 p=0.047）——
+    # 也就是说"防守时少出手、出手也优先用宽基"这句话在我们自己的信号上站得住。
+    # 反过来不成立：三个档位都是显著为负，"进取时买个股更赚"没有证据，所以这里只排序、不推荐买入。
+    mix = regime_mod.asset_mix(cfg, regime_mod.series(conn, cfg).get(latest_date))
+    rank = {kind: -weight for kind, weight in mix["weights"].items()}
+    # 候选是池外的票，`item["type"]` 一直是空的——类型只有池内那几行才带。
+    # 不查这一下，几百只 ETF 会全被归到"其它"，资产选择就形同虚设。
+    kinds = {row["code"]: row["type"] for row in db.query(conn, "SELECT code, type FROM instruments")}
+    for item in candidates:
+        item["kind"] = regime_mod.kind_of(cfg, item["code"], item.get("type") or kinds.get(item["code"]))
+        item["kind_label"] = regime_mod.KIND_LABEL.get(item["kind"], item["kind"])
+    candidates.sort(key=lambda item: (rank.get(item["kind"], 0), _sort_key(item)))
 
     members = [item for item in items if item["code"] in pooled]
     order = {code: index for index, code in enumerate(pooled)}
@@ -328,6 +342,7 @@ def build(conn, cfg: dict, days: int | None = None, min_hits: int | None = None)
 
     return {
         "ok": True,
+        "asset_mix": mix,
         "trade_date": latest_date,
         "window": dates,
         "days": days,

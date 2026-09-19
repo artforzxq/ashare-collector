@@ -9,6 +9,7 @@ from typing import Iterable
 
 from . import (breadth as breadth_mod, candles as candles_mod, db, features as features_mod,
                intraday as intraday_mod, market_time, newstock as newstock_mod,
+               regime as regime_mod,
                review as review_mod, risk as risk_mod,
                screen as screen_mod, support as support_mod, validate, warehouse)
 from .names import display_name
@@ -611,7 +612,7 @@ def _collect_margin(conn, source, trade_date: str, verbose: bool) -> None:
 
 
 def _extra_series(conn, cfg: dict, trade_date: str) -> dict:
-    """给影子因子提供外部序列：市场广度分与 ETF 份额变化。"""
+    """给影子因子提供外部序列：市场广度分、ETF 份额变化、市场层（Beta）。"""
     breadth_rows = db.query(
         conn, "SELECT trade_date, up_ratio FROM market_breadth WHERE trade_date <= ? ORDER BY trade_date", (trade_date,)
     )
@@ -642,7 +643,10 @@ def _extra_series(conn, cfg: dict, trade_date: str) -> dict:
             if index < 5 or not rows[index - 5]["shares"]:
                 continue
             etf_share_chg[row["trade_date"]] = round(row["shares"] / rows[index - 5]["shares"] - 1, 4)
-    return {"breadth_score": breadth_score, "etf_share_chg": etf_share_chg, "max_boards": board_by_date}
+    # 市场层（Beta）：宽基指数状态 + 广度 + 成交额合成的一个 0–1。先进影子，不进打分。
+    market_by_date = regime_mod.series(conn, cfg, trade_date)
+    return {"breadth_score": breadth_score, "etf_share_chg": etf_share_chg,
+            "max_boards": board_by_date, "market_regime": market_by_date}
 
 
 def _compute_features(

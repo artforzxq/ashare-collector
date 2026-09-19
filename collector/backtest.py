@@ -506,6 +506,135 @@ def _bucket_of(ratio: float) -> str | None:
     return None
 
 
+REGIME_BUCKETS = (("防守", None, 0.4), ("中性", 0.4, 0.6), ("进取", 0.6, None))
+
+
+def _regime_bucket(score: float) -> str:
+    if score < 0.4:
+        return "防守"
+    if score > 0.6:
+        return "进取"
+    return "中性"
+
+
+def regime_study(conn, cfg, horizon: int = 20) -> dict:
+    """市场层（Beta）到底有没有信息量：把历史筛选命中按**当天的市场层**分档，看之后的超额。
+
+    为什么样本要用我们自己的筛选结果：要检验的那句话是"市场层低的日子少出手"，
+    它只有在**我们自己的信号**上成立才有意义——拿全市场随便一只票去测，测的是另一回事。
+
+    基准用**全市场等权**（同一批日期、同一口径，和重放报告里那一列一样）。
+    一开始我图省事拿"同一天所有命中的平均"当基准，结果是废的：某些档位能占满一整天的命中，
+    那它的超额就恒等于 0——用自己当自己的基准，什么也测不出来。
+    """
+    from . import regime as regime_mod, screen as screen_mod, stats as stats_mod
+
+    scores = regime_mod.series(conn, cfg)
+    if not scores:
+        return {"ok": False, "message": "还没有市场层序列（要先有市场广度历史与宽基指数状态）"}
+    column = f"outcome_{horizon}d"
+    rows = [
+        dict(row)
+        for row in db.query(
+            conn,
+            f"""SELECT trade_date, criterion, {column} AS outcome
+                FROM screen_results WHERE {column} IS NOT NULL""",
+        )
+    ]
+    if not rows:
+        return {"ok": False, "message": f"没有 {horizon} 日回填结果，先跑一次 22-历史重放"}
+
+    dates = sorted({row["trade_date"] for row in rows})
+    baseline = screen_mod.equal_weight_baseline(conn, cfg, dates).get("per_date") or {}
+    if not baseline:
+        return {"ok": False, "message": "算不出全市场等权基准（基准序列缺数据）"}
+
+    daily: dict[str, dict[str, list[float]]] = {label: {} for label, _, _ in REGIME_BUCKETS}
+    samples: dict[str, int] = {label: 0 for label, _, _ in REGIME_BUCKETS}
+    missed = 0
+    for row in rows:
+        score = scores.get(row["trade_date"])
+        base = baseline.get(row["trade_date"])
+        if score is None or base is None:
+            missed += 1
+            continue
+        label = _regime_bucket(score)
+        excess = float(row["outcome"]) - float(base)
+        daily[label].setdefault(row["trade_date"], []).append(excess)
+        samples[label] += 1
+
+    tests = sum(1 for label in daily if daily[label])
+    buckets = []
+    for label, low, high in REGIME_BUCKETS:
+        stats = stats_mod.daily_mean_stats(daily[label])
+        p_value = stats_mod.two_sided_p(stats["t"])
+        buckets.append({
+            "bucket": label,
+            "low": low,
+            "high": high,
+            "days": stats["days"],
+            "samples": samples[label],
+            "excess": round(stats["mean"], 4) if stats["mean"] is not None else None,
+            "ci95": stats["ci95"],
+            "t": stats["t"],
+            "p": p_value,
+            "p_adj": stats_mod.sidak_adjust(p_value, tests),
+        })
+
+    # 三个档位各自的绝对水平都是负的（这本来就知道），真正要回答的是
+    # **档位之间有没有差别**：防守日出手是不是比进取日更吃亏。两样本 t（Welch）。
+    contrast = None
+    left, right = daily["防守"], daily["进取"]
+    if len(left) >= 5 and len(right) >= 5:
+        left_means = [statistics.mean(values) for values in left.values()]
+        right_means = [statistics.mean(values) for values in right.values()]
+        gap = statistics.mean(left_means) - statistics.mean(right_means)
+        se = (statistics.pstdev(left_means) ** 2 / len(left_means)
+              + statistics.pstdev(right_means) ** 2 / len(right_means)) ** 0.5
+        t_value = round(gap / se, 2) if se > 0 else None
+        p_value = stats_mod.two_sided_p(t_value)
+        contrast = {
+            "label": "防守 − 进取",
+            "gap": round(gap, 4),
+            "t": t_value,
+            "p": p_value,
+            "p_adj": stats_mod.sidak_adjust(p_value, tests),
+        }
+    return {"ok": True, "horizon": horizon, "tests": tests, "crit_t": stats_mod.crit_t(tests),
+            "buckets": buckets, "contrast": contrast, "dates": len(dates), "skipped": missed}
+
+
+def regime_report(result: dict) -> str:
+    """给人看的一段：市场层分档之后，筛出来的票后来表现如何。"""
+    if not result.get("ok"):
+        return result.get("message", "算不出市场层分档")
+    lines = [
+        "",
+        f"市场层分档（{result['horizon']} 日超额，基准 = 同期全市场等权）",
+        f"{'档位':<6}{'交易日':>7}{'样本':>7}{'按日超额':>10}{'95%区间':>12}{'t':>8}{'校正p':>9}  结论",
+    ]
+    for item in result["buckets"]:
+        if item["t"] is None:
+            lines.append(f"{item['bucket']:<6}{item['days']:>7}{item['samples']:>7}"
+                         f"{'—':>10}{'—':>12}{'—':>8}{'—':>9}  样本不足")
+            continue
+        edge = f"±{item['ci95']:.2f}" if item["ci95"] is not None else "—"
+        verdict = ("显著为正" if item["excess"] > 0 else "显著为负") if (
+            item["p_adj"] is not None and item["p_adj"] < 0.05) else "不显著"
+        lines.append(f"{item['bucket']:<6}{item['days']:>7}{item['samples']:>7}"
+                     f"{item['excess']:>+9.2f}%{edge:>12}{item['t']:>8.2f}"
+                     f"{item['p_adj']:>9.3f}  {verdict}")
+    contrast = result.get("contrast")
+    if contrast and contrast.get("t") is not None:
+        verdict = "有差别" if (contrast["p_adj"] or 1) < 0.05 else "看不出差别"
+        lines.append(f"防守日 − 进取日：{contrast['gap']:+.2f}pp　t {contrast['t']:.2f}　"
+                     f"校正 p {contrast['p_adj']:.3f}　→ {verdict}")
+    lines.append(f"说明：先按交易日取均值再算 t；同时看了 {result['tests']} 个档位，"
+                 f"校正后 |t| ≥ {result['crit_t']:g} 才算显著。"
+                 "超额为正 = 那些天筛出来的票比「随便买一只同口径的票」更好。")
+    return "\n".join(lines)
+
+
 def turnover_study(conn, cfg, mode: str | None = None, limit: int | None = None,
                    verbose: bool = True) -> dict:
     """按换手放量倍数分档，看之后 5 / 20 日的表现（相对同日期等权基准的超额）。

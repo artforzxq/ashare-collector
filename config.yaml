@@ -14,7 +14,7 @@ project:
 watchlist:
   indices: [SZ399006]
   etfs: [SH510500, SH588000, SH588200]
-  stocks: [SZ000333, SZ000063, SH600487, SH600606]
+  stocks: [SZ000333, SZ000063, SH600487, SH600606, SH600584]
   # 实际持仓（只填个股代码）。只有列在这里的才算"持仓"，其余个股算"观察"。
   # 区别只有一个但很重要：出池提示只对"观察"里的个股生效——
   # 持仓的去留由仓位和你自己的判断决定，不该被"最近没出现形态"赶走。
@@ -110,6 +110,29 @@ alerts:
   cooldown_days_by_signal:
     KEY_PATTERN_STRONG: 5
     KEY_PATTERN: 10
+
+# 市场层（Beta）：回答"今天整体是什么行情"，用来决定**仓位与资产选择**，
+# 不参与个股打分（那会变成用大盘给个股打分，两件事的证据强度完全不同）。
+# 三块输入各代表一件事：宽基指数状态（趋势在不在）、市场广度（上涨有没有宽度）、
+# 成交额（有没有量）。合成 0–1：0.5 中性、>0.6 进取、<0.4 防守。缺两块输入就不下结论。
+market:
+  indices: [SH000001, SH000300, SZ399006, SH000688]   # 大盘 / 大盘成长 / 小盘成长 / 硬科技
+  weights: {index: 0.4, breadth: 0.4, amount: 0.2}
+  amount_window: 60      # 成交额分位：跟过去多少个交易日的中位数比
+  amount_low: 0.7        # 成交额 ÷ 中位数 ≤ 这个数 → 量能分算 0
+  amount_high: 1.3       # ≥ 这个数 → 算 1
+  # 资产选择：市场层 → 筛选池该偏向哪一类工具。
+  # 只用来**排序和提示**（防守时宽基优先、进攻时个股优先），不改任何筛选口径——
+  # 口径一改，"筛出来的票后来怎么样"就没法跨时间比了。
+  asset_mix:
+    defense: {broad_etf: 0.6, sector_etf: 0.1, stock: 0.3}
+    neutral: {broad_etf: 0.4, sector_etf: 0.3, stock: 0.3}
+    offense: {broad_etf: 0.2, sector_etf: 0.3, stock: 0.5}
+  # 宽基名单：只有列在这里的 ETF 才算"宽基"（其余 ETF 一律当行业/主题）。
+  # 靠名字猜不可靠——"中证 A500"、"科创 50"、"XX 龙头"都长得像宽基。想加就加一行。
+  broad_etfs: [SH510300, SH510310, SH510330, SZ159919, SH510050,
+               SH510500, SH512500, SH512100, SZ159845, SZ159915,
+               SH588000, SH588080, SH510880]
 
 # 疑似托底（"国家队"）：宽基 ETF **份额净流入 + 二级市场异常放量**，两条同时成立才记一笔。
 # 份额来自一级市场申赎（真金白银申购才会增加），成交额来自二级市场换手——单独放量说明不了什么。
@@ -502,3 +525,17 @@ factors:
     status: shadow
     source_field: dist_to_swing_low
     normalize: {type: linear, x0: -12.0, x1: -1.0}   # 越贴近结构低点得分越高：止损近，盈亏比才好
+
+  # 市场层（Beta）：宽基指数状态 + 市场广度 + 成交额，合成一个 0–1（0.5 中性）。
+  # 它回答的是"今天该用多大仓位"，不是"买哪只票"——所以只走风险层与筛选池的资产选择，
+  # 不进个股趋势分。先当影子跑够样本，看"市场层高的日子，我们的信号是不是真的更好"。
+  - factor_id: market_regime
+    name: 市场层（Beta）
+    layer: state
+    role: modifier
+    category: sentiment
+    weight: 0.0
+    min_samples: 120
+    status: shadow
+    source_field: market_regime
+    normalize: {type: linear, x0: 0.3, x1: 0.7}

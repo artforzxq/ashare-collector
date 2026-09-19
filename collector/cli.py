@@ -22,6 +22,7 @@ from . import (
     intraday as intraday_mod,
     newstock as newstock_mod,
     notify,
+    regime as regime_mod,
     risk as risk_mod,
     promotion as promotion_mod,
     report as report_mod,
@@ -707,6 +708,28 @@ def cmd_flows(args) -> int:
     return 0 if (lhb.get("ok") or flow.get("ok")) else 1
 
 
+def cmd_regime(args) -> int:
+    """市场层（Beta）体检：宽基指数状态 + 广度 + 成交额合成 0–1，再看它有没有信息量。
+
+    两件事一起做：先算当天读数（页面/简报要用的那一个数），
+    再按历史筛选命中分档，看"市场层高的日子，我们的信号是不是真的更好"。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    info = regime_mod.latest(conn, cfg)
+    if not info.get("ok"):
+        print(info.get("message", "算不出市场层"))
+        conn.close()
+        return 1
+    print(f"市场层 {info['trade_date']}：{info['score']:.3f}（{info['stance']}）")
+    print(f"  权重 {info['weights']}　盯的宽基 {'、'.join(info['indices'])}")
+    print("  最近 10 天：" + "　".join(f"{day} {value:.2f}" for day, value in info["history"][-10:]))
+    study = backtest_mod.regime_study(conn, cfg, horizon=int(args.horizon or 20))
+    print(backtest_mod.regime_report(study))
+    conn.close()
+    return 0 if study.get("ok") else 1
+
+
 def cmd_etf_shares(args) -> int:
     """补 ETF 份额历史：托底判定与页面上的"较前一日"都至少要两天的份额。
 
@@ -1024,6 +1047,11 @@ def build_parser() -> argparse.ArgumentParser:
     etf_shares.add_argument("--days", type=int, help="往前补几个交易日（默认 10）")
     etf_shares.add_argument("--db", help="数据库路径")
     etf_shares.set_defaults(func=cmd_etf_shares)
+
+    regime = sub.add_parser("regime", help="市场层（Beta）：当前读数 + 历史分档回测")
+    regime.add_argument("--horizon", type=int, help="看之后几个交易日（默认 20）")
+    regime.add_argument("--db", help="数据库路径")
+    regime.set_defaults(func=cmd_regime)
 
     riskstats = sub.add_parser("riskstats", help="风险层分布：盈亏比、止损距离、仓位上限")
     riskstats.add_argument("--db", help="数据库路径")

@@ -581,6 +581,7 @@ canvas{display:block;width:100%}
       <div class="block-head"><h2>② 候选进池</h2><span class="line"></span><span class="kv">机器排队，人点确认</span></div>
       <div class="card panel">
         <h3>候选清单 <span id="poolCandNote"></span></h3>
+        <div class="hint" id="poolMixHint"></div>
         <div id="poolCandidates"></div>
       </div>
 
@@ -1916,6 +1917,24 @@ function renderPool(){
 
   // ② 候选进池
   const cand = d.candidates || [];
+  const mix = d.asset_mix;
+  if (mix && mix.weights){
+    const order = ['broad_etf', 'sector_etf', 'stock'];
+    const label = {broad_etf: '宽基 ETF', sector_etf: '行业/主题 ETF', stock: '个股'};
+    const weights = order.map(kind => `${label[kind]} ${Math.round((mix.weights[kind] || 0) * 100)}%`).join('　');
+    const counts = {};
+    cand.forEach(item => { counts[item.kind] = (counts[item.kind] || 0) + 1; });
+    const now = order.map(kind => `${label[kind]} ${counts[kind] || 0}`).join('　');
+    $('poolMixHint').innerHTML =
+      `<b>资产选择</b>：市场层 ${mix.score == null ? '—' : mix.score.toFixed(2)}（${mix.stance}）`
+      + ` → 建议配比 ${weights}<br>`
+      + `为什么：历史重放里，市场层低的日子筛出来的票 20 日超额 −3.04%，高的日子 −0.90%（差 2.13pp，`
+      + `校正后 p=0.047）——<b>防守时少出手</b>这句话在我们自己的信号上站得住。`
+      + `注意它只改<b>排序</b>、不改筛选口径：三个档位的超额都是负的，`
+      + `所以"进攻时买个股更赚"没有证据。<br>当前候选：${now}（按建议配比排序）`;
+  } else {
+    $('poolMixHint').textContent = '';
+  }
   $('poolCandNote').textContent = cand.length ? `共 ${cand.length} 只` : '';
   $('poolCandidates').innerHTML = cand.length
     ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
@@ -1927,7 +1946,7 @@ function renderPool(){
           ? '<span class="sub">还没有回填</span>'
           : posNeg(ex, signed(ex, 2) + '%') + `<div class="sub">${item.outcome_n} 个样本</div>`;
         return `<tr>
-          <td><span class="name">${item.name || item.code}</span><div class="sub">${item.code}</div></td>
+          <td><span class="name">${item.name || item.code}</span><div class="sub">${item.code}${item.kind_label ? ' · ' + item.kind_label : ''}</div></td>
           <td class="num">${item.hits} 次<div class="sub">${item.days} 个筛选日</div></td>
           <td class="sub">${(item.criteria || []).join('、')}</td>
           <td class="num">${poolAmount(item.avg_amount_60d)}${item.liquid ? '' : '<div class="sub">低于门槛</div>'}</td>

@@ -185,6 +185,7 @@ def compute_feature_series(
     """逐日计算特征、因子贡献与状态。bars 必须按日期升序且已通过校验。"""
     extra = extra or {}
     breadth_by_date = extra.get("breadth_score", {})
+    regime_by_date = extra.get("market_regime", {})
     share_by_date = extra.get("etf_share_chg", {})
     board_by_date = extra.get("max_boards", {})
     params = cfg.get("state", {})
@@ -318,6 +319,8 @@ def compute_feature_series(
         vol_shrink = round(mean5 / mean60, 4) if (mean5 and mean60) else None
 
         raw["breadth_score"] = breadth_by_date.get(bar["trade_date"])
+        # 市场层（Beta）：只进台账与筛选池的资产选择，不进个股打分。
+        raw["market_regime"] = regime_by_date.get(bar["trade_date"])
         raw["etf_share_chg"] = share_by_date.get(bar["trade_date"])
         raw["max_boards"] = board_by_date.get(bar["trade_date"])
 
