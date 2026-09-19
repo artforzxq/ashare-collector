@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from . import (breadth as breadth_mod, candles as candles_mod, db, features as features_mod,
-               intraday as intraday_mod, market_time, review as review_mod, risk as risk_mod,
+               intraday as intraday_mod, market_time, newstock as newstock_mod,
+               review as review_mod, risk as risk_mod,
                screen as screen_mod, validate, warehouse)
 from .names import display_name
 from .alerts import apply_budget, apply_cooldown, build_candidates, persist
@@ -17,6 +18,27 @@ from .config import watchlist_codes
 from .levels import build_levels, nearest_band
 from .registry import FactorRegistry
 from .sources import DataSourceError, build_source
+
+
+def _ipo_per_run(cfg: dict) -> int:
+    """日终每轮补多少个上市日。baostock 一只约 0.2~0.5 秒，200 只约一分钟——
+    够用又不至于把日终拖成十几分钟；补不完的下一轮接着补。"""
+    return int(((cfg or {}).get("newstock") or {}).get("ipo_per_run", 200))
+
+
+def _trading_days_for(conn, code: str, rows) -> dict:
+    """{交易日: 上市第几个交易日}，交给 validate 去按阶段判涨跌幅上限。
+
+    拿不到上市日就返回空字典，那边会退回配置里的固定阈值（老行为）。
+    """
+    listed = market_time.listed_date_of(conn, code)
+    if not listed:
+        return {}
+    return {
+        row["trade_date"]: market_time.trading_days_between(conn, listed, row["trade_date"])
+        for row in rows
+        if row.get("trade_date")
+    }
 
 
 def _known_name(conn, code: str) -> str:
@@ -148,7 +170,11 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
             continue
 
         merge = validate.merge_two_sources(primary_rows or backup_rows, backup_rows, cfg)
-        checked = validate.validate_bars(merge.rows, cfg)
+        checked = validate.validate_bars(
+            merge.rows, cfg,
+            code=code, name=names.get(code),
+            trading_days=_trading_days_for(conn, code, merge.rows),
+        )
         for row in checked.rows:
             row["source"] = row.get("source") or primary.name
             row["updated_at"] = db.now_iso()
@@ -227,6 +253,13 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
         screen_mod.backfill_outcomes(conn, verbose=verbose)
     except Exception as exc:
         _log(f"      ! 回填筛选结果失败：{exc}", verbose)
+    # 新股/次新：当日清单要更新，推送里那一段和页面都读它。这张表很小，算一次不到一秒。
+    try:
+        # 顺手补一批真实上市日（每轮限量，免得日终被几千次请求拖住；反复跑就会补齐）
+        newstock_mod.sync_ipo_dates(conn, cfg, limit=_ipo_per_run(cfg), verbose=verbose)
+        newstock_mod.refresh(conn, cfg, verbose=verbose)
+    except Exception as exc:
+        _log(f"      ! 新股清单刷新失败：{exc}", verbose)
     return summary
 
 
@@ -719,7 +752,11 @@ def collect_instrument(
         return {"ok": False, "message": f"取不到 {code} 的行情：" + ("；".join(summary["issues"]) or "数据源没返回数据")}
 
     merge = validate.merge_two_sources(primary_rows or backup_rows, backup_rows, cfg)
-    checked = validate.validate_bars(merge.rows, cfg)
+    checked = validate.validate_bars(
+        merge.rows, cfg,
+        code=code, name=_known_name(conn, code),
+        trading_days=_trading_days_for(conn, code, merge.rows),
+    )
     for row in checked.rows:
         row["source"] = row.get("source") or primary.name
         row["updated_at"] = db.now_iso()

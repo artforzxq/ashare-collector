@@ -57,6 +57,12 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     "analysis_log": {
         "scope": "TEXT",
     },
+    # 新股表先只有"靠日线推算"，后来补了权威上市日，再记下本地有多少根日线
+    "new_listings": {
+        "bars_loaded": "INTEGER",
+        "blocked_bars": "INTEGER",
+        "estimated": "INTEGER DEFAULT 0",
+    },
 }
 
 

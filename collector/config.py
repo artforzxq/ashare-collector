@@ -42,6 +42,8 @@ DEFAULTS: Dict[str, Any] = {
         "price_tol": 0.003,
         "amount_tol": 0.03,
         "jump_pct_limit": 11.0,
+        "jump_tol_pct": 1.0,
+        "jump_pct_limit_unlimited": 300.0,
         "volume_anomaly_ratio": 10.0,
         "critical_codes": [],
     },
@@ -68,11 +70,11 @@ DEFAULTS: Dict[str, Any] = {
             "token": "",
             "token_env": "ASHARE_PUSHPLUS_TOKEN",
             "token_file": "data/pushplus.token",
-            "template": "txt",
+            "template": "html",
             "topic": "",
             "channel": "",
             "only_on_alerts": False,
-            "max_chars": 4000,
+            "max_chars": 9000,
             "timeout": 10,
             "state_file": "data/last-push.txt",
         }
@@ -91,6 +93,14 @@ DEFAULTS: Dict[str, Any] = {
             "timeout": 60,
             "daily_limit": 20,
         }
+    },
+    # 新股与次新：单独一张表、单独一个模块，见 collector/newstock.py
+    "newstock": {
+        "new_days": 30,
+        "recent_days": 250,
+        "limit": 80,
+        "push_top": 6,
+        "types": ["stock"],
     },
     "warehouse": {
         "snapshot_daily": True,

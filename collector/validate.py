@@ -152,10 +152,21 @@ def validate_bars(
     cfg: dict,
     is_st: bool = False,
     is_new: bool = False,
+    code: str = "",
+    name: str | None = None,
+    trading_days: dict | None = None,
 ) -> BarValidation:
-    """涨跌幅跳变阻断；成交额异常只标记。"""
+    """涨跌幅跳变阻断；成交额异常只标记。
+
+    "跳变"的判据不是固定的 11%，而是**那一类标的当天的法定涨跌幅**：
+    创业板/科创板 20%、北交所 30%、主板 10%、主板 ST 5%，
+    上市头几天（创业板科创板前 5 日、北交所首日）压根不设限。
+    传 code / name / trading_days（{交易日: 上市第几天}）就会按阶段算；
+    不传就退回配置里的 jump_pct_limit，行为和以前一样。
+    """
     jump_limit = float(cfg["validation"].get("jump_pct_limit", 11.0))
     volume_ratio = float(cfg["validation"].get("volume_anomaly_ratio", 10.0))
+    days_map = trading_days or {}
 
     checked: list[dict] = []
     blocked: list[dict] = []
@@ -165,9 +176,19 @@ def validate_bars(
     for row in rows:
         record = dict(row)
         pct = record.get("pct_chg")
-        if pct is not None and not is_st and not is_new and abs(float(pct)) > jump_limit:
+        if code:
+            limit = limits.max_move_pct(
+                code, name, days_map.get(record.get("trade_date")), cfg,
+                up=(pct is not None and float(pct) >= 0),
+            )
+        else:
+            limit = jump_limit        # 调用方没给标的身份：维持老口径
+        if pct is not None and not is_st and not is_new and abs(float(pct)) > limit:
             record["quality_flag"] = "blocked"
-            blocked.append({"trade_date": record["trade_date"], "pct_chg": pct, "reason": "涨跌幅跳变"})
+            blocked.append({
+                "trade_date": record["trade_date"], "pct_chg": pct,
+                "reason": f"涨跌幅超过当日上限 {limit:.0f}%",
+            })
         else:
             amount = record.get("amount")
             if amount and len(amounts) >= 20:

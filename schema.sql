@@ -257,6 +257,31 @@ CREATE TABLE IF NOT EXISTS analysis_log (
 
 CREATE INDEX IF NOT EXISTS idx_analysis_code ON analysis_log (code, created_at);
 
+-- 新股与次新：单独一张表，因为这些事实（上市多久、几个板）用日线现推很别扭，
+-- 而且推送、页面、复盘都要用同一份判定，不该各算各的。
+-- 判定依据是**本地日线的第一根**：某个代码只拿到 N 根日线，说明它上市大约 N 个交易日
+-- （同步一次要 750 天，拿到的不可能比它上市以来的还多）。
+CREATE TABLE IF NOT EXISTS new_listings (
+  code            TEXT PRIMARY KEY, -- 标的代码
+  name            TEXT,             -- 标的名称
+  board           TEXT,             -- 板块：主板 / 创业板 / 科创板 / 北交所
+  listed_date     TEXT,             -- 上市日（按本地日线第一根推算）
+  trading_days    INTEGER,          -- 上市以来交易日数（本地已有多少根）
+  stage           TEXT,             -- new 新股 / recent 次新 / old 已过观察期
+  first_close     REAL,             -- 上市第一根日线的收盘
+  last_close      REAL,             -- 最新收盘
+  since_list_pct  REAL,             -- 上市以来涨跌幅，单位：%
+  limit_up_days   INTEGER,          -- 上市以来涨停天数
+  boards_from_start INTEGER,        -- 上市最初连续涨停的天数（几个板）
+  bars_loaded     INTEGER,          -- 本地已经有多少根日线（0 = 还没同步到它）
+  blocked_bars    INTEGER,          -- 其中有几根被数据体检标成 blocked（新股首日常见）
+  estimated       INTEGER DEFAULT 0,-- 上市日是不是靠日线推的：1 是推算，0 是权威上市日
+  last_seen       TEXT,             -- 最近一次判定的交易日
+  updated_at      TEXT              -- 本行最后更新时间
+);
+
+CREATE INDEX IF NOT EXISTS idx_new_listings_stage ON new_listings (stage, trading_days);
+
 CREATE TABLE IF NOT EXISTS data_health (
   run_date     TEXT NOT NULL, -- 任务运行日
   source       TEXT NOT NULL, -- 数据源名称

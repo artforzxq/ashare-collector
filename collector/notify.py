@@ -133,8 +133,12 @@ def build_message(conn, cfg: dict, trade_date: str | None = None) -> dict:
         raise PushError("库里还没有特征数据，先跑一次 daily 再推送")
 
     alerts = db.query(conn, "SELECT * FROM alerts WHERE trade_date=? ORDER BY level, code", (trade_date,))
-    body = report_mod.daily_report(conn, cfg, trade_date)
     conf = settings(cfg)
+    # 手机上看等宽文本会散架，所以默认发 HTML 版（表格 + 徽章）；想要纯文本也能切回去
+    if conf["template"] == "html":
+        body = report_mod.daily_html(conn, cfg, trade_date)
+    else:
+        body = report_mod.daily_report(conn, cfg, trade_date)
     if len(body) > conf["max_chars"]:
         body = body[: conf["max_chars"] - 30].rstrip() + "\n…（内容过长已截断）"
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import statistics
 
-from . import db, limits
+from . import db, limits, market_time
 
 # 少于这么多只票就不该叫"市场广度"，宁可空着也别给个数。
 # 全市场个股约 5500 只；本地仓库历史日期都能到 5500+，只有当天刚开盘才会很小。
@@ -53,7 +53,8 @@ def _exchange_of(code: str) -> str:
     return "SZ"
 
 
-def summarize(rows, trade_date: str, source: str, precise_limits: bool = False) -> dict | None:
+def summarize(rows, trade_date: str, source: str, precise_limits: bool = False,
+              limits_days: dict | None = None) -> dict | None:
     """把一批当日 K 线汇总成一行市场广度。没有涨跌幅数据就返回 None。
 
     口径：只有"有当日涨跌幅的票"进样本——停牌股当天没有 K 线，自动不计入，
@@ -69,14 +70,22 @@ def summarize(rows, trade_date: str, source: str, precise_limits: bool = False) 
     flat = len(pcts) - up - down
 
     if precise_limits:
-        limit_up = sum(1 for row, _ in sample if limits.at_limit_up(row, str(row.get("code") or "")))
-        limit_down = sum(1 for row, _ in sample if limits.at_limit_down(row, str(row.get("code") or "")))
+        # 上市阶段要带上：新股头几天不设涨跌幅，不能按 10% 判它涨停
+        days = limits_days or {}
+        limit_up = sum(1 for row, _ in sample
+                       if limits.at_limit_up(row, str(row.get("code") or ""),
+                                             trading_days=days.get(str(row.get("code") or ""))))
+        limit_down = sum(1 for row, _ in sample
+                         if limits.at_limit_down(row, str(row.get("code") or ""),
+                                                 trading_days=days.get(str(row.get("code") or ""))))
         # 炸板：盘中摸到涨停价，收盘却没封住（有 high 才判得了，快照那路没有）
         broken = sum(
             1 for row, _ in sample
             if row.get("high") is not None
-            and not limits.at_limit_up(row, str(row.get("code") or ""))
-            and limits.at_limit_price_hit(row, str(row.get("code") or ""))
+            and not limits.at_limit_up(row, str(row.get("code") or ""),
+                                       trading_days=days.get(str(row.get("code") or "")))
+            and limits.at_limit_price_hit(row, str(row.get("code") or ""),
+                                          trading_days=days.get(str(row.get("code") or "")))
         )
     else:
         limit_up = sum(1 for value in pcts if value >= 9.8)
@@ -133,7 +142,8 @@ def local_rows(conn, trade_date: str) -> list[dict]:
 def from_local(conn, trade_date: str) -> dict | None:
     """用本地 K 线算广度。本地有几只票，就覆盖几只——数量会写进 source 备注里。"""
     rows = local_rows(conn, trade_date)
-    return summarize(rows, trade_date, "local", precise_limits=True)
+    return summarize(rows, trade_date, "local", precise_limits=True,
+                     limits_days=market_time.trading_days_map(conn, trade_date))
 
 
 def board_streaks(conn, dates: list[str] | None = None, lookback: int = 30,
@@ -177,11 +187,14 @@ def board_streaks(conn, dates: list[str] | None = None, lookback: int = 30,
     current_code = None
     streak = 0
     prev_date = None
+    listed_cache: dict[str, str | None] = {}
     for row in db.query(conn, sql, params):
         bar = dict(row)
         code = bar["code"]
         if code != current_code:
             current_code, streak, prev_date = code, 0, None
+            if code not in listed_cache:
+                listed_cache[code] = market_time.listed_date_of(conn, code)
         day = bar["trade_date"]
         if prev_date is not None and order.get(day, -9) != order.get(prev_date, -9) + 1:
             streak = 0                      # 中间隔了交易日 → 断了
@@ -190,7 +203,13 @@ def board_streaks(conn, dates: list[str] | None = None, lookback: int = 30,
             # 前收和涨跌幅都没有就判不了涨跌停（at_limit_* 两者都要一个）
             streak = 0
             continue
-        if limits.at_limit_up(bar, code):
+        # 上市阶段：新股头几天不设涨跌幅，那天谈不上"封板"。
+        # 用已经建好的日历下标直接减，别每根 K 线都查一次数据库——全市场是百万级的行数。
+        listed = listed_cache.get(code)
+        days_since = None
+        if listed and listed in order and day in order:
+            days_since = order[day] - order[listed] + 1
+        if limits.at_limit_up(bar, code, trading_days=days_since):
             streak += 1
         else:
             streak = 0
@@ -201,7 +220,7 @@ def board_streaks(conn, dates: list[str] | None = None, lookback: int = 30,
         if streak:
             slot["streak_up_count"] += 1
             slot["max_boards"] = max(slot["max_boards"], streak)
-        if limits.at_limit_price_hit(bar, code) and streak == 0:
+        if limits.at_limit_price_hit(bar, code, trading_days=days_since) and streak == 0:
             slot["broken_limit_count"] += 1
     if verbose and out:
         print(f"  连板/炸板：{len(out)} 个交易日，最高 {max(v['max_boards'] for v in out.values())} 连板")

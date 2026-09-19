@@ -21,7 +21,7 @@ import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import db, validate
+from . import db, market_time, validate
 from .sources import build_source
 
 SNAPSHOT_SOURCE = "snapshot"
@@ -278,7 +278,16 @@ def sync_history(conn, cfg, codes: list[str] | None = None, limit: int | None = 
         if not rows:
             failed += 1
         else:
-            checked = validate.validate_bars(rows, cfg)
+            catalog = db.query_one(conn, "SELECT name FROM instruments WHERE code=?", (code,))
+            listed = market_time.listed_date_of(conn, code)
+            checked = validate.validate_bars(
+                rows, cfg,
+                code=code, name=(catalog["name"] if catalog else None),
+                trading_days={
+                    row["trade_date"]: market_time.trading_days_between(conn, listed, row["trade_date"])
+                    for row in rows if row.get("trade_date")
+                } if listed else None,
+            )
             for row in checked.rows:
                 row["source"] = row.get("source") or source.name
                 row["updated_at"] = db.now_iso()

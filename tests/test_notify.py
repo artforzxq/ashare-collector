@@ -157,10 +157,24 @@ class NotifyTests(unittest.TestCase):
         post.assert_called_once()
         payload = post.call_args[0][1]
         self.assertEqual(payload["token"], "file-token")
-        self.assertEqual(payload["template"], "txt")
+        # 默认发 HTML：手机上看等宽文本会散架
+        self.assertEqual(payload["template"], "html")
+        self.assertIn("<div", payload["content"])
         self.assertEqual(notify.last_pushed(self.cfg), TRADE_DATE)
         row = db.query_one(self.conn, "SELECT notified_at FROM alerts WHERE trade_date=?", (TRADE_DATE,))
         self.assertTrue(row["notified_at"])
+
+    def test_txt_template_still_available(self):
+        """有人可能就想收等宽纯文本（比如转发到别处），切成 txt 要还能用。"""
+        self.cfg["notify"]["pushplus"]["template"] = "txt"
+        self._write_token()
+        self._seed()
+        result, post = self._push()
+        self.assertTrue(result["ok"], result["note"])
+        payload = post.call_args[0][1]
+        self.assertEqual(payload["template"], "txt")
+        self.assertIn("交易简报", payload["content"])
+        self.assertNotIn("<div", payload["content"])
 
     def test_same_day_is_pushed_only_once(self):
         self._write_token()

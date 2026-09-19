@@ -183,15 +183,11 @@ canvas{display:block;width:100%}
 .chart-tabs button.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink)}
 /* ---------- 数据状态条 + 板块 ---------- */
 .freshness{display:flex;flex-wrap:nowrap;gap:12px;align-items:center;font-size:11.5px;color:var(--muted);
-  overflow-x:auto;overflow-y:hidden;min-width:0;
-  scrollbar-width:thin;scrollbar-color:var(--line) transparent;
-  /* 两侧淡出：告诉人"这里能横向滚"，而不是看起来被裁掉了 */
+  overflow-x:hidden;overflow-y:hidden;min-width:0;scrollbar-width:none;
+  /* 自动滚动（见 applyStripScroll）。两侧淡出，免得文字像是被裁断的 */
   -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 16px),transparent 100%);
   mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 16px),transparent 100%)}
-.freshness::-webkit-scrollbar{height:5px}
-.freshness::-webkit-scrollbar-track{background:transparent}
-.freshness::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
-.freshness:hover::-webkit-scrollbar-thumb{background:var(--faint)}
+.freshness::-webkit-scrollbar{height:0}
 .freshness .fresh-items{display:flex;gap:14px;align-items:center;flex-wrap:nowrap}
 .freshness .fi{display:flex;gap:5px;align-items:center;white-space:nowrap}
 .freshness b{color:var(--text);font-weight:600}
@@ -345,6 +341,7 @@ canvas{display:block;width:100%}
       <button data-view="factors">因子台账</button>
       <button data-view="backtest">参数回测</button>
       <button data-view="pool">筛选池</button>
+      <button data-view="newstock">新股·次新</button>
     </nav>
     <button class="theme-toggle" id="themeBtn" type="button" title="切换深浅色">深色</button>
   </header>
@@ -576,6 +573,29 @@ canvas{display:block;width:100%}
         <div id="poolOutcomes"></div>
         <div class="hint" id="poolOutcomeHint"></div>
       </div>
+    </section>
+
+    <!-- ===================== 新股与次新 ===================== -->
+    <section id="viewNew" class="view" hidden>
+      <div class="block-head"><h2>① 口径</h2><span class="badge today" id="newBadge">日终</span><span class="line"></span><span id="newMeta"></span>
+        <button class="ghost" data-job="listings" style="padding:1px 8px">刷新判定</button>
+      </div>
+      <div class="kpis" id="newKpis"></div>
+      <div class="card panel">
+        <h3>这批票为什么单独放 <span class="kv">它们进不了筛选池</span></h3>
+        <div class="hint">
+          筛选要求至少 80 根日线（回测 120 根），刚上市的票**天然不满足**——不是被筛掉，是没法参与。
+          但它们恰恰是关注度最高、最容易被"涨停板故事"带偏的一批，所以单独列出来看事实：
+          上市多久、几个板、上市以来涨跌、现在能不能建仓。<br>
+          判定用的是<b>本地日线的第一根</b>：同步一次要 750 天，某个代码只拿到 N 根，就说明它上市约 N 个交易日。
+          所以<b>全市场同步没跑完时</b>，这张表只能当参考（半途同步的票会被当成新股）。
+        </div>
+      </div>
+
+      <div class="block-head"><h2>② 新股</h2><span class="line"></span><span class="kv" id="newNewNote"></span></div>
+      <div class="card panel"><div id="newNewBody"></div></div>
+      <div class="block-head"><h2>③ 次新</h2><span class="line"></span><span class="kv" id="newRecentNote"></span></div>
+      <div class="card panel"><div id="newRecentBody"></div></div>
     </section>
   </main>
 </div>
@@ -942,6 +962,7 @@ async function loadFreshness(){
     d.last_daily_run ? `<span class="fi">上次日终 <b>${String(d.last_daily_run).slice(5, 16)}</b></span>` : '',
   ];
   $('freshItems').innerHTML = items.filter(Boolean).join('');
+  applyStripScroll();            // 内容宽度变了，重新决定要不要滚
   if ($('dailyTime')) $('dailyTime').textContent = d.daily ? `数据截至 ${d.daily}` : '还没有日线数据';
   if ($('marketTime')) $('marketTime').textContent = d.daily ? `数据截至 ${d.daily}` : '';
 }
@@ -1317,6 +1338,7 @@ function afterJob(last){
   if (last.key === 'sync' || last.key === 'snapshot'){ marketData = null; if (!$('viewMarket').hidden) loadMarket(); }
   if (last.key === 'backtest'){ backtestData = null; if (!$('viewBacktest').hidden) loadBacktest(); }
   if (last.key === 'analyze'){ delete analysisCache[lastAnalyzeScope]; loadScopeAnalysis(lastAnalyzeScope); }
+  if (last.key === 'listings'){ newstockData = null; if (!$('viewNew').hidden) loadNewstock(true); }
 }
 
 function switchView(name){
@@ -1325,6 +1347,7 @@ function switchView(name){
   $('viewFactors').hidden = name !== 'factors';
   $('viewBacktest').hidden = name !== 'backtest';
   $('viewPool').hidden = name !== 'pool';
+  $('viewNew').hidden = name !== 'newstock';
   document.querySelectorAll('#viewTabs button').forEach(btn =>
     btn.classList.toggle('on', btn.dataset.view === name));
   if (name === 'market'){
@@ -1338,6 +1361,8 @@ function switchView(name){
     loadScopeAnalysis('backtest');
   } else if (name === 'pool'){
     loadPool();
+  } else if (name === 'newstock'){
+    loadNewstock();
   } else {
     draw();          // 隐藏时画布宽度为 0，切回来必须重画
   }
@@ -1591,6 +1616,78 @@ function renderFactors(){
 
 /* ---------- 参数回测：哪组参数真有超额，哪组只是拟合出来的尖峰 ---------- */
 /* ---------- 筛选池：候选进池 / 池内现状 / 形态表现 ---------- */
+/* ---------- 新股与次新：单独一摊，看事实不看故事 ---------- */
+let newstockData = null;
+
+async function loadNewstock(force){
+  if (newstockData && newstockData.ok && !force){ renderNewstock(); return; }
+  $('newKpis').innerHTML = '<div class="kpi"><span>读取中…</span><b>—</b></div>';
+  $('newNewBody').innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  try{
+    newstockData = await api('/api/newstock');
+  }catch(e){
+    $('newNewBody').innerHTML = `<div class="empty-state"><b>读不到新股数据</b>${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderNewstock();
+}
+
+function newstockTable(items){
+  if (!items.length) return '<div class="empty-state">这一类现在没有</div>';
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+    '<th>标的</th><th>板块</th><th class="num">上市日</th><th class="num">交易日</th>' +
+    '<th class="num">上市以来</th><th class="num">首连板</th><th class="num">涨停</th>' +
+    '<th class="num">日均成交额</th><th>最近提醒</th><th>操作</th></tr></thead><tbody>' +
+    items.map(item => {
+      const since = item.since_list_pct;
+      const alert = item.alert;
+      const flags = [];
+      if (!item.bars_loaded) flags.push('<span class="tag" title="全市场同步还没轮到它，先按上市日列出来">等待同步</span>');
+      if (item.blocked_bars) flags.push(`<span class="tag shadow" title="有 ${item.blocked_bars} 根日线被数据体检标成 blocked（新股首日常见），上市以来涨跌按没被标记的那段算">数据待确认</span>`);
+      if (item.estimated) flags.push('<span class="tag" title="上市日是按本地日线第一根推的，还没有权威上市日">推算</span>');
+      return `<tr>
+        <td><span class="name">${item.name || item.code}</span> ${flags.join(' ')}<div class="sub">${item.code}</div></td>
+        <td class="sub">${item.board}</td>
+        <td class="num sub">${item.listed_date}</td>
+        <td class="num">${item.trading_days}</td>
+        <td class="num">${posNeg(since, signed(since, 2) + '%')}</td>
+        <td class="num sub">${item.boards_from_start || '—'}</td>
+        <td class="num sub">${item.limit_up_days || '—'}</td>
+        <td class="num">${poolAmount(item.avg_amount_60d)}${item.liquid ? '' : '<div class="sub">低于门槛</div>'}</td>
+        <td class="sub">${alert ? `[${alert.level}] ${escapeHtml((alert.message || '').slice(0, 24))}` : '—'}</td>
+        <td><button class="ghost" data-add="${item.code}">加入自选</button></td>
+      </tr>`;
+    }).join('') + '</tbody></table></div>';
+}
+
+function renderNewstock(){
+  const d = newstockData || {};
+  if (!d.ok){
+    $('newMeta').textContent = '';
+    $('newKpis').innerHTML = '';
+    $('newNewNote').textContent = '';
+    $('newRecentNote').textContent = '';
+    $('newNewBody').innerHTML =
+      `<div class="empty-state"><b>${escapeHtml(d.message || '还没有新股数据')}</b>${escapeHtml(d.hint || '')}</div>`;
+    $('newRecentBody').innerHTML = '';
+    return;
+  }
+  $('newMeta').textContent = `判定交易日 ${d.as_of || '—'}`;
+  $('newKpis').innerHTML = [
+    `<div class="kpi"><span>新股</span><b>${d.counts.new}</b><small>上市 ≤ ${d.new_days} 个交易日</small></div>`,
+    `<div class="kpi"><span>次新</span><b>${d.counts.recent}</b><small>上市 ≤ ${d.recent_days} 个交易日</small></div>`,
+    `<div class="kpi"><span>成交额门槛</span><b>${d.threshold ? (d.threshold / 1e4).toFixed(0) + ' 万' : '不限'}</b><small>与筛选、回测共用</small></div>`,
+    `<div class="kpi"><span>数据截至</span><b>${d.as_of || '—'}</b><small>全市场同步没跑完时仅供参考</small></div>`,
+  ].join('');
+  $('newNewNote').textContent = `共 ${d.counts.new} 只`;
+  $('newRecentNote').textContent = `共 ${d.counts.recent} 只`;
+  $('newNewBody').innerHTML = newstockTable(d.new || []);
+  $('newRecentBody').innerHTML = newstockTable(d.recent || []);
+  document.querySelectorAll('#viewNew [data-add]').forEach(btn => {
+    btn.onclick = async () => { await addItem(btn.dataset.add); newstockData = null; loadNewstock(true); };
+  });
+}
+
 let poolData = null;
 
 async function loadPool(force){
@@ -1980,14 +2077,43 @@ $('helpClose').onclick = () => toggleHelp();
 })();
 if ($('themeBtn')) $('themeBtn').onclick = () =>
   applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-/* 状态条：鼠标滚轮也能横向滚（不用去够那根细滚动条，触控板本来就支持） */
-const strip = $('freshness');
-if (strip) strip.addEventListener('wheel', ev => {
-  if (Math.abs(ev.deltaY) <= Math.abs(ev.deltaX)) return;
-  if (strip.scrollWidth <= strip.clientWidth) return;
-  ev.preventDefault();
-  strip.scrollLeft += ev.deltaY;
-}, {passive:false});
+
+/* ---------- 状态条自动滚动 ----------
+   它是一行"现在数据有多新"，内容比屏幕宽时不该被裁掉，也不该让人去找滚动条。
+   做法：内容溢出了才滚，滚到头停一下再回开头（连续反向滚看着像抽搐）；
+   鼠标悬停/键盘聚焦时暂停——你要读的时候它得停住，不然是在跟你抢注意力。 */
+const STRIP_STEP = 0.4;        // 每帧推进的像素（约每秒 24px）
+const STRIP_END_HOLD = 1600;   // 滚到头之后停顿多久再回开头（毫秒）
+let stripTimer = null, stripHoldUntil = 0;
+
+function stripOverflows(){
+  const el = $('freshness');
+  return !!el && el.scrollWidth > el.clientWidth + 4;
+}
+
+function stripTick(){
+  const el = $('freshness');
+  if (!el) return;
+  if (document.hidden || el.matches(':hover') || el.matches(':focus-within')) return;
+  if (!stripOverflows()){ el.scrollLeft = 0; return; }
+  if (Date.now() < stripHoldUntil) return;
+  if (el.scrollLeft + el.clientWidth >= el.scrollWidth - 1){
+    stripHoldUntil = Date.now() + STRIP_END_HOLD;
+    el.scrollLeft = 0;                    // 回到开头（停顿一下再继续，避免看着抽搐）
+    return;
+  }
+  el.scrollLeft += STRIP_STEP;
+}
+
+function applyStripScroll(){
+  const el = $('freshness');
+  if (!el) return;
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (stripTimer){ clearInterval(stripTimer); stripTimer = null; }
+  if (calm){ el.style.overflowX = 'auto'; return; }   // 系统设了"减少动态效果"就别自己动
+  el.style.overflowX = 'hidden';
+  stripTimer = setInterval(stripTick, 16);
+}
 /* 悬停 120ms 后才弹说明：划过时不会闪一下 */
 let popTimer = null;
 document.addEventListener('mouseover', ev => {
@@ -2030,7 +2156,7 @@ canvas.addEventListener('mousemove', ev=>{
   draw();
 });
 canvas.addEventListener('mouseleave', ()=>{ state.hover = null; draw(); });
-window.addEventListener('resize', draw);
+window.addEventListener('resize', () => { draw(); applyStripScroll(); });
 
 /* 盯盘区：手动刷新 + 切回前台时补一次（切到后台就不刷，省得白跑） */
 const quoteBtn = $('quoteRefresh');

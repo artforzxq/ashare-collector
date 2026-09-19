@@ -23,7 +23,7 @@ SOCKET_TIMEOUT = 30
 
 class BaostockSource(BaseSource):
     name = "baostock"
-    capabilities = {"daily_bars", "trade_calendar", "symbol_directory"}
+    capabilities = {"daily_bars", "trade_calendar", "symbol_directory", "stock_basic"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -127,6 +127,24 @@ class BaostockSource(BaseSource):
     def _bs_code(code: str) -> str:
         exchange, symbol = split_code(code)
         return f"{exchange.lower()}.{symbol}"
+
+    def stock_basic(self, code: str) -> dict:
+        """单只标的的基础信息：上市日（ipoDate）、退市日、类型、状态。
+
+        批量代码表接口不给上市日，只能一只一只问——所以调用方要分批、可续跑。
+        """
+        bs = self._login()
+        try:
+            result = bs.query_stock_basic(code=self._bs_code(code))
+            rows: list[dict] = []
+            while result.error_code == "0" and result.next():
+                rows.append(dict(zip(result.fields, result.get_row_data())))
+            if result.error_code != "0":
+                raise DataSourceError(f"baostock 基础信息查询失败：{result.error_msg}")
+        except Exception:
+            self.logout()
+            raise
+        return rows[0] if rows else {}
 
     def trade_calendar(self, start: str, end: str) -> list[dict]:
         """交易所日历，含休市日（is_trading_day=0）。"""

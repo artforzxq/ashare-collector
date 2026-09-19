@@ -61,7 +61,12 @@ collection:
 validation:
   price_tol: 0.003            # 双源收盘价差异上限 0.3%
   amount_tol: 0.03            # 双源成交额差异上限 3%
-  jump_pct_limit: 11.0        # 非新股非 ST 的涨跌幅跳变上限
+  # 涨跌幅跳变（判断"这根是不是脏数据"）：现在按**当天的法定幅度**算，不再一刀切。
+  # 主板 10%、创业板科创板 20%、北交所 30%、主板 ST 5%；上市头几天不设限
+  # （创业板科创板前 5 个交易日、北交所首日），那几天只拦明显离谱的数据。
+  jump_tol_pct: 1.0           # 在法定幅度上加的容差（四舍五入到分造成的零点几个百分点）
+  jump_pct_limit_unlimited: 300.0   # 不设涨跌幅的日子：只拦超过这个幅度的
+  jump_pct_limit: 11.0        # 兜底值：拿不到标的身份时用（老口径）
   volume_anomaly_ratio: 10.0  # 成交额超过 20 日均值倍数只标记不阻断
   critical_codes: [SH000300]  # 缺失即冻结当日自动提醒
 
@@ -86,6 +91,15 @@ alerts:
   cooldown_days_p1: 1
   cooldown_days_p2: 5
 
+# 新股与次新：单独一张表（new_listings）+ 单独一个页面标签，推送里也会带一段。
+# 判定用的是本地日线的第一根：同步一次要 750 天，只拿到 N 根就说明上市约 N 个交易日。
+newstock:
+  new_days: 30          # 上市 ≤ 30 个交易日算新股
+  recent_days: 250      # ≤ 250 个交易日（约一年）算次新
+  limit: 80             # 页面一次列多少只
+  push_top: 6           # 推送里每类最多列几只
+  types: [stock]        # 只看个股：新 ETF 天天有，混进来会把新股淹没
+
 # 手机推送（PushPlus）。日终跑完自动把简报推到微信上。
 # token 是敏感信息，**不要写在这个文件里**（这个文件进版本库）。
 # 三种写法任选其一，优先级从高到低：
@@ -98,11 +112,11 @@ notify:
     token: ""                 # 留空即可，token 放在本地文件里
     token_env: ASHARE_PUSHPLUS_TOKEN
     token_file: data/pushplus.token
-    template: txt             # txt / markdown / html，简报是等宽文本，默认 txt
+    template: html            # html 在手机上是表格+徽章，txt 是等宽纯文本（对齐会散架）
     topic: ""                 # 一对多推送的群组编码，单发留空
     channel: ""               # 留空走微信；webhook / mail / sms 按 PushPlus 文档填
     only_on_alerts: false     # true = 只有真有提醒的日子才推（默认每天推一份简报）
-    max_chars: 4000           # 正文超过这么长就截断（PushPlus 有长度上限）
+    max_chars: 9000           # 正文超过这么长就截断（PushPlus 有长度上限；html 版更长）
     timeout: 10
     state_file: data/last-push.txt   # 记着上次推到哪个交易日，同一天不重复推
 

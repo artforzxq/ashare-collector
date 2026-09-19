@@ -19,6 +19,7 @@ from . import (
     db,
     dictionary as dictionary_mod,
     intraday as intraday_mod,
+    newstock as newstock_mod,
     notify,
     risk as risk_mod,
     promotion as promotion_mod,
@@ -168,6 +169,48 @@ def cmd_push(args) -> int:
         print("")
         print(result["content"])
     return 0 if result.get("ok") or result.get("skipped") else 1
+
+
+def cmd_listings(args) -> int:
+    """新股与次新：上市多久、几个板、上市以来涨了多少。
+
+    只描述事实：这些票进不了筛选标的池（历史不够长），但关注度最高，
+    所以单独列出来给人看，不做推荐。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        if args.sync_ipo:
+            newstock_mod.sync_ipo_dates(conn, cfg, limit=args.ipo_limit, verbose=True)
+            print("")
+        newstock_mod.refresh(conn, cfg, verbose=True)
+        data = newstock_mod.scan(conn, cfg, limit=args.limit)
+        if not data.get("ok"):
+            print(data.get("message", "读不到新股数据"))
+            return 1
+        print(f"\n判定交易日 {data['as_of']}｜新股 ≤ {data['new_days']} 个交易日，"
+              f"次新 ≤ {data['recent_days']} 个交易日｜成交额门槛 {data['threshold'] / 1e4:,.0f} 万")
+        for label, key in (("新股", "new"), ("次新", "recent")):
+            items = data.get(key) or []
+            if not items:
+                continue
+            print(f"\n===== {label}（{data['counts'][key]} 只，列前 {min(len(items), args.show)}）=====")
+            print(f"  {'代码':<9}{'名称':<12}{'板块':<7}{'上市日':<12}{'交易日':>6}"
+                  f"{'上市以来':>10}{'首连板':>7}{'涨停':>5}{'日均额(亿)':>11}  最近提醒")
+            for item in items[: args.show]:
+                amount = (item["avg_amount_60d"] or 0) / 1e8
+                alert = item.get("alert")
+                alert_text = f"{alert['level']} {alert['message'][:18]}" if alert else "—"
+                since = item["since_list_pct"]
+                print(f"  {item['code']:<9}{(item['name'] or '')[:10]:<12}{item['board']:<7}"
+                      f"{item['listed_date']:<12}{item['trading_days']:>6}"
+                      f"{(f'{since:+.2f}%' if since is not None else '—'):>10}"
+                      f"{item['boards_from_start']:>7}{item['limit_up_days']:>5}{amount:>11.2f}  {alert_text}")
+        print("\n说明：新股/次新按**本地日线的第一根**推算上市日——同步一次要 750 天，"
+              "只拿到 N 根就说明上市约 N 个交易日。全市场同步没跑完时这张表只能当参考。")
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_analyze(args) -> int:
@@ -789,6 +832,15 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--backtest", action="store_true", help="审最近一次回测的摘要")
     analyze.add_argument("--db", help="数据库路径")
     analyze.set_defaults(func=cmd_analyze)
+
+    listings = sub.add_parser("listings", help="新股与次新：上市多久、几个板、上市以来涨了多少")
+    listings.add_argument("--limit", type=int, help="每类最多读多少只（默认取配置 newstock.limit）")
+    listings.add_argument("--show", type=int, default=20, help="每类最多打印多少只")
+    listings.add_argument("--sync-ipo", action="store_true",
+                          help="先从 baostock 补一批真实上市日（分批，可反复跑；北交所没有）")
+    listings.add_argument("--ipo-limit", type=int, default=300, help="本次最多补多少只的上市日")
+    listings.add_argument("--db", help="数据库路径")
+    listings.set_defaults(func=cmd_listings)
 
     factors = sub.add_parser("factors", help="回放某只标的的因子贡献")
     factors.add_argument("code", help="标的代码，如 SH000300")

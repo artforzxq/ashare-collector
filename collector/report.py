@@ -115,3 +115,180 @@ def factor_report(conn, cfg: dict, trade_date: str, code: str) -> str:
     if feature:
         lines.append(f"  → 趋势分 {feature['trend_score']}，状态 {feature['state']}（持续 {feature['state_days']} 日）")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- HTML 版简报
+#
+# 为什么单独做一份 HTML：微信里等宽文本会换行错位，"支撑 66.74–69.39" 这种靠空格对齐的
+# 排版一进手机就散架。推送要好看，就得用表格/徽章这套东西，而且样式必须写成**行内**——
+# 微信会把 <style> 标签和 class 都剥掉，只有 style="..." 能活下来。
+
+def _esc(text) -> str:
+    import html
+
+    return html.escape(str(text if text is not None else ""))
+
+
+def _badge(text: str, color: str, bg: str) -> str:
+    return (f'<span style="display:inline-block;padding:1px 6px;border-radius:3px;'
+            f'font-size:11px;color:{color};background:{bg}">{_esc(text)}</span>')
+
+
+def _state_badge(state: str) -> str:
+    table = {"up": ("上升", "#d92b2b", "#fdecea"),
+             "down": ("下跌", "#0f9f74", "#e7f6ee"),
+             "range": ("震荡", "#64748b", "#eef1f6")}
+    label, color, bg = table.get(state, (state or "—", "#64748b", "#eef1f6"))
+    return _badge(label, color, bg)
+
+
+def _pct_text(value) -> tuple[str, str]:
+    """(文本, 颜色)：A 股口径，红涨绿跌。"""
+    if value is None:
+        return "—", "#94a3b8"
+    text = f"{value:+.2f}%"
+    return text, ("#d92b2b" if value > 0 else "#0f9f74" if value < 0 else "#64748b")
+
+
+def newstock_section(conn, cfg: dict, trade_date: str) -> str:
+    """新股与次新那一段：今日新上市 + 次新里值得提一句的。"""
+    from . import newstock as newstock_mod
+
+    try:
+        listed = newstock_mod.today_listings(conn, trade_date)
+        picks = newstock_mod.highlights(conn, cfg, trade_date)
+    except Exception:
+        return ""
+
+    rows: list[str] = []
+    if listed:
+        names = "　".join(
+            f"{_esc(item['name'])}（{_esc(item['code'])}·{_esc(item['board'])}）" for item in listed[:8])
+        rows.append(f'<div style="margin:8px 0 0"><b>今日新上市</b>　{names}</div>')
+    if picks:
+        lines = []
+        for item in picks:
+            since = item.get("since_list_pct")
+            text, color = _pct_text(since)
+            mark = " 🔔" if item.get("alerted") else ""
+            lines.append(
+                f'<div style="padding:4px 0;border-top:1px solid #eef1f6">'
+                f'<b>{_esc(item["name"])}</b> '
+                f'<span style="color:#94a3b8;font-size:12px">{_esc(item["code"])}·{_esc(item["board"])}'
+                f'·上市 {item["trading_days"]} 个交易日</span>'
+                f'<span style="float:right;color:{color};font-size:13px">{text}</span>{mark}</div>')
+        rows.append(
+            '<div style="margin:10px 0 0"><b>次新关注</b>'
+            '<span style="color:#94a3b8;font-size:12px">　按"今天有提醒 → 上市以来强度"排</span></div>'
+            + "".join(lines))
+    if not rows:
+        return ""
+    return (
+        '<div style="margin-top:14px;padding:10px 12px;border:1px solid #e4e8ef;border-radius:8px">'
+        '<div style="font-size:13px;font-weight:600;margin-bottom:2px">新股与次新</div>'
+        '<div style="color:#94a3b8;font-size:11.5px">它们进不了筛选池（历史不够长），单独盯着看</div>'
+        + "".join(rows) + "</div>"
+    )
+
+
+def daily_html(conn, cfg: dict, trade_date: str | None = None) -> str:
+    """手机推送用的 HTML 简报：标的表 + 提醒 + 新股次新 + 数据质量。"""
+    from .levels import distance_pct, nearest_band
+
+    if trade_date is None:
+        row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM features_daily")
+        trade_date = row["d"] if row and row["d"] else None
+    if trade_date is None:
+        return "<div>还没有特征数据，先跑一次 3-每日任务</div>"
+
+    parts: list[str] = [
+        '<div style="font:14px/1.7 -apple-system,BlinkMacSystemFont,\'PingFang SC\',sans-serif;color:#0f172a">',
+        f'<div style="font-size:16px;font-weight:600">A 股简报 · {_esc(trade_date)}</div>',
+        '<div style="color:#94a3b8;font-size:11.5px;margin-bottom:10px">'
+        '结论由本地确定性代码算出，模型不参与</div>',
+    ]
+
+    breadth = db.query_one(conn, "SELECT * FROM market_breadth WHERE trade_date=?", (trade_date,))
+    if breadth:
+        median, mcolor = _pct_text(breadth["median_pct_chg"])
+        parts.append(
+            '<div style="padding:8px 10px;background:#fafbfd;border-radius:8px;font-size:12.5px">'
+            f'市场广度　上涨 <b style="color:#d92b2b">{breadth["up_count"]}</b> / '
+            f'下跌 <b style="color:#0f9f74">{breadth["down_count"]}</b>　'
+            f'中位数 <b style="color:{mcolor}">{median}</b>　'
+            f'<span style="color:#94a3b8">样本 {breadth["coverage"]} 只</span></div>')
+
+    features = db.query(conn, "SELECT * FROM features_daily WHERE trade_date=? ORDER BY code", (trade_date,))
+    if features:
+        parts.append('<div style="margin-top:12px;font-size:13px;font-weight:600">自选标的</div>')
+        parts.append('<div style="border:1px solid #e4e8ef;border-radius:8px;margin-top:6px">')
+        for row in features:
+            bands = [dict(b) for b in db.query(
+                conn, "SELECT * FROM levels WHERE code=? AND trade_date=? ORDER BY price_low",
+                (row["code"], trade_date))]
+            close = db.query_one(
+                conn, "SELECT close, pct_chg FROM bars_daily WHERE code=? AND trade_date=?",
+                (row["code"], trade_date))
+            price = close["close"] if close else None
+            support = nearest_band(bands, price, "support") if price else None
+            resistance = nearest_band(bands, price, "resistance") if price else None
+            band_bits = []
+            if support and abs(distance_pct(support, price) or 99) <= 8:
+                band_bits.append(f'支撑 {support["price_low"]:.3f}–{support["price_high"]:.3f}'
+                                 f'（{distance_pct(support, price):+.2f}%）')
+            if resistance and abs(distance_pct(resistance, price) or 99) <= 8:
+                band_bits.append(f'阻力 {resistance["price_low"]:.3f}–{resistance["price_high"]:.3f}'
+                                 f'（{distance_pct(resistance, price):+.2f}%）')
+            cap, stop = row["position_cap"], row["stop_level"]
+            risk = (f'上限 {cap:.0%} · 止损 {stop:.3f}' if cap and stop
+                    else '风险层：0 仓' if cap is not None and not cap else '')
+            chg_text, chg_color = _pct_text(close["pct_chg"] if close else None)
+            name = db.query_one(conn, "SELECT name FROM instruments WHERE code=?", (row["code"],))
+            label = (name["name"] if name and name["name"] else row["code"])
+            parts.append(
+                '<div style="padding:8px 10px;border-top:1px solid #eef1f6">'
+                f'<div><b>{_esc(label)}</b> '
+                f'<span style="color:#94a3b8;font-size:11.5px">{_esc(row["code"])}</span>'
+                f'<span style="float:right;font-size:12.5px">'
+                f'{_state_badge(row["state"])} '
+                f'<span style="color:{chg_color}">{chg_text}</span></span></div>'
+                f'<div style="color:#475569;font-size:12px;margin-top:2px">'
+                f'趋势分 {row["trend_score"]}　' + "　".join(band_bits) +
+                (f'　{risk}' if risk else '') + '</div></div>')
+        parts.append("</div>")
+
+    alerts = db.query(conn, "SELECT * FROM alerts WHERE trade_date=? ORDER BY level, code", (trade_date,))
+    parts.append('<div style="margin-top:12px;font-size:13px;font-weight:600">今日提醒</div>')
+    if alerts:
+        parts.append('<div style="border:1px solid #e4e8ef;border-radius:8px;margin-top:6px">')
+        for alert in alerts:
+            color, bg = (("#d92b2b", "#fdecea") if alert["level"] == "P0"
+                         else ("#b45309", "#fff7ed") if alert["level"] == "P1" else ("#64748b", "#eef1f6"))
+            parts.append(
+                '<div style="padding:7px 10px;border-top:1px solid #eef1f6">'
+                f'{_badge(alert["level"], color, bg)} <b>{_esc(alert["code"])}</b>　'
+                f'{_esc(alert["message"])}</div>')
+        parts.append("</div>")
+    else:
+        parts.append('<div style="color:#94a3b8;font-size:12.5px;margin-top:4px">'
+                     '无（默认沉默：没有值得打扰的信号就不打扰）</div>')
+
+    suppressed = db.query(conn, "SELECT * FROM arbitration_log WHERE trade_date=?", (trade_date,))
+    if suppressed:
+        items = "；".join(f'{_esc(row["code"])} {_esc(row["party_a"])}'
+                          f'←{_esc(row["rule_applied"])}' for row in suppressed[:5])
+        parts.append(f'<div style="margin-top:10px;color:#64748b;font-size:12px">'
+                     f'被仲裁压制的信号：{items}</div>')
+
+    parts.append(newstock_section(conn, cfg, trade_date))
+
+    health = [h for h in db.query(conn, "SELECT * FROM data_health WHERE run_date=?", (trade_date,))
+              if h["status"] != "ok"]
+    if health:
+        items = "；".join(f'{_esc(h["source"])} {_esc(h["task"])} {_esc(h["status"])}' for h in health[:4])
+        parts.append(f'<div style="margin-top:10px;color:#b45309;font-size:12px">数据质量：{items}</div>')
+
+    parts.append('<div style="margin-top:12px;color:#cbd5e1;font-size:11px">'
+                 '本地系统自动推送 · 想看细节打开看盘页面</div>')
+    parts.append("</div>")
+    return "".join(parts)

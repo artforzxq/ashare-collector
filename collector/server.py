@@ -184,6 +184,7 @@ class App:
         self.jobs = jobs_mod.JobManager()
         self._quote_cache: dict = {}
         self._pool_cache: tuple[float, dict] | None = None
+        self._newstock_cache: tuple[float, dict] | None = None
 
     def quotes(self, codes: list | None = None) -> dict:
         """批量实时报价。只给盯盘用：不落库、不参与任何结论、失败也不影响别的。
@@ -352,6 +353,32 @@ class App:
 
     # ---- 页面上的任务按钮 ----
 
+    def newstock(self) -> dict:
+        """新股与次新：单独一摊，因为它们进不了筛选标的池（历史不够长）。
+
+        只读表里的判定结果 + 补上流动性、最近提醒。判定口径在 collector/newstock.py。
+        """
+        from . import newstock as newstock_mod
+
+        now = time.time()
+        if self._newstock_cache and now - self._newstock_cache[0] < self.POOL_TTL:
+            return self._newstock_cache[1]
+
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            # 先重算一遍：这张表是快照，同步还在往里塞新票，算一次只要零点几秒。
+            # 不这么做的话，一只刚上市的新股要等下一次日终才会出现在页面上。
+            newstock_mod.refresh(conn, self.cfg)
+            payload = newstock_mod.scan(conn, self.cfg)
+        except Exception as exc:
+            return {"ok": False, "message": f"读不到新股数据：{type(exc).__name__} {exc}"}
+        finally:
+            conn.close()
+        if not payload.get("ok"):
+            payload.setdefault("hint", "跑一次 3-每日任务 或 18-全市场同步 之后就有了")
+        self._newstock_cache = (now, payload)
+        return payload
+
     def pool(self, force: bool = False) -> dict:
         """筛选池：三段拼起来，回答"我现在该看什么"。
 
@@ -398,6 +425,7 @@ class App:
         """
         cfg = self.cfg
         self._pool_cache = None      # 任务一开跑就作废缓存，跑完刷新能看到新数据
+        self._newstock_cache = None
 
         def daily():
             conn = db.connect(cfg["_db_path"])
@@ -502,6 +530,16 @@ class App:
             finally:
                 conn.close()
 
+        def listings():
+            from . import newstock as newstock_mod
+
+            conn = db.connect(cfg["_db_path"])
+            try:
+                result = newstock_mod.refresh(conn, cfg, verbose=True)
+                return f"新股 {result['new']} 只、次新 {result['recent']} 只（判定日 {result['as_of'] or '—'}）"
+            finally:
+                conn.close()
+
         table = {
             "daily": ("更新自选数据", daily),
             "sync": ("同步全市场", sync),
@@ -511,6 +549,7 @@ class App:
             "push": ("推送简报到手机", push),
             "backtest": ("跑参数回测", backtest),
             "analyze": ("AI 分析这只标的", analyze),
+            "listings": ("刷新新股与次新", listings),
         }
         entry = table.get(key)
         if entry is None:
@@ -891,7 +930,8 @@ def _health_payload(cfg: dict) -> dict:
         "stale": newest > PROCESS_STARTED_TS,
         "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
                    "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
-                   "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis", "/api/pool"],
+                   "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis", "/api/pool",
+                   "/api/newstock"],
     }
 
 
@@ -993,6 +1033,8 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes(app.analysis(query.get("code", ""), query.get("scope", "")))
             if path == "/api/pool":
                 return _payload_bytes(app.pool())
+            if path == "/api/newstock":
+                return _payload_bytes(app.newstock())
             if path == "/api/meta":
                 return _payload_bytes(_meta_payload(app.cfg))
             if path == "/api/market":

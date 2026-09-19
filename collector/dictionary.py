@@ -30,12 +30,28 @@ TABLE_DOCS: dict[str, str] = {
     "factor_contributions": "因子贡献：回答“结论是被谁拉过去的”",
     "arbitration_log": "仲裁日志：记录被压制或降级的信号，以及依据的规则",
     "analysis_log": "AI 分析留痕：模型读过的数字与它说的话（只记录，不参与任何计算）",
+    "new_listings": "新股与次新：上市多久、几个板、上市以来涨跌（单独一摊，因为进不了筛选池）",
     "rule_version": "规则版本：权重或规则每改一次都要留版本",
     "data_dictionary": "数据字典：表与字段的中文说明（本表）",
 }
 
 # 字段说明：(中文名/含义, 补充提示)
 FIELD_DOCS: dict[str, dict[str, tuple[str, str]]] = {
+    "new_listings": {
+        "code": ("标的代码", ""),
+        "name": ("标的名称", ""),
+        "board": ("板块", "主板 / 创业板 / 科创板 / 北交所，决定涨跌停幅度"),
+        "listed_date": ("上市日", "按本地日线的第一根推算，不是官方披露的上市日"),
+        "trading_days": ("上市以来交易日数", "等于本地拿到多少根日线"),
+        "stage": ("阶段", "new 新股 / recent 次新 / old 已过观察期"),
+        "first_close": ("上市第一根日线的收盘", ""),
+        "last_close": ("最新收盘", ""),
+        "since_list_pct": ("上市以来涨跌幅", "单位：%"),
+        "limit_up_days": ("上市以来涨停天数", "按板块的涨跌停幅度判定"),
+        "boards_from_start": ("上市最初连续涨停天数", "首日没封板就是 0 板"),
+        "last_seen": ("最近一次判定的交易日", ""),
+        "updated_at": ("本行最后更新时间", ""),
+    },
     "analysis_log": {
         "id": ("自增主键", ""),
         "created_at": ("调用时间", "同一只标的同一天可以有多条"),

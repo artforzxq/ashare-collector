@@ -121,5 +121,49 @@ class MissingGradeTests(unittest.TestCase):
         self.assertEqual(grade_missing([], [])[0], "ok")
 
 
+class JumpLimitByBoardTests(unittest.TestCase):
+    """跳变阈值要按"那天法定能涨多少"算，不能一刀切 11%。
+
+    以前创业板/科创板正常的 20%、北交所的 30%、新股上市头几天的不设限，
+    全被当成脏数据挡住——A 股新股前几个交易日本来就没有涨跌幅限制。
+    """
+
+    def _rows(self, pct: float, day: str = "2026-09-18"):
+        return [{"trade_date": day, "code": "SZ300750", "close": 10.0 * (1 + pct / 100),
+                 "pre_close": 10.0, "pct_chg": pct, "amount": 1e8}]
+
+    def test_gem_twenty_percent_is_legal(self):
+        result = validate_bars(self._rows(20.0), CFG, code="SZ300750", name="宁德时代")
+        self.assertFalse(result.blocked)
+        self.assertEqual(result.quality_flag, "ok")
+
+    def test_gem_thirty_percent_is_still_blocked(self):
+        result = validate_bars(self._rows(30.0), CFG, code="SZ300750", name="宁德时代")
+        self.assertTrue(result.blocked)
+
+    def test_main_board_still_blocks_eleven_plus(self):
+        rows = [{"trade_date": "2026-09-18", "code": "SH600000", "close": 11.5,
+                 "pre_close": 10.0, "pct_chg": 15.0, "amount": 1e8}]
+        result = validate_bars(rows, CFG, code="SH600000", name="浦发银行")
+        self.assertTrue(result.blocked)
+
+    def test_new_stock_first_days_are_not_blocked(self):
+        """创业板新股第 2 个交易日涨 60% 是合法的（前 5 日不设涨跌幅）。"""
+        rows = self._rows(60.0)
+        result = validate_bars(rows, CFG, code="SZ301888", name="次新乙",
+                               trading_days={"2026-09-18": 2})
+        self.assertFalse(result.blocked)
+
+    def test_new_stock_absurd_move_is_still_blocked(self):
+        rows = self._rows(900.0)
+        result = validate_bars(rows, CFG, code="SZ301888", name="次新乙",
+                               trading_days={"2026-09-18": 2})
+        self.assertTrue(result.blocked)
+
+    def test_without_a_code_it_keeps_the_old_threshold(self):
+        result = validate_bars(self._rows(20.0), CFG)
+        self.assertTrue(result.blocked)          # 没给标的身份 → 退回 11%
+
+
 if __name__ == "__main__":
     unittest.main()
