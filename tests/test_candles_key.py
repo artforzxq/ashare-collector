@@ -83,6 +83,52 @@ class ObviousPatternTests(unittest.TestCase):
     def test_gap_counts_on_its_own(self):
         self.assertTrue(candles.obvious({"pattern": "向上跳空", "gap_up": True, "volume_x": 1.0}))
 
+    def test_bearish_twins_count_too(self):
+        """看跌那一半（射击之星 / 阴包阳 / 向下跳空）必须和看涨的对称。
+
+        踩过的坑：`obvious()` 里判断了这几个标志位，但 `analyze()` 的返回值里根本没这几个键
+        ——查出来永远是 None，于是"单个看跌形态"一条都标不出来，只有凑成"反转确认"
+        （≥2 个信号）才显示。这是测试该兜住的那类静默失效。
+        """
+        self.assertTrue(candles.obvious({"pattern": "长上影（射击之星）", "shooting": True, "volume_x": 1.4}))
+        self.assertTrue(candles.obvious({"pattern": "阴包阳", "bearish_engulf": True, "volume_x": 1.3}))
+        self.assertTrue(candles.obvious({"pattern": "向下跳空", "gap_down": True, "volume_x": 1.0}))
+
+
+class AnalyzeFlagTests(unittest.TestCase):
+    """analyze() 的返回值本身：标志位要齐全、不能自相矛盾。"""
+
+    def _bars(self, *rows) -> list[dict]:
+        return _series(list(rows))
+
+    def test_one_word_limit_line_is_not_a_doji(self):
+        """一字板没有振幅，不能按比例套形态——以前会被算成"十字星"，含义正好相反。"""
+        bars = self._bars(*([(10.0, 10.2, 9.8, 10.0)] * 20), (11.0, 11.0, 11.0, 11.0))
+        result = candles.analyze(bars, len(bars) - 1)
+        self.assertIn("一字线", result["pattern"])
+        self.assertFalse(result.get("doji"))
+        self.assertFalse(result["reversal_up"] or result["reversal_down"])
+        self.assertFalse(candles.obvious(result))
+        self.assertTrue(result["zero_range"])
+
+    def test_shooting_star_flag_is_returned(self):
+        bars = self._bars((10.0, 10.2, 9.9, 10.0), (10.0, 10.2, 9.9, 10.0), (10.0, 11.0, 9.9, 9.95))
+        result = candles.analyze(bars, 2)
+        self.assertTrue(result["shooting"])
+        self.assertIn("射击之星", result["pattern"])
+
+    def test_bearish_engulf_flag_is_returned(self):
+        bars = self._bars((10.0, 10.2, 9.9, 10.0), (9.5, 10.1, 9.4, 10.0), (10.1, 10.2, 9.2, 9.3))
+        result = candles.analyze(bars, 2)
+        self.assertTrue(result["bearish_engulf"])
+        self.assertIn("阴包阳", result["pattern"])
+
+    def test_gap_down_flag_is_returned(self):
+        bars = self._bars((10.0, 10.2, 9.9, 10.0), (10.0, 10.5, 9.9, 10.4), (9.8, 9.85, 9.7, 9.75))
+        result = candles.analyze(bars, 2)
+        self.assertTrue(result["gap_down"])
+        self.assertIn("向下跳空", result["pattern"])
+
 
 class MarksTests(unittest.TestCase):
     def test_marks_only_keep_obvious_patterns_at_key_positions(self):

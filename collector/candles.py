@@ -34,6 +34,13 @@ def analyze(bars: Sequence[dict], index: int, lookback: int = 20) -> dict:
     if not close or not open_ or not high or not low or not prev_close:
         return empty
 
+    # 一字线（涨停/跌停封死，或整天没有撮合）：最高=最低，没有振幅。
+    # 这种 bar 不能拿比例去套形态——按现在的写法 实体/振幅 会变成 0/0，
+    # 反而被标成"十字星"，含义正好相反：十字星是多空胶着，一字线是一边倒。
+    if high <= low:
+        return {**empty, "pattern": "一字线（无振幅）", "zero_range": True,
+                "body_pct": round((close - prev_close) / prev_close * 100, 2) if prev_close else None}
+
     span = max(high - low, 1e-9)
     body = close - open_
     body_pct = body / prev_close * 100
@@ -117,9 +124,13 @@ def analyze(bars: Sequence[dict], index: int, lookback: int = 20) -> dict:
         "long_bear": long_bear,
         "hammer": hammer,
         "bullish_engulf": bullish_engulf,
+        "bearish_engulf": bearish_engulf,
+        "shooting": shooting,
         "gap_up": gap_up,
+        "gap_down": gap_down,
         "breakout_10": breakout,
         "breakdown_10": breakdown,
+        "zero_range": False,
         "up_streak": up_streak,
         "down_streak": down_streak,
         # 反转确认：至少两个独立信号同时出现才算，避免单根 K 线就下结论
