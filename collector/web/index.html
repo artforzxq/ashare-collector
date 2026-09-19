@@ -480,20 +480,31 @@ canvas{display:block;width:100%}
         <div class="hint" id="marketNote"></div>
       </div>
 
-      <div class="block-head"><h2>③ 疑似托底 · 事后</h2><span class="badge" id="supportBadge">日终</span><span class="line"></span><span id="supportMeta"></span></div>
+      <div class="block-head"><h2>③ 资金去向 · 日终</h2><span class="badge today" id="flowBadge">日终</span><span class="line"></span><span id="flowMeta"></span></div>
+      <div class="card panel">
+        <h3>钱在往哪走 <span id="flowNote"></span>
+          <button class="ghost" id="flowAiBtn" style="float:right;padding:1px 8px">让模型读一遍</button>
+        </h3>
+        <div id="flowBody"></div>
+        <div class="hint" id="flowHint"></div>
+        <div class="hint" id="flowAiMeta" style="margin-top:6px"></div>
+        <div id="flowAiBody"></div>
+      </div>
+
+      <div class="block-head"><h2>④ 疑似托底 · 事后</h2><span class="badge" id="supportBadge">日终</span><span class="line"></span><span id="supportMeta"></span></div>
       <div class="card panel">
         <h3>宽基 ETF 份额净流入 <span id="supportNote"></span></h3>
         <div id="supportBody"></div>
         <div class="hint" id="supportHint"></div>
       </div>
 
-      <div class="block-head"><h2>④ 涨跌榜 · 日终</h2><span class="line"></span></div>
+      <div class="block-head"><h2>⑤ 涨跌榜 · 日终</h2><span class="line"></span></div>
       <div class="panels two">
         <div class="card panel"><h3>涨幅榜</h3><div id="gainers"></div></div>
         <div class="card panel"><h3>跌幅榜</h3><div id="losers"></div></div>
       </div>
 
-      <div class="block-head"><h2>⑤ 形态筛选 · 按需</h2><span class="line"></span></div>
+      <div class="block-head"><h2>⑥ 形态筛选 · 按需</h2><span class="line"></span></div>
       <div class="card panel">
         <h3>形态筛选 <span id="screenDate"></span></h3>
         <div class="seg" id="critSeg"></div>
@@ -1456,6 +1467,7 @@ function switchView(name){
     loadMarket();
     loadSupport();
     loadScreen();
+    loadScopeAnalysis('market');
   } else if (name === 'factors'){
     loadFactors();
     loadScopeAnalysis('ledger');
@@ -1480,6 +1492,7 @@ async function loadMarket(){
 
 function renderMarket(){
   const m = marketData || {};
+  renderFlow(m.flow);
   $('marketDate').textContent = m.trade_date ? `数据 ${m.trade_date}` : '';
   // 侧栏常驻一行"大盘"：看个股时也该知道今天整体是涨是跌
   const line = $('marketLine');
@@ -1550,11 +1563,13 @@ const AI_PANELS = {
   instrument: {meta:'aiMeta', body:'aiBody', btn:'aiBtn'},
   ledger:     {meta:'ledgerAiMeta', body:'ledgerAiBody', btn:'ledgerAiBtn'},
   backtest:   {meta:'btAiMeta', body:'btAiBody', btn:'btAiBtn'},
+  market:     {meta:'flowAiMeta', body:'flowAiBody', btn:'flowAiBtn'},
 };
 const AI_EMPTY = {
   instrument: '这只标的还没有分析过',
   ledger: '这张台账还没有让模型读过',
   backtest: '这次回测结果还没有让模型读过',
+  market: '这天的资金去向还没有让模型读过',
 };
 const analysisCache = {};
 let lastAnalyzeScope = 'instrument';
@@ -1614,6 +1629,56 @@ function renderScopeAnalysis(scope){
     `<div class="ai-answer">${escapeHtml(item.answer).replace(/\n/g, '<br>')}</div>` +
     '<div class="hint">这几句话是模型读上面那批数字写的旁注，<b>不参与</b>状态分、关键带和提醒的计算——' +
     '本地算出来的结论不会因为它而变化。想看它当时看到了什么数字，提示词也存在 analysis_log 里。</div>';
+}
+
+/* ---------- 资金去向：钱在宽基 / 行业 ETF / 成交额 / 融资余额之间怎么走 ---------- */
+/* 和"涨跌家数"放同一页：它们回答同一个问题——今天这波涨跌背后，钱是进来还是出去。 */
+function renderFlow(f){
+  const box = $('flowBody');
+  if (!f || !f.ok){
+    $('flowMeta').textContent = '';
+    $('flowNote').textContent = '';
+    box.innerHTML = `<div class="empty-state"><b>${escapeHtml((f && f.message) || '还没有资金去向数据')}</b>`
+      + '先跑一次 3-每日任务（ETF 份额与融资余额都是交易所 T+1 披露的）</div>';
+    $('flowHint').textContent = '';
+    return;
+  }
+  const yi = value => (value === null || value === undefined)
+    ? '<span class="sub">—</span>' : posNeg(value, (value > 0 ? '+' : '') + Number(value).toFixed(2));
+  const kind = (value, label) => value > 0
+    ? `<span class="tag pos">${label}申购</span>` : (value < 0 ? `<span class="tag neg">${label}赎回</span>` : '<span class="sub">持平</span>');
+  const broad = f.broad_etf || {}, sector = f.sector_etf || {}, amount = f.amount || {}, margin = f.margin || {};
+  const regime = f.regime || {};
+  $('flowMeta').textContent = `${f.trade_date}（对比 ${f.prev_date || '—'}）· 覆盖 ${f.covered || 0} 只 ETF`;
+  $('flowNote').textContent = regime.score != null
+    ? `市场层 ${Number(regime.score).toFixed(2)}（${regime.stance}）` : '';
+  box.innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+      <th>看什么</th><th class="num">读数</th><th>方向</th><th>说明</th>
+    </tr></thead><tbody>
+      <tr><td><span class="name">宽基 ETF</span><div class="sub">份额净流入，亿元</div></td>
+        <td class="num">${yi(broad.inflow)}</td><td>${kind(broad.inflow || 0, '宽基')}</td>
+        <td class="sub">${broad.count || 0} 只有变化：被人用真金白银申购/赎回，方向明确</td></tr>
+      <tr><td><span class="name">行业 / 主题 ETF</span><div class="sub">份额净流入，亿元</div></td>
+        <td class="num">${yi(sector.inflow)}</td><td>${kind(sector.inflow || 0, '行业')}</td>
+        <td class="sub">${sector.count || 0} 只有变化：与宽基反向时，这就是"轮动"的直接证据</td></tr>
+      <tr><td><span class="name">全市场成交额</span><div class="sub">万亿 / 放量倍数</div></td>
+        <td class="num">${amount.amount == null ? '—' : Number(amount.amount).toFixed(2)}</td>
+        <td>${amount.amount_ratio == null ? '<span class="sub">—</span>'
+            : `<span class="tag ${amount.amount_ratio >= 1.15 ? 'pos' : (amount.amount_ratio <= 0.95 ? 'neg' : '')}">${Number(amount.amount_ratio).toFixed(2)}×</span>`}</td>
+        <td class="sub">相对近 60 日中位数：放量 = 增量资金；没放量 = 更像存量换仓</td></tr>
+      <tr><td><span class="name">融资余额</span><div class="sub">万亿 / 较前一披露日</div></td>
+        <td class="num">${margin.balance == null ? '—' : Number(margin.balance).toFixed(3)}</td>
+        <td>${margin.delta == null ? '<span class="sub">—</span>'
+            : `<span class="tag ${margin.delta > 0 ? 'pos' : 'neg'}">${margin.delta > 0 ? '加杠杆' : '降杠杆'} ${Number(margin.delta).toFixed(0)} 亿</span>`}</td>
+        <td class="sub">披露到 ${margin.data_date || '—'}（T+1，深市常滞后一天）</td></tr>
+    </tbody></table></div>
+    <div class="ai-answer" style="margin-top:10px"><b>读法</b>　${escapeHtml(f.verdict || '')}</div>`;
+  $('flowHint').innerHTML =
+    '口径：份额净流入 = 份额变化 × 价格（净值优先、退回收盘价）；'
+    + '<b>深市 ETF 只给"最新份额"</b>（交易所接口如此），补不出历史，所以资金流的角度只算沪市 '
+    + `（这次覆盖 ${f.covered || 0} 只，其中 ${f.unpriced ? f.unpriced.length : 0} 只缺价格未计入）。`
+    + '份额减少只发生在<b>一级市场赎回</b>（二级市场卖出不改变份额）；但"钱离开 ETF 之后去了哪"这里看不到——'
+    + '那要靠行业 ETF 与融资余额一起读。';
 }
 
 async function loadAnalysis(){ return loadScopeAnalysis('instrument'); }
@@ -2338,6 +2403,7 @@ document.querySelectorAll('[data-job]').forEach(btn => {
 if ($('aiBtn')) $('aiBtn').onclick = () => { lastAnalyzeScope = 'instrument'; runJob('analyze', state.code); };
 if ($('ledgerAiBtn')) $('ledgerAiBtn').onclick = () => { lastAnalyzeScope = 'ledger'; runJob('analyze', '', 'ledger'); };
 if ($('btAiBtn')) $('btAiBtn').onclick = () => { lastAnalyzeScope = 'backtest'; runJob('analyze', '', 'backtest'); };
+if ($('flowAiBtn')) $('flowAiBtn').onclick = () => { lastAnalyzeScope = 'market'; runJob('analyze', '', 'market'); };
 $('helpBtn').onclick = () => toggleHelp();
 $('helpClose').onclick = () => toggleHelp();
 /* 主题：默认深色，选择记在 localStorage 里；切换后重画图表 */

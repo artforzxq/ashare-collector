@@ -293,13 +293,15 @@ def cmd_analyze(args) -> int:
     注意它不是结论：状态、关键带、仓位上限、提醒都由本地确定性代码算，
     模型只看、只说，不回写任何东西。没 key / 没网 / 模型抽风都只影响这一次调用。
 
-    三个口径：默认单只标的；`--ledger` 审整张因子台账；`--backtest` 审回测摘要。
+    四个口径：默认单只标的；`--ledger` 审整张因子台账；`--backtest` 审回测摘要；
+    `--market` 读当天的资金去向（宽基/行业 ETF 份额、成交额、融资余额、市场层）。
     """
     cfg = _prepare(args)
     conn = _connect(cfg)
     try:
         scope = (analysis_mod.SCOPE_LEDGER if args.ledger
                  else analysis_mod.SCOPE_BACKTEST if args.backtest
+                 else analysis_mod.SCOPE_MARKET if getattr(args, "market", False)
                  else analysis_mod.SCOPE_INSTRUMENT)
 
         if args.show:
@@ -310,14 +312,17 @@ def cmd_analyze(args) -> int:
                 row = analysis_mod.latest(conn, code, scope=scope)
                 if not row:
                     continue
-                label = code or ("因子台账" if scope == analysis_mod.SCOPE_LEDGER else "回测摘要")
+                label = code or {analysis_mod.SCOPE_LEDGER: "因子台账",
+                                 analysis_mod.SCOPE_BACKTEST: "回测摘要",
+                                 analysis_mod.SCOPE_MARKET: "资金去向"}.get(scope, "分析")
                 print(f"===== {label}（{row['model']}，{row['created_at']}）=====")
                 print(row["answer"])
                 print("")
                 return 0
             print("本地还没有存过这类分析，先跑一次：python run.py analyze "
                   + ("--ledger" if scope == analysis_mod.SCOPE_LEDGER else
-                     "--backtest" if scope == analysis_mod.SCOPE_BACKTEST else (args.code or "")))
+                     "--backtest" if scope == analysis_mod.SCOPE_BACKTEST else
+                     "--market" if scope == analysis_mod.SCOPE_MARKET else (args.code or "")))
             return 0
 
         if scope != analysis_mod.SCOPE_INSTRUMENT:
@@ -730,6 +735,19 @@ def cmd_regime(args) -> int:
     return 0 if study.get("ok") else 1
 
 
+def cmd_margin(args) -> int:
+    """补融资融券余额历史：杠杆资金是"钱在进个股"最直接的证据。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    info = tasks.backfill_margin(conn, cfg, days=int(args.days or 20), verbose=True)
+    conn.close()
+    if not info.get("ok"):
+        print(info.get("message", "融资余额补齐失败"))
+        return 1
+    print(f"融资融券：写入 {info['written']} 条，覆盖 {info['days']} 个交易日，失败 {info['failed']} 天")
+    return 0
+
+
 def cmd_etf_shares(args) -> int:
     """补 ETF 份额历史：托底判定与页面上的"较前一日"都至少要两天的份额。
 
@@ -741,9 +759,8 @@ def cmd_etf_shares(args) -> int:
     pool = tasks._source_pool(cfg)
     sources = tasks._all_sources_for(pool, "etf_shares")
     trade_date = warehouse_mod.latest_trade_date(conn, cfg)
-    etf_codes = list(dict.fromkeys(
-        list(cfg["watchlist"].get("etfs") or []) + list(support_mod.settings(cfg).get("etfs") or [])
-    ))
+    sh_codes, sz_codes = tasks.etf_share_universe(conn, cfg)
+    etf_codes = list(dict.fromkeys(sh_codes + sz_codes))
     written = tasks._topup_etf_share_history(
         conn, sources, etf_codes, trade_date, verbose=True,
         target_days=int(args.days or tasks.ETF_SHARE_BACKFILL_DAYS),
@@ -953,6 +970,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--show", action="store_true", help="只读本地存过的分析，不调用")
     analyze.add_argument("--ledger", action="store_true", help="审整张因子台账（汇总，不喂明细）")
     analyze.add_argument("--backtest", action="store_true", help="审最近一次回测的摘要")
+    analyze.add_argument("--market", action="store_true", help="读当天的资金去向（宽基/行业 ETF、成交额、融资余额）")
     analyze.add_argument("--db", help="数据库路径")
     analyze.set_defaults(func=cmd_analyze)
 
@@ -1052,6 +1070,11 @@ def build_parser() -> argparse.ArgumentParser:
     regime.add_argument("--horizon", type=int, help="看之后几个交易日（默认 20）")
     regime.add_argument("--db", help="数据库路径")
     regime.set_defaults(func=cmd_regime)
+
+    margin = sub.add_parser("margin", help="补融资融券余额历史（杠杆资金 = 钱在进个股的证据）")
+    margin.add_argument("--days", type=int, help="补最近几个交易日（默认 20）")
+    margin.add_argument("--db", help="数据库路径")
+    margin.set_defaults(func=cmd_margin)
 
     riskstats = sub.add_parser("riskstats", help="风险层分布：盈亏比、止损距离、仓位上限")
     riskstats.add_argument("--db", help="数据库路径")

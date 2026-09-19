@@ -20,7 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import candles as candles_mod, db, market_time, notify, tasks, warehouse as warehouse_mod
+from . import (candles as candles_mod, db, flow as flow_mod, market_time, notify, tasks,
+               warehouse as warehouse_mod)
 from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
@@ -317,7 +318,8 @@ class App:
         注意定位：分析是**旁注**，读的是本地算好的数字，不回写任何结论。
         所以这里只负责把存过的那一条拿出来，外加"能不能再跑"的开关状态。
 
-        scope：instrument 单只标的（要看 code）/ ledger 因子台账 / backtest 回测摘要。
+        scope：instrument 单只标的（要看 code）/ ledger 因子台账 / backtest 回测摘要 /
+        market 资金去向（宽基与行业 ETF 份额、成交额、融资余额、市场层）。
         """
         from . import analysis as analysis_mod
 
@@ -338,7 +340,11 @@ class App:
                 "model": conf["model"],
                 "item": (
                     {
-                        "code": row["code"] or ("因子台账" if scope == analysis_mod.SCOPE_LEDGER else "回测摘要"),
+                        "code": row["code"] or {
+                            analysis_mod.SCOPE_LEDGER: "因子台账",
+                            analysis_mod.SCOPE_BACKTEST: "回测摘要",
+                            analysis_mod.SCOPE_MARKET: "资金去向",
+                        }.get(scope, "分析"),
                         "trade_date": row["trade_date"],
                         "model": row["model"],
                         "created_at": row["created_at"],
@@ -1038,6 +1044,10 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
             "distribution": distribution,
             "gainers": [brief(item) for item in ranked[:10]],
             "losers": [brief(item) for item in ranked[-10:][::-1]],
+            # 资金去向：钱在宽基 / 行业主题 ETF / 成交额 / 融资余额之间怎么走。
+            # 和"涨跌家数"放在同一页是对的——它们回答的是同一个问题：
+            # 今天这波涨跌背后，钱是进来还是出去、往哪个方向挪。
+            "flow": flow_mod.snapshot(conn, cfg, trade_date),
         }
     finally:
         conn.close()

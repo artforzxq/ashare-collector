@@ -36,6 +36,7 @@ DEFAULT_MODEL = "qwen-plus"
 SCOPE_INSTRUMENT = "instrument"
 SCOPE_LEDGER = "ledger"
 SCOPE_BACKTEST = "backtest"
+SCOPE_MARKET = "market"
 
 SYSTEM_PROMPT = (
     "你是一名谨慎的 A 股复盘助手。规则：\n"
@@ -71,6 +72,19 @@ BACKTEST_SYSTEM_PROMPT = (
     "① 这次结果值不值得信（看标的数、年数、信号数、可成交性剔除）\n"
     "② 最好那几组是高原还是尖峰（用邻域均值/最差/为正比例说话）\n"
     "③ 现在该不该动配置，为什么"
+)
+
+MARKET_SYSTEM_PROMPT = (
+    "你是一名市场资金面观察者。你看到的是一天（或几天）的四组读数："
+    "宽基 ETF 与行业/主题 ETF 的份额净流入、全市场成交额与其放量倍数、融资余额变化，"
+    "以及一个合成出来的市场层分数（宽基指数状态 + 市场广度 + 成交额）。规则：\n"
+    "1. 只用给出的数字说话，不许引入外部行情、新闻或传闻；\n"
+    "2. 缺什么就说什么；某个读数缺失时明确写「缺这项」，不要用别的数补；\n"
+    "3. 不给买卖建议、不预测点位、不说「值得关注」这类空话；\n"
+    "4. 用中文，短句。按三段输出，每段不超过三句话：\n"
+    "① 钱在往哪走（宽基与行业是同向还是反向，成交额是存量还是增量，杠杆在加还是在减）\n"
+    "② 这组读数与市场层分数一致还是矛盾（一致/矛盾都要点出来）\n"
+    "③ 这套数据本身有什么不确定（口径、披露滞后、覆盖范围）"
 )
 
 
@@ -289,6 +303,75 @@ def messages(snap: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------- 因子台账
+
+
+def market_snapshot(conn, cfg: dict) -> dict:
+    """资金去向 + 市场层的**汇总**，给模型读。
+
+    只给一天（或两天）的汇总数字，不给 900 只 ETF 的明细——明细既贵又没用，
+    模型读不出东西，还会顺着噪声编故事。
+    """
+    from . import flow as flow_mod
+
+    snap = flow_mod.snapshot(conn, cfg)
+    if not snap.get("ok"):
+        return {"as_of": None, "note": snap.get("message", "")}
+    amount = snap.get("amount") or {}
+    margin = snap.get("margin") or {}
+    regime = snap.get("regime") or {}
+    return {
+        "as_of": snap["trade_date"],
+        "prev_date": snap.get("prev_date"),
+        "broad_etf_inflow": (snap.get("broad_etf") or {}).get("inflow"),
+        "broad_etf_count": (snap.get("broad_etf") or {}).get("count"),
+        "sector_etf_inflow": (snap.get("sector_etf") or {}).get("inflow"),
+        "sector_etf_count": (snap.get("sector_etf") or {}).get("count"),
+        "etf_covered": snap.get("covered"),
+        "unpriced": snap.get("unpriced") or [],
+        "amount": amount.get("amount"),
+        "amount_ratio": amount.get("amount_ratio"),
+        "up_count": amount.get("up_count"),
+        "down_count": amount.get("down_count"),
+        "limit_up": amount.get("limit_up"),
+        "median_pct": amount.get("median_pct"),
+        "margin_balance": margin.get("balance"),
+        "margin_delta": margin.get("delta"),
+        "margin_data_date": margin.get("data_date"),
+        "regime_score": regime.get("score"),
+        "regime_stance": regime.get("stance"),
+        "rule_verdict": snap.get("verdict"),
+    }
+
+
+def market_messages(snap: dict) -> list[dict]:
+    def num(value, digits: int = 2, unit: str = "") -> str:
+        if value is None:
+            return "缺这项"
+        return f"{round(float(value), digits):g}{unit}"
+
+    lines = [
+        f"数据日期：{snap.get('as_of')}（ETF 份额与之对比的前一交易日：{snap.get('prev_date')}）",
+        f"宽基 ETF 份额净流入：{num(snap.get('broad_etf_inflow'), 2, ' 亿元')}"
+        f"（覆盖 {snap.get('broad_etf_count') or 0} 只有变化）",
+        f"行业/主题 ETF 份额净流入：{num(snap.get('sector_etf_inflow'), 2, ' 亿元')}"
+        f"（覆盖 {snap.get('sector_etf_count') or 0} 只有变化）",
+        f"ETF 份额总覆盖：{snap.get('etf_covered') or 0} 只"
+        + (f"；其中 {len(snap.get('unpriced') or [])} 只缺价格、未计入" if snap.get("unpriced") else ""),
+        f"全市场成交额：{num(snap.get('amount'), 2, ' 万亿')}；"
+        f"相对近 60 日中位数 {num(snap.get('amount_ratio'), 2, ' 倍')}",
+        f"涨跌家数：上涨 {snap.get('up_count')} / 下跌 {snap.get('down_count')}；"
+        f"涨停 {snap.get('limit_up')}；涨跌幅中位数 {num(snap.get('median_pct'), 2, '%')}",
+        f"融资融券余额：{num(snap.get('margin_balance'), 3, ' 万亿')}，"
+        f"较前一披露日 {num(snap.get('margin_delta'), 2, ' 亿元')}"
+        f"（披露到 {snap.get('margin_data_date') or '—'}）",
+        f"市场层（Beta）分数：{num(snap.get('regime_score'), 2)}（{snap.get('regime_stance') or '—'}）"
+        "＝宽基指数状态 40% + 市场广度 40% + 成交额 20%",
+        f"系统按规则先写了一句：{snap.get('rule_verdict')}",
+    ]
+    return [
+        {"role": "system", "content": MARKET_SYSTEM_PROMPT},
+        {"role": "user", "content": "以下是本地系统算出来的数字，请按规则解读：\n\n" + "\n".join(lines)},
+    ]
 
 
 def ledger_snapshot(conn, cfg: dict) -> dict:
@@ -646,6 +729,9 @@ def run(conn, cfg: dict, scope: str, code: str | None = None, trade_date: str | 
     elif scope == SCOPE_BACKTEST:
         snap = backtest_snapshot(cfg)
         msgs = backtest_messages(snap)
+    elif scope == SCOPE_MARKET:
+        snap = market_snapshot(conn, cfg)
+        msgs = market_messages(snap)
     else:
         if not code:
             return {"ok": False, "skipped": True, "note": "没指定标的"}

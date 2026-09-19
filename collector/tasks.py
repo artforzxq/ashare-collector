@@ -444,6 +444,26 @@ def _collect_calendar(conn, source, cfg: dict, trade_date: str, verbose: bool) -
     _log(f"      交易日历 {trading[0]} ~ {trading[-1]}，其中 {len(trading)} 个交易日", verbose)
 
 
+def etf_share_universe(conn, cfg: dict) -> tuple[list[str], list[str]]:
+    """ETF 份额的采集范围：返回 (沪市全量, 深市名单)。
+
+    沪市：交易所接口一次请求返回全市场（实测 912 行），所以**全收**——
+    "资金去哪儿"必须有行业/主题 ETF 才做得出来，只盯宽基看不出轮动。
+    深市：只收观察池 + 托底名单（那个接口只给最新份额、还得逐只问）。
+    """
+    sz_codes = list(dict.fromkeys(
+        list((cfg.get("watchlist") or {}).get("etfs") or [])
+        + list(support_mod.settings(cfg).get("etfs") or [])
+    ))
+    sh_codes = [
+        row["code"]
+        for row in db.query(
+            conn, "SELECT code FROM instruments WHERE type='etf' AND code LIKE 'SH%' ORDER BY code"
+        )
+    ]
+    return sh_codes, sz_codes
+
+
 def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose: bool) -> None:
     """ETF 份额：问遍所有能提供的源，再按代码合并。
 
@@ -455,12 +475,16 @@ def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose
         _log("      ! 没有支持 ETF 份额的数据源", verbose)
         db.log_health(conn, trade_date, "none", "etf_shares", "failed", 0, 1.0, 0, "无支持 etf_shares 的数据源")
         return
-    # 采集范围 = 观察池里的 ETF **∪ 托底模块盯的那几只宽基**。
-    # 后者常常不在观察池里（它们是市场信号，不是你要买的票），
-    # 不并进来的话托底判定永远缺数据——这正是 159919/159915 一开始没份额的原因。
-    etf_codes = list(dict.fromkeys(
-        list(cfg["watchlist"].get("etfs") or []) + list(support_mod.settings(cfg).get("etfs") or [])
-    ))
+    # 采集范围：
+    #   · **沪市 ETF 全收**——上交所那个接口一次请求就返回全市场（实测 912 行），
+    #     成本一样，但"资金去哪儿"这个分析必须有行业/主题 ETF 才做得出来：
+    #     只盯 7 只宽基，看到的永远是宽基自己的进出，看不出轮动；
+    #   · 深市只收观察池 + 托底名单——深交所那个接口只给"最新份额"、还得逐只问，
+    #     900 只 × 2 请求太贵，而且补不了历史。
+    # 托底名单里的宽基常常不在观察池（它们是市场信号，不是要买的票），必须并进来，
+    # 否则托底判定永远缺数据——这正是 159919/159915 一开始没份额的原因。
+    sh_all, sz_codes = etf_share_universe(conn, cfg)
+    etf_codes = list(dict.fromkeys(sh_all + sz_codes))
     if not etf_codes:
         return
 
@@ -508,8 +532,8 @@ def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose
 # 聚合源（新浪"最近总份额"）给 69.39 亿份——差 10%，而份额变化只有几个百分点，
 # 用错源等于把信号淹掉。所以按来源排优先级，再让"正式披露"压过"估算值"。
 ETF_SHARE_PRIORITY = {"sse": 0, "szse": 0, "akshare": 1, "sina": 2}
-ETF_SHARE_MIN_DAYS = 5          # 历史少于这么多天就补
-ETF_SHARE_BACKFILL_DAYS = 10    # 每次最多往前补几天
+ETF_SHARE_BACKFILL_DAYS = 20    # 一次最多往前补几天
+ETF_SHARE_COVERAGE_MIN = 0.6    # 一个交易日里沪市 ETF 覆盖不到六成就重补（口径扩围后老日期会很稀）
 
 
 def _merge_etf_rows(merged: dict, rows: list, source) -> None:
@@ -544,12 +568,11 @@ def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
     只在历史薄的时候补（不足 5 天时补到 10 天），补过就不再重复请求。
     """
     target = int(target_days or ETF_SHARE_BACKFILL_DAYS)
-    have = {row["trade_date"] for row in db.query(conn, "SELECT DISTINCT trade_date FROM etf_shares")}
     # 只补沪市：上交所那个接口是**按日期**查的，能补历史；
     # 深交所只给"最新份额"（列表页快照），拿它补历史会补出连续几天一模一样的数，
     # 于是"较前一日 0.00%"看起来像"没变化"，其实是根本没变过——那是假的。
     sh_codes = [code for code in codes if str(code).upper().startswith("SH")]
-    if not sh_codes or len(have) >= ETF_SHARE_MIN_DAYS:
+    if not sh_codes:
         return 0
     days = [
         row["trade_date"]
@@ -570,7 +593,19 @@ def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
                 (trade_date, target),
             )
         ]
-    missing = sorted(day for day in days if day not in have)
+    # 哪个交易日缺得厉害就补哪天：只看"日期有没有"不够——采集范围从 7 只扩到全市场
+    # 沪市 ETF 之后，老日期虽然存在，但里面只有寥寥几只，等于没有。
+    # upsert 是幂等的，所以"补过的日期再补一次"没有副作用。
+    stored: dict[str, set] = {}
+    for row in db.query(
+        conn,
+        """SELECT trade_date, code FROM etf_shares
+            WHERE code LIKE 'SH%' AND trade_date<=? ORDER BY trade_date""",
+        (trade_date,),
+    ):
+        stored.setdefault(row["trade_date"], set()).add(row["code"])
+    threshold = max(1, int(len(sh_codes) * ETF_SHARE_COVERAGE_MIN))
+    missing = sorted(day for day in days if len(stored.get(day, ())) < threshold)
     written = 0
     for day in missing:
         merged: dict[str, dict] = {}
@@ -613,6 +648,52 @@ def _collect_margin(conn, source, trade_date: str, verbose: bool) -> None:
         _log(f"      ! 融资余额不可用：{exc}", verbose)
         return
     db.upsert_rows(conn, "margin", rows, ["trade_date", "market"])
+
+
+def backfill_margin(conn, cfg: dict, days: int = 20, verbose: bool = True) -> dict:
+    """补融资融券余额的历史。
+
+    为什么要补：杠杆资金是最直接的"钱在进个股"的证据——融资余额升高说明有人借钱买股票，
+    而降杠杆说明在撤退。库里原来只有两天，什么都看不出来。
+    交易所是 T+1 披露的，所以这里按交易日一天一天问（每天 1~2 次请求）。
+    """
+    pool = _source_pool(cfg)
+    source = _source_for(pool, "margin")
+    if source is None:
+        return {"ok": False, "message": "没有支持融资融券的数据源（需要 akshare）", "written": 0}
+    days = max(1, int(days or 20))
+    trade_date = warehouse.latest_trade_date(conn, cfg)
+    dates = [
+        row["trade_date"]
+        for row in db.query(
+            conn,
+            """SELECT trade_date FROM trade_calendar
+                WHERE is_trading_day=1 AND trade_date<=? ORDER BY trade_date DESC LIMIT ?""",
+            (trade_date, days),
+        )
+    ]
+    if not dates:
+        dates = [
+            row["trade_date"]
+            for row in db.query(
+                conn, "SELECT DISTINCT trade_date FROM bars_daily WHERE trade_date<=? ORDER BY trade_date DESC LIMIT ?",
+                (trade_date, days),
+            )
+        ]
+    written = failed = 0
+    for day in sorted(dates):
+        try:
+            rows = source.margin(day)
+        except Exception as exc:
+            failed += 1
+            if verbose:
+                _log(f"      · 融资余额 {day} 取不到：{str(exc)[:60]}", verbose)
+            continue
+        if rows:
+            written += db.upsert_rows(conn, "margin", rows, ["trade_date", "market"])
+    if verbose:
+        _log(f"      融资融券：补了 {written} 条（{len(dates)} 个交易日，{failed} 天失败）", verbose)
+    return {"ok": True, "written": written, "days": len(dates), "failed": failed}
 
 
 def _extra_series(conn, cfg: dict, trade_date: str) -> dict:
