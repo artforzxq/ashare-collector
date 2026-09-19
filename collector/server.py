@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, market_time, tasks, warehouse as warehouse_mod
+from . import db, market_time, notify, tasks, warehouse as warehouse_mod
 from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
@@ -287,12 +287,25 @@ class App:
             finally:
                 conn.close()
 
+        def push():
+            conn = db.connect(cfg["_db_path"])
+            try:
+                result = notify.push_daily(conn, cfg)
+                if not result.get("ok"):
+                    raise RuntimeError(result.get("note") or "推送失败")
+                if result.get("skipped"):
+                    return result.get("note") or "已跳过"
+                return f"已推到手机：{result['title']}"
+            finally:
+                conn.close()
+
         table = {
             "daily": ("更新自选数据", daily),
             "sync": ("同步全市场", sync),
             "screen": ("跑全市场筛选", screen),
             "snapshot": ("补当日快照", snapshot),
             "intraday": ("抓当日分时", intraday),
+            "push": ("推送简报到手机", push),
         }
         entry = table.get(key)
         if entry is None:

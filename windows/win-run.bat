@@ -5,7 +5,7 @@ rem  This file lives in windows\; the project root is its parent folder.
 rem  Usage: call "%~dp0win-run.bat" <step> [extra args]
 rem  Steps: setup init-db selftest daily report sources dashboard
 rem         tables sql dictionary rebuild auto install-sources shortcut db-shortcut
-rem         web share review backtest sync shadow screen candidates pack
+rem         web share review backtest sync shadow screen candidates pack push
 rem
 rem  Keep this file pure ASCII. cmd.exe reads a .bat byte by byte using the
 rem  console code page, so a UTF-8 file containing Chinese gets mis-parsed and
@@ -206,6 +206,7 @@ if /i "%STEP%"=="screen"          goto :screen
 if /i "%STEP%"=="candidates"      goto :candidates
 if /i "%STEP%"=="replay"          goto :replay
 if /i "%STEP%"=="pack"            goto :pack
+if /i "%STEP%"=="push"            goto :push
 echo Unknown step: %STEP%
 exit /b 1
 
@@ -374,3 +375,11 @@ echo.
 if errorlevel 1 exit /b 1
 "%PY%" run.py open pack
 exit /b 0
+
+:push
+rem Sends today's briefing to the phone through PushPlus.
+rem The token lives in data\pushplus.token (gitignored) or ASHARE_PUSHPLUS_TOKEN.
+echo Pushing today's briefing to your phone ...
+echo.
+"%PY%" run.py push %EXTRA%
+exit /b %ERRORLEVEL%

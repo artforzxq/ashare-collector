@@ -9,6 +9,10 @@ data/*.db-shm
 # 打包出来的数据库压缩包
 备份/*.zip
 
+# 推送 token 与推送状态：本地秘密 / 运行状态，不进版本库
+data/*.token
+data/last-push.txt
+
 # 运行日志
 logs/
 *.log

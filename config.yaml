@@ -73,6 +73,26 @@ alerts:
   cooldown_days_p1: 1
   cooldown_days_p2: 5
 
+# 手机推送（PushPlus）。日终跑完自动把简报推到微信上。
+# token 是敏感信息，**不要写在这个文件里**（这个文件进版本库）。
+# 三种写法任选其一，优先级从高到低：
+#   1) 本地文件 data/pushplus.token，内容就是 token（已被 .gitignore 排除）
+#   2) 环境变量 ASHARE_PUSHPLUS_TOKEN
+#   3) 直接写在这个文件里（不推荐，仅临时验证用）
+notify:
+  pushplus:
+    enabled: true             # 关掉就完全不推送
+    token: ""                 # 留空即可，token 放在本地文件里
+    token_env: ASHARE_PUSHPLUS_TOKEN
+    token_file: data/pushplus.token
+    template: txt             # txt / markdown / html，简报是等宽文本，默认 txt
+    topic: ""                 # 一对多推送的群组编码，单发留空
+    channel: ""               # 留空走微信；webhook / mail / sms 按 PushPlus 文档填
+    only_on_alerts: false     # true = 只有真有提醒的日子才推（默认每天推一份简报）
+    max_chars: 4000           # 正文超过这么长就截断（PushPlus 有长度上限）
+    timeout: 10
+    state_file: data/last-push.txt   # 记着上次推到哪个交易日，同一天不重复推
+
 # 全市场本地化：有空时把全市场的票拉到本地，之后每天只补最新一根。
 # 历史回补逐只抓（可中断续跑）；每日增量用一次全市场快照搞定，不逐只请求。
 warehouse:

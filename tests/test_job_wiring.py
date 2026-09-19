@@ -11,11 +11,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from collector import db, screen, server, tasks, warehouse
+from collector import db, notify, screen, server, tasks, warehouse
 from collector.config import load_config, use_fixture_sources
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-JOB_KEYS = ("daily", "sync", "screen", "snapshot", "intraday")
+JOB_KEYS = ("daily", "sync", "screen", "snapshot", "intraday", "push")
 
 
 class JobWiringTests(unittest.TestCase):
@@ -58,6 +58,11 @@ class JobWiringTests(unittest.TestCase):
                               lambda *a, **k: {"trade_date": "2026-01-05", "alerts": []}),
             mock.patch.object(tasks, "collect_intraday_bars",
                               lambda *a, **k: {"ok": True, "codes": 0, "bars": 0}),
+            # 推送要真发 HTTP，接线测试只关心"按钮点下去能不能跑到函数"，
+            # 所以这里把推送层整体替换掉（它自己的行为在 test_notify.py 里测）。
+            mock.patch.object(notify, "push_daily",
+                              lambda *a, **k: {"ok": True, "skipped": False,
+                                               "title": "A股简报 2026-01-05", "note": "已推送"}),
         ]
         for patch in patches:
             patch.start()

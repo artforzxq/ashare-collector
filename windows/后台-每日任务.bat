@@ -13,6 +13,8 @@ echo. >> "logs\daily.log"
 echo ===== %date% %time% ===== >> "logs\daily.log"
 call "%~dp0win-run.bat" daily --quiet >> "logs\daily.log" 2>&1
 call "%~dp0win-run.bat" report >> "logs\daily.log" 2>&1
+rem Push the briefing to the phone. A missing token only logs a line, it never fails the job.
+call "%~dp0win-run.bat" push >> "logs\daily.log" 2>&1
 echo [done] >> "logs\daily.log"
 
 if defined ASHARE_NO_PAUSE exit /b 0

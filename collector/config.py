@@ -55,6 +55,22 @@ DEFAULTS: Dict[str, Any] = {
         "cooldown_days_p1": 1,
         "cooldown_days_p2": 5,
     },
+    # 手机推送：token 不写在这里（这个文件进版本库），见 collector/notify.py
+    "notify": {
+        "pushplus": {
+            "enabled": False,
+            "token": "",
+            "token_env": "ASHARE_PUSHPLUS_TOKEN",
+            "token_file": "data/pushplus.token",
+            "template": "txt",
+            "topic": "",
+            "channel": "",
+            "only_on_alerts": False,
+            "max_chars": 4000,
+            "timeout": 10,
+            "state_file": "data/last-push.txt",
+        }
+    },
     "warehouse": {
         "snapshot_daily": True,
         "history_days": 750,

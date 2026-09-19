@@ -3,7 +3,7 @@
 #  共享启动器（macOS 端）。Windows 端对应文件：win-run.bat
 #  用法：bash _mac-run.sh <步骤> [附加参数]
 #  步骤：setup init-db selftest daily report sources dashboard
-#        tables sql dictionary rebuild auto install-sources shortcut
+#        tables sql dictionary rebuild auto install-sources shortcut push
 #
 #  运行环境默认放在 ~/ashare-env，刻意不放进项目文件夹：
 #  虚拟环境里有几百兆的 mac 专用文件，同步到 Windows 上只会变成垃圾。
@@ -146,7 +146,12 @@ TIP
     ensure_python || exit 1
     run_py daily --quiet
     run_py report
+    run_py push
     exit 0
+    ;;
+  push)
+    ensure_python || { pause; exit 1; }
+    run_py push "$@"
     ;;
   shortcut)
     target="$HOME/Desktop/每日任务.command"

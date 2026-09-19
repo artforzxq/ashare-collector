@@ -18,6 +18,7 @@ from . import (
     db,
     dictionary as dictionary_mod,
     intraday as intraday_mod,
+    notify,
     risk as risk_mod,
     promotion as promotion_mod,
     report as report_mod,
@@ -137,6 +138,28 @@ def cmd_sources(args) -> int:
     print("说明：列出的都是免费源，不需要账号。哪个显示 ✅ 就说明你的网络能连上它；")
     print("      主源连不上时，全市场同步会自动改用能连上的那个（见 config.yaml 的 sources）。")
     return 0
+
+
+def cmd_push(args) -> int:
+    """把当天简报推到手机（PushPlus）。日终任务之后跑，或者手动补一次。"""
+    cfg = _prepare(args)
+    conn = db.connect(cfg["_db_path"]) if not args.test else None
+    try:
+        if args.test:
+            result = notify.send_test(cfg, dry_run=args.dry_run)
+        else:
+            result = notify.push_daily(
+                conn, cfg, trade_date=args.date, force=args.force, dry_run=args.dry_run
+            )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    print(result.get("note") or "")
+    if args.print_content and result.get("content"):
+        print("")
+        print(result["content"])
+    return 0 if result.get("ok") or result.get("skipped") else 1
 
 
 def cmd_daily(args) -> int:
@@ -656,6 +679,15 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--date", help="交易日 YYYY-MM-DD")
     report.add_argument("--db", help="数据库路径")
     report.set_defaults(func=cmd_report)
+
+    push = sub.add_parser("push", help="把当天简报推到手机（PushPlus）")
+    push.add_argument("--date", help="交易日 YYYY-MM-DD（默认推最近一个有特征数据的交易日）")
+    push.add_argument("--test", action="store_true", help="发一条测试消息，只验证 token 和网络")
+    push.add_argument("--force", action="store_true", help="同一天已推过也重发")
+    push.add_argument("--dry-run", action="store_true", help="只演练，不真的发送")
+    push.add_argument("--print-content", action="store_true", help="把要推送的正文也打印出来")
+    push.add_argument("--db", help="数据库路径")
+    push.set_defaults(func=cmd_push)
 
     factors = sub.add_parser("factors", help="回放某只标的的因子贡献")
     factors.add_argument("code", help="标的代码，如 SH000300")
