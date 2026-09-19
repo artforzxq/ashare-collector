@@ -113,9 +113,34 @@ def summarize(rows, trade_date: str, source: str, precise_limits: bool = False,
     }
 
 
-def from_snapshot(snapshot, trade_date: str, source_name: str) -> dict | None:
-    """数据源快照给出的那一路（只有涨跌幅，没有前收盘价，所以用粗略的涨跌停口径）。"""
-    return summarize([dict(row) for row in snapshot], trade_date, source_name, precise_limits=False)
+def _non_stock_codes(conn) -> set[str]:
+    """代码表里明确不是个股的（ETF / 指数）。不在表里的按个股算，免得把它们漏掉。"""
+    return {
+        str(row["code"]).upper()
+        for row in db.query(
+            conn, "SELECT code FROM instruments WHERE type IS NOT NULL AND type != 'stock'"
+        )
+    }
+
+
+def from_snapshot(conn, snapshot, trade_date: str, source_name: str) -> dict | None:
+    """数据源快照给出的那一路——**只数个股**，和本地那路同一个口径。
+
+    踩过的坑：快照是按 `instruments` 全表去问的，里面带着 1673 只 ETF 和 507 个指数。
+    照单全收的话，"上涨家数"会凭空多出两千来家——2026-09-18 实测：个股 4234 家上涨，
+    算上 ETF 与指数变成 6242 家。而 ETF 和指数在反弹日几乎全涨（那天 ETF 1556/1673 上涨），
+    于是 up_ratio 和 breadth_score 被系统性地推高。官方口径的"涨跌家数"从来只数股票，
+    本地那路（`local_rows`）也一直是这么做的——两条路必须同一个口径，否则同一个指标
+    会因为"今天走哪条路"给出两个答案。
+    """
+    rows = [dict(row) for row in snapshot]
+    excluded = _non_stock_codes(conn)
+    if excluded and rows:
+        rows = [row for row in rows if str(row.get("code") or "").upper() not in excluded]
+    # 前收齐全才用精确涨跌停口径（按板块 10/20/30% 判），否则退回粗略的 ±9.8%。
+    precise = bool(rows) and sum(1 for row in rows if row.get("pre_close")) >= len(rows) * 0.8
+    return summarize(rows, trade_date, source_name, precise_limits=precise,
+                     limits_days=market_time.trading_days_map(conn, trade_date))
 
 
 def local_rows(conn, trade_date: str) -> list[dict]:

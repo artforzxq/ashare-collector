@@ -383,7 +383,11 @@ def snapshot_bars(conn, cfg, trade_date: str | None = None, verbose: bool = True
             }
         )
     if not rows:
-        return {"ok": False, "message": "快照里没有可写入的标的"}
+        # 这**不是**异常：全市场同步已经把当天真实日线写好了，或者快照那几只缺开高低，
+        # 都表现为"没有可写入的标的"。以前返回 ok=False，日志里会打一个"!"，
+        # 让人以为拉数失败了——其实什么错都没有。
+        return {"ok": True, "written": 0, "skipped": incomplete,
+                "message": "没有需要补写的标的（当日 K 线已由全市场同步写好，或快照缺开高低）"}
     db.upsert_rows(conn, "bars_daily", rows, ["code", "trade_date"])
     # 只给"代码表里还没有"的标的补一行，**绝不覆盖已有行**。
     # 这里以前是无条件 upsert，而且把 name 写成代码、type 一律写成 stock——

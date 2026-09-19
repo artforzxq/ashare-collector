@@ -350,7 +350,7 @@ def _collect_breadth(conn, source, cfg: dict, trade_date: str, verbose: bool) ->
         try:
             codes = [row["code"] for row in db.query(conn, "SELECT code FROM instruments")]
             snapshot = source.market_snapshot(trade_date, codes=codes)
-            record = breadth_mod.from_snapshot(snapshot, trade_date, source.name)
+            record = breadth_mod.from_snapshot(conn, snapshot, trade_date, source.name)
         except Exception as exc:
             _log(f"      · 快照不可用（{exc}），改用本地 K 线算广度", verbose)
             db.log_health(conn, trade_date, source.name, "breadth", "failed", 0, 1.0, 0, str(exc))
@@ -396,7 +396,10 @@ def _collect_market_snapshot_bars(conn, cfg: dict, trade_date: str, verbose: boo
         _log(f"      ! 全市场快照写库失败：{exc}", verbose)
         return
     if result.get("ok"):
-        _log(f"      全市场快照：{result['written']} 只写入当日 K 线", verbose)
+        if result["written"]:
+            _log(f"      全市场快照：{result['written']} 只写入当日 K 线", verbose)
+        else:
+            _log(f"      · {result.get('message', '快照没有需要补写的标的')}", verbose)
     else:
         _log(f"      ! 全市场快照未写入：{result.get('message')}", verbose)
 

@@ -15,6 +15,59 @@ def _bar(code, pct, close=10.0, pre_close=None, amount=1000.0, date="2026-01-05"
             "pct_chg": pct, "amount": amount}
 
 
+class SnapshotConsistencyTests(unittest.TestCase):
+    """快照那一路必须和本地那路同一个口径：**只数个股**。
+
+    踩过的坑：快照是按 instruments 全表问的，里面带着 ETF 与指数。照单全收时，
+    2026-09-18 的"上涨家数"是 6242 家，而个股只有 4234 家——多出来的两千家里，
+    ETF 1556/1673 上涨、指数 471/507 上涨，于是 up_ratio 被系统性推高。
+    官方口径的涨跌家数从来只数股票。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(Path(self.tmp.name) / "t.db")
+        db.init_db(self.conn, PROJECT_ROOT / "schema.sql")
+        db.upsert_rows(self.conn, "instruments", [
+            {"code": "SH600000", "name": "浦发银行", "type": "stock"},
+            {"code": "SH510300", "name": "沪深300ETF", "type": "etf"},
+            {"code": "SH000300", "name": "沪深300", "type": "index"},
+        ], ["code"])
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_snapshot_counts_stocks_only(self):
+        snapshot = [_bar("SH600000", 1.0), _bar("SH510300", 2.0), _bar("SH000300", 1.5)]
+        record = breadth.from_snapshot(self.conn, snapshot, "2026-09-18", "tencent")
+        self.assertEqual(record["coverage"], 1)
+        self.assertEqual(record["up_count"], 1)
+        self.assertEqual(record["source"], "tencent")
+
+    def test_unknown_codes_are_treated_as_stocks(self):
+        """代码表里没有的（历史遗留、刚上市）按个股算，别把它们漏掉。"""
+        snapshot = [_bar("SH600000", 1.0), _bar("SZ301999", 3.0)]
+        record = breadth.from_snapshot(self.conn, snapshot, "2026-09-18", "tencent")
+        self.assertEqual(record["coverage"], 2)
+
+    def test_precise_limits_when_pre_close_is_available(self):
+        """前收齐全时用按板块判定的精确口径，和本地那路一致。"""
+        snapshot = [_bar("SH600000", 10.0, close=11.0, pre_close=10.0),
+                    _bar("SZ300001", 10.0, close=11.0, pre_close=10.0)]
+        db.upsert_rows(self.conn, "instruments",
+                       [{"code": "SZ300001", "name": "创业板票", "type": "stock"}], ["code"])
+        self.conn.commit()
+        record = breadth.from_snapshot(self.conn, snapshot, "2026-09-18", "tencent")
+        self.assertEqual(record["limit_up_count"], 1)      # 主板那只算，创业板 10% 不算
+
+    def test_coarse_limits_when_pre_close_is_missing(self):
+        snapshot = [_bar("SH600000", 10.0, close=11.0), _bar("SZ000001", 10.0, close=11.0)]
+        record = breadth.from_snapshot(self.conn, snapshot, "2026-09-18", "tencent")
+        self.assertEqual(record["limit_up_count"], 2)      # 退回粗略的 ±9.8%
+
+
 class SummarizeTests(unittest.TestCase):
     def test_counts_up_down_flat(self):
         rows = [_bar("SH600000", 1.0), _bar("SZ000001", -2.0), _bar("SZ300001", 0.0)]
