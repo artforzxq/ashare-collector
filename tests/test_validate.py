@@ -8,6 +8,7 @@ CFG = {
         "amount_tol": 0.03,
         "jump_pct_limit": 11.0,
         "volume_anomaly_ratio": 10.0,
+        "fill_fields": ["turnover_rate"],
         "critical_codes": ["SH000300"],
     }
 }
@@ -163,6 +164,50 @@ class JumpLimitByBoardTests(unittest.TestCase):
     def test_without_a_code_it_keeps_the_old_threshold(self):
         result = validate_bars(self._rows(20.0), CFG)
         self.assertTrue(result.blocked)          # 没给标的身份 → 退回 11%
+
+
+class FillFromBackupTests(unittest.TestCase):
+    """主源没有、备份源有的辅助字段要补上。
+
+    换手率只有 baostock 给（腾讯、新浪都不给），合并以主源为基准，
+    不补的话数据走腾讯的那些天换手率就是空的，基于它的因子会一格一格断档。
+    """
+
+    def _pair(self):
+        primary = [{"trade_date": "2026-09-18", "code": "SH600487", "open": 69.0, "high": 70.0,
+                    "low": 68.0, "close": 69.49, "pre_close": 68.5, "volume": 1000.0,
+                    "amount": 6.9e7, "pct_chg": 1.45, "turnover_rate": None}]
+        backup = [{"trade_date": "2026-09-18", "code": "SH600487", "open": 69.0, "high": 70.0,
+                   "low": 68.0, "close": 69.49, "pre_close": 68.5, "volume": 1000.0,
+                   "amount": 6.9e7, "pct_chg": 1.45, "turnover_rate": 9.22}]
+        return primary, backup
+
+    def test_turnover_is_filled_from_the_backup(self):
+        primary, backup = self._pair()
+        result = merge_two_sources(primary, backup, CFG)
+        self.assertEqual(result.rows[0]["turnover_rate"], 9.22)
+        self.assertTrue(any("补齐" in note for note in result.notes))
+
+    def test_primary_value_wins_when_it_has_one(self):
+        primary, backup = self._pair()
+        primary[0]["turnover_rate"] = 1.23
+        result = merge_two_sources(primary, backup, CFG)
+        self.assertEqual(result.rows[0]["turnover_rate"], 1.23)
+
+    def test_price_fields_are_never_mixed(self):
+        """白名单之外的字段一律不动：一段序列里混两个源的价格 = 两把尺子。"""
+        primary, backup = self._pair()
+        primary[0]["close"] = None            # 就算主源缺价格，也不许从备份源补
+        primary[0]["volume"] = None
+        result = merge_two_sources(primary, backup, CFG)
+        self.assertIsNone(result.rows[0]["close"])
+        self.assertIsNone(result.rows[0]["volume"])
+
+    def test_whitelist_can_be_narrowed_by_config(self):
+        primary, backup = self._pair()
+        cfg = {"validation": {"price_tol": 0.003, "amount_tol": 0.03, "fill_fields": []}}
+        result = merge_two_sources(primary, backup, cfg)
+        self.assertIsNone(result.rows[0]["turnover_rate"])
 
 
 if __name__ == "__main__":

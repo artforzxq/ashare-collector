@@ -72,6 +72,13 @@ def merge_two_sources(primary_rows: Sequence[dict], backup_rows: Sequence[dict],
     merged: list[dict] = []
     conflicts: list[dict] = []
     notes: list[str] = []
+    # 主源没有、备份源有的字段，可以按白名单补齐。
+    # 为什么需要这一步：换手率只有 baostock 给（腾讯、新浪都不给），而合并以主源为基准，
+    # 不补的话数据走腾讯的那些天换手率就是空的，基于它的因子会一格一格断档。
+    # 白名单只放"与复权基准无关"的比率类字段——价格、成交量这些绝不能混源，
+    # 一混就等于在一段序列里换了把尺子。
+    fill_fields = [str(name) for name in (cfg["validation"].get("fill_fields") or [])]
+    filled: dict[str, int] = {}
 
     for row in primary_rows:
         record = dict(row)
@@ -126,9 +133,17 @@ def merge_two_sources(primary_rows: Sequence[dict], backup_rows: Sequence[dict],
                         "amount_diff": round(amount_diff, 6),
                     }
                 )
+        if peer and fill_fields:
+            for field in fill_fields:
+                if record.get(field) is None and peer.get(field) is not None:
+                    record[field] = peer[field]
+                    filled[field] = filled.get(field, 0) + 1
         merged.append(record)
 
     primary_dates = {row["trade_date"] for row in primary_rows}
+    if filled:
+        detail = "、".join(f"{name} {count} 处" for name, count in sorted(filled.items()))
+        notes.append(f"备份源补齐：{detail}")
     for row in backup_rows:
         if row["trade_date"] in primary_dates:
             continue

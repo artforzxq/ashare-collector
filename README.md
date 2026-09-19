@@ -32,6 +32,11 @@
 这样嵌入式 Python、conda、系统自带的 python3 都能跑，不用先折腾环境。
 唯一必须装的是 PyYAML，数据源适配器可以之后再装（`5-安装真实数据源` 那一步）。
 
+数据源适配器（baostock / akshare）**两端行为一致**：装成功会在用户目录留一个
+`ashare-deps.txt` 标记（Windows 是 `%USERPROFILE%\ashare-deps.txt`，macOS 是 `~/ashare-deps.txt`），
+以后每次启动只要看到标记就不再重装；没标记就自动装一次——否则每个交易日的日志里都会刷
+"akshare 没装"。装失败会留 `partial` 标记，一周内不再重试，免得自动化任务每天白等一次 pip。
+
 然后按顺序双击：
 
 ```

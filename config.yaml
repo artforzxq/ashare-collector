@@ -68,6 +68,10 @@ validation:
   jump_pct_limit_unlimited: 300.0   # 不设涨跌幅的日子：只拦超过这个幅度的
   jump_pct_limit: 11.0        # 兜底值：拿不到标的身份时用（老口径）
   volume_anomaly_ratio: 10.0  # 成交额超过 20 日均值倍数只标记不阻断
+  # 主源没有、备份源有的字段：按白名单从备份源补齐。
+  # 换手率只有 baostock 给（腾讯、新浪都不给），不补的话数据走腾讯的那些天它就是空的。
+  # 只放"与复权基准无关"的比率字段——价格和成交量绝不能混源，一混就是一段序列两把尺子。
+  fill_fields: [turnover_rate]
   critical_codes: [SH000300]  # 缺失即冻结当日自动提醒
 
 state:

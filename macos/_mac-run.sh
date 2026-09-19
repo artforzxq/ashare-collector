@@ -15,6 +15,7 @@ cd "$HERE/.." || exit 1
 
 VENV="${ASHARE_VENV:-$HOME/ashare-env}"
 PYNOTE="$HOME/ashare-python.txt"
+DEPS="$HOME/ashare-deps.txt"
 PY="$VENV/bin/python"
 STEP="${1:-}"
 shift 2>/dev/null || true
@@ -23,6 +24,40 @@ pause() {
   [ "${ASHARE_NO_PAUSE:-}" = "1" ] && return 0
   printf "\n按回车键关闭窗口… "
   read -r _ || true
+}
+
+# 数据源适配器装没装过。Windows 端用同一个思路（%USERPROFILE%\ashare-deps.txt）：
+# 装成功才写标记，没标记就自动装一次——否则每次日终都在报"akshare 没装"。
+adapters_ready() {
+  [ -f "$DEPS" ] || return 1
+  head -n 1 "$DEPS" 2>/dev/null | grep -q '^ok' 2>/dev/null || return 1
+  return 0
+}
+
+install_adapters() {
+  echo "=== 安装数据源适配器（只做一次）==="
+  "$PY" -m pip --version >/dev/null 2>&1 || "$PY" -m ensurepip --default-pip >/dev/null 2>&1
+  if ! "$PY" -m pip install --quiet pyyaml; then
+    echo "  [!] PyYAML 装不上——它只在这台机器有依赖，核心链路就靠它。"
+    return 1
+  fi
+  if "$PY" -m pip install --quiet baostock akshare; then
+    echo ok > "$DEPS"
+    echo "  数据源已就绪（baostock + akshare）"
+    return 0
+  fi
+  # akshare 依赖的 jsonpath 只发布源码包，而那份包的 setup.py 会 import 自己，
+  # pip 的隔离构建里必然失败。仓库 tools/vendor 里放了一个只改打包脚本的 wheel。
+  echo "  [!] akshare 直装失败，改用仓库自带的 jsonpath wheel 重试 …"
+  if "$PY" -m pip install --quiet "tools/vendor/jsonpath-0.82.2-py3-none-any.whl" baostock akshare; then
+    echo ok > "$DEPS"
+    echo "  数据源已就绪（baostock + akshare）"
+    return 0
+  fi
+  echo "  [!] 可选数据源没装上，网络空的时候再跑一次「0-安装环境」。"
+  echo "      （不装也能跑，只是数据源自检会少两个；标记留成 partial，一周内不再重试）"
+  echo partial > "$DEPS"
+  return 0
 }
 
 setup_python() {
@@ -36,15 +71,26 @@ setup_python() {
   echo "用 $(python3 --version 2>&1) 创建环境：$VENV"
   python3 -m venv "$VENV" || { echo "创建环境失败。"; return 1; }
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
-  "$VENV/bin/python" -m pip install --quiet pyyaml baostock akshare || {
+  "$VENV/bin/python" -m pip install --quiet pyyaml || {
     echo "安装依赖失败，请检查网络后重试。"
     return 1
   }
+  PY="$VENV/bin/python"
+  install_adapters || true
   echo "环境就绪：$VENV"
 }
 
 ensure_python() {
   if [ -x "$PY" ] && "$PY" -c "import yaml" >/dev/null 2>&1; then
+    if ! adapters_ready; then
+      case "$(head -n 1 "$DEPS" 2>/dev/null)" in
+        partial)
+          # 上次只装上一部分：一周内不再打扰（免得每个交易日都白等一次 pip）
+          if [ -n "$(find "$DEPS" -mtime -7 2>/dev/null)" ]; then return 0; fi
+          ;;
+      esac
+      install_adapters || true
+    fi
     return 0
   fi
   # 记住上次选定的解释器（环境不在项目里，笔记也放用户目录）

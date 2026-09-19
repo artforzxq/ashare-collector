@@ -45,6 +45,7 @@ DEFAULTS: Dict[str, Any] = {
         "jump_tol_pct": 1.0,
         "jump_pct_limit_unlimited": 300.0,
         "volume_anomaly_ratio": 10.0,
+        "fill_fields": ["turnover_rate"],
         "critical_codes": [],
     },
     "state": {
