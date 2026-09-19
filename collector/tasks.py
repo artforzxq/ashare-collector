@@ -654,6 +654,11 @@ def _compute_features(
 
         db.upsert_rows(conn, "features_daily", payload, ["code", "trade_date"])
         db.upsert_rows(conn, "factor_contributions", contributions, ["trade_date", "code", "factor_id"])
+        # K 线形态只算当日这一根，但**要在这里算**：这一层手里有完整的日线序列，
+        # 关键位置判定（20 日区间、MA20/MA60）才能和页面画的一致。
+        # 挂到行上之后，风险层与提醒层直接读，不再各自去查一遍库（以前风险层
+        # 只取 30 根，MA60 那一段关键位置判定就悄悄失效了）。
+        series[-1]["candle"] = candles_mod.analyze(bars, len(bars) - 1)
         latest[code] = series[-1]
         _log(
             f"      - {code}: 状态 {series[-1]['state']}（持续 {series[-1]['state_days']} 日）"
@@ -685,17 +690,21 @@ def _apply_risk(conn, cfg: dict, trade_date: str, state_rows: dict[str, dict],
     """
     updated = 0
     for code, row in state_rows.items():
-        bars = [
-            dict(item)
-            for item in db.query(
-                conn,
-                """SELECT * FROM bars_daily WHERE code=? AND trade_date<=?
-                   AND COALESCE(quality_flag,'ok')!='blocked'
-                   ORDER BY trade_date DESC LIMIT 30""",
-                (code, trade_date),
-            )
-        ][::-1]
-        candle = candles_mod.analyze(bars, len(bars) - 1) if len(bars) >= 3 else {}
+        # 形态在特征层已经算好（那边有完整序列）；这里只在没有的时候兜底重算，
+        # 保证风险层、提醒层、页面对"今天这根 K 线"看到的是同一个结论。
+        candle = row.get("candle")
+        if candle is None:
+            bars = [
+                dict(item)
+                for item in db.query(
+                    conn,
+                    """SELECT * FROM bars_daily WHERE code=? AND trade_date<=?
+                       AND COALESCE(quality_flag,'ok')!='blocked'
+                       ORDER BY trade_date""",
+                    (code, trade_date),
+                )
+            ]
+            candle = candles_mod.analyze(bars, len(bars) - 1) if len(bars) >= 3 else {}
         result = risk_mod.assess(row, bands_by_code.get(code, []), cfg, candle)
         conn.execute(
             """UPDATE features_daily
