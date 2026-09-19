@@ -16,7 +16,9 @@ DEFAULTS: Dict[str, Any] = {
         "db_path": "data/market.db",
         "timezone": "Asia/Shanghai",
     },
-    "watchlist": {"indices": [], "etfs": [], "stocks": []},
+    # holdings 是**实际持仓**：只有列在这里的个股才算"持仓"，其余个股是"观察"。
+    # 区别在于出池提示——持仓的去留不该由形态决定，所以它们不提示移出。
+    "watchlist": {"indices": [], "etfs": [], "stocks": [], "holdings": []},
     # 标的池：筛选与回测共用。指数默认不进池子（理由见 collector/universe.py 头部）。
     "universe": {"min_avg_amount_60d": 30_000_000, "include_index": False},
     "sources": {
@@ -160,18 +162,27 @@ def use_fixture_sources(cfg: Dict[str, Any], end_date: str | None = None) -> Dic
 
 
 def watchlist_codes(cfg: Dict[str, Any]) -> list[dict]:
-    """展开观察池，返回 [{code, type, role}]，去重且保持配置顺序。"""
+    """展开观察池，返回 [{code, type, role}]，去重且保持配置顺序。
+
+    角色只有三种：基准（指数）/ 观察（ETF 与没持仓的个股）/ 持仓（`watchlist.holdings` 里列出的个股）。
+    分"观察"和"持仓"是为了出池提示：持仓的去留由仓位决定，不该被"最近没出现形态"赶走。
+    """
     items: list[dict] = []
     seen: set[str] = set()
+    held = {str(code).strip() for code in (cfg["watchlist"].get("holdings") or [])}
 
     def add(codes, kind, role):
         for code in codes or []:
             if code in seen:
                 continue
             seen.add(code)
-            items.append({"code": code, "type": kind, "role": role})
+            items.append({
+                "code": code,
+                "type": kind,
+                "role": "持仓" if (kind == "stock" and code in held) else role,
+            })
 
     add(cfg["watchlist"].get("indices"), "index", "基准")
     add(cfg["watchlist"].get("etfs"), "etf", "观察")
-    add(cfg["watchlist"].get("stocks"), "stock", "持仓")
+    add(cfg["watchlist"].get("stocks"), "stock", "观察")
     return items

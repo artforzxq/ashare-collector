@@ -89,6 +89,74 @@ class PoolApiTests(unittest.TestCase):
         payload = server.App(self.cfg).pool()
         self.assertEqual(payload["pooled_missing"], ["SH600000"])
 
+    # ---- 出池提示：只对"观察中的个股"、只提示不动作 ----
+
+    def _seed_bars(self, code: str, days: list[str], amount: float = 120_000_000.0):
+        db.upsert_rows(
+            self.conn,
+            "bars_daily",
+            [{"code": code, "trade_date": day, "close": 10.0, "amount": amount,
+              "quality_flag": "ok"} for day in days],
+            ["code", "trade_date"],
+        )
+
+    def test_miss_streak_counts_consecutive_screen_days(self):
+        # 三个筛选日：某只票只在最早那天出现过 → 连续未命中应该是 2（不是"总共缺席 2 次"这么巧，
+        # 这里换一只在中间出现过的票来区分：连续是 1，总共缺席也是 1）
+        for day in ("2026-09-15", "2026-09-16", "2026-09-17"):
+            db.upsert_rows(self.conn, "screen_results", [{
+                "trade_date": day, "criterion": "趋势", "rank_no": 1,
+                "code": "SH600487" if day == "2026-09-15" else "SZ000333",
+                "name": "示例", "close": 10.0, "pct_chg": 1.0, "state": "up",
+                "trend_score": 80.0, "vol_ratio": 1.0, "detail": "",
+            }], ["trade_date", "criterion", "code"])
+        self.cfg["watchlist"] = {"indices": [], "etfs": [], "stocks": ["SH600487", "SZ000333"]}
+        members = {item["code"]: item for item in server.App(self.cfg).pool()["members"]}
+        self.assertEqual(members["SH600487"]["miss_streak"], 2)      # 最新两天都没它
+        self.assertEqual(members["SZ000333"]["miss_streak"], 0)      # 最新一天有它
+
+    def test_holdings_are_exempt_from_the_exit_hint(self):
+        self._seed_screen()
+        self._seed_bars("SZ000333", ["2026-09-18"], amount=1_000_000.0)   # 成交额跌破门槛
+        self._seed_bars("SH600487", ["2026-09-18"], amount=1_000_000.0)
+        self.cfg["watchlist"] = {"indices": [], "etfs": [], "stocks": ["SZ000333", "SH600487"],
+                                 "holdings": ["SZ000333"]}
+        members = {item["code"]: item for item in server.App(self.cfg).pool()["members"]}
+        self.assertTrue(members["SZ000333"]["held"])
+        self.assertFalse(members["SZ000333"]["exit_hint"])           # 持仓豁免：理由照列，但不提示
+        self.assertTrue(members["SZ000333"]["exit_reasons"])
+        self.assertFalse(members["SH600487"]["held"])
+        self.assertTrue(members["SH600487"]["exit_hint"])
+        self.assertIn("成交额", "；".join(members["SH600487"]["exit_reasons"]))
+
+    def test_index_and_etf_never_get_the_hint(self):
+        self._seed_screen()
+        self._seed_bars("SH510500", ["2026-09-18"], amount=1_000_000.0)
+        self.cfg["watchlist"] = {"indices": [], "etfs": ["SH510500"], "stocks": []}
+        member = server.App(self.cfg).pool()["members"][0]
+        self.assertEqual(member["role"], "观察")
+        self.assertTrue(member["exit_reasons"])                       # 证据照算
+        self.assertFalse(member["exit_hint"])                         # 但 ETF 不参与轮换
+
+    def test_stale_screen_turns_every_hint_off(self):
+        """筛选两周没跑，尺子就没量准——这时候任何"该出池"都是假警报。"""
+        self._seed_screen()
+        late = ["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-28"]
+        self._seed_bars("SH600487", late, amount=1_000_000.0)
+        self.cfg["watchlist"] = {"indices": [], "etfs": [], "stocks": ["SH600487"]}
+        payload = server.App(self.cfg).pool()
+        self.assertTrue(payload["screen_stale"])
+        self.assertEqual(payload["screen_gap_days"], 6)
+        self.assertFalse(payload["members"][0]["exit_hint"])
+
+    def test_fresh_screen_keeps_the_hint_on(self):
+        self._seed_screen()
+        self._seed_bars("SH600487", ["2026-09-18"], amount=1_000_000.0)
+        self.cfg["watchlist"] = {"indices": [], "etfs": [], "stocks": ["SH600487"]}
+        payload = server.App(self.cfg).pool()
+        self.assertFalse(payload["screen_stale"])
+        self.assertTrue(payload["members"][0]["exit_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()

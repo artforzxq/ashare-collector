@@ -81,7 +81,11 @@ class CandidateBuildTests(unittest.TestCase):
         self.assertTrue(self.result["ok"])
         codes = [item["code"] for item in self.result["candidates"]]
         self.assertNotIn("SZ000333", codes)
-        self.assertEqual([item["code"] for item in self.result["members"]], ["SZ000333"])
+        # 池内的票**全部**列出来（不只是这次窗口里出现过的）：
+        # "最近没出现"本身就是出池要看的第一条证据，不能因为它没出现就从表里消失。
+        members = {item["code"]: item for item in self.result["members"]}
+        self.assertIn("SZ000333", members)
+        self.assertGreater(members["SZ000333"]["hits"], 0)
 
     def test_single_hit_is_not_a_candidate(self):
         """只被命中一次的是噪声，不该进候选名单。"""

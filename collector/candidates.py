@@ -30,6 +30,9 @@ DEFAULTS = {
     "days": 20,        # 回看多少个筛选日
     "top": 20,         # 打印多少条候选
     "min_hits": 2,     # 至少被命中几次才算候选（1 次是噪声）
+    "exit_streak": 5,  # 连续这么多个筛选日没出现 → 提示"考虑移出"
+    "exit_stale_days": 5,  # 筛选结果比最新交易日旧这么多交易日 → 整个出池提示作废
+    "risk_top": 60,    # 只给排在前面的这些候选现算风险层（算一次要跑一遍特征+关键带）
 }
 
 
@@ -171,40 +174,155 @@ def _sort_key(item: dict) -> tuple:
     )
 
 
+def _cheap_sort_key(item: dict) -> tuple:
+    """只按"不用现算"的证据排：流动性、反复程度、成交额。先拿它挑出要细看的那一批。"""
+    return (
+        0 if item["liquid"] else 1,
+        -item["days"],
+        -len(item["criteria"]),
+        -item["hits"],
+        -(item["avg_amount_60d"] or 0.0),
+        item["code"],
+    )
+
+
+def _leading_misses(all_days: list[str], seen: set[str]) -> int:
+    """从最新筛选日往回数，连续多少个筛选日没出现。
+
+    all_days 已经是倒序；遇到第一次出现就停——"连续"是重点，不是"总共缺席了几次"。
+    """
+    streak = 0
+    for day in all_days:
+        if day in seen:
+            break
+        streak += 1
+    return streak
+
+
 def build(conn, cfg: dict, days: int | None = None, min_hits: int | None = None) -> dict:
     params = _params(cfg)
     days = int(params["days"] if days is None else days)
     min_hits = int(params["min_hits"] if min_hits is None else min_hits)
+    exit_streak = int(params["exit_streak"])
+    exit_stale_days = int(params["exit_stale_days"])
+    risk_top = int(params["risk_top"])
 
     latest = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM screen_results")
     latest_date = latest["d"] if latest else None
     if not latest_date:
         return {"ok": False, "message": "还没有筛选结果，先跑一次：python run.py screen"}
 
-    dates = [row["trade_date"] for row in db.query(
-        conn, "SELECT DISTINCT trade_date FROM screen_results ORDER BY trade_date DESC LIMIT ?", (days,))]
+    all_days = [
+        row["trade_date"]
+        for row in db.query(conn, "SELECT DISTINCT trade_date FROM screen_results ORDER BY trade_date DESC")
+    ]
+    dates = all_days[:days]
     pooled = {item["code"]: item for item in watchlist_codes(cfg)}
     grouped = _aggregate(conn, dates)
+    # 池内的票即使这个窗口里一次都没出现，也要有一行——
+    # "最近没出现"正是出池要看的第一条证据，不能因为它没出现就从表里消失。
+    for code in pooled:
+        grouped.setdefault(code, {
+            "code": code, "name": None, "hits": 0, "dates": set(), "criteria": set(),
+            "outcomes": [], "best_rank": None, "latest": None,
+        })
     threshold = universe.min_avg_amount(cfg)
+
+    # 连续未命中用**全部**筛选日算，不用回看窗口：窗口只有 20 天的话，
+    # 20 天前就没影的票会一律顶格，分不出"刚凉"和"凉很久"。
+    appeared: dict[str, set[str]] = {code: set() for code in pooled}
+    for row in db.query(conn, "SELECT DISTINCT code, trade_date FROM screen_results"):
+        if row["code"] in appeared:
+            appeared[row["code"]].add(row["trade_date"])
+
+    # 筛选结果本身够不够新：拿"筛选日之后又过了几个交易日"算，周末和节假日不算数。
+    # 尺子没量准的时候（比如两周没跑筛选），任何"该出池"的提示都是假警报。
+    latest_trade = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM bars_daily")
+    latest_trade = latest_trade["d"] if latest_trade else None
+    gap_days = 0
+    if latest_trade and latest_trade > latest_date:
+        row = db.query_one(
+            conn,
+            "SELECT COUNT(DISTINCT trade_date) AS n FROM bars_daily WHERE trade_date > ? AND trade_date <= ?",
+            (latest_date, latest_trade),
+        )
+        gap_days = int(row["n"] or 0)
+    screen_stale = gap_days > exit_stale_days
 
     items: list[dict] = []
     for item in grouped.values():
+        if not item.get("name"):
+            row = db.query_one(conn, "SELECT name FROM instruments WHERE code=?", (item["code"],))
+            item["name"] = (row["name"] if row and row["name"] else item["code"])
         item["days"] = len(item["dates"])
         item["criteria"] = sorted(item["criteria"])
         item["avg_amount_60d"] = universe.avg_amount(conn, item["code"])
         item["excess_20d"] = (sum(item["outcomes"]) / len(item["outcomes"])) if item["outcomes"] else None
         item["outcome_n"] = len(item["outcomes"])
-        item.update(_risk_snapshot(conn, cfg, item["code"], latest_date))
         item["liquid"] = (threshold <= 0 or item["avg_amount_60d"] is None
                           or item["avg_amount_60d"] >= threshold)
         item["threshold"] = threshold
+        item["cap"] = None
+        item["stop_pct"] = None
+        item["risk_reward"] = None
+        item["risk_reason"] = ""
+        item["state"] = (item.get("latest") or {}).get("state")
+        item["atr_pct"] = None
+        item["risk_computed"] = False
+        item["role"] = None
+        item["type"] = None
+        item["held"] = False
         items.append(item)
+
+    # 风险层要现场算（池外的票没有日终结果），一只约 60ms；全市场跑满后候选能有几百只，
+    # 全算一遍会让页面卡几十秒。所以先按便宜的证据排序，只给前 risk_top 只细算，
+    # 其余留空并标明"未计算"。池内的票没几只，一律算全。
+    cheap_sorted = sorted((item for item in items if item["code"] not in pooled), key=_cheap_sort_key)
+    for item in cheap_sorted[:risk_top]:
+        item.update(_risk_snapshot(conn, cfg, item["code"], latest_date))
+        item["risk_computed"] = True
+    for item in items:
+        if item["code"] in pooled:
+            item.update(_risk_snapshot(conn, cfg, item["code"], latest_date))
+            item["risk_computed"] = True
+
+    for item in items:
+        # 出池证据：只在池内的票上算，且只提示不动作。
+        unique = item["code"] in pooled
+        item["miss_streak"] = _leading_misses(all_days, appeared.get(item["code"], set())) if unique else None
+        item["amount_breach"] = bool(
+            threshold > 0 and item["avg_amount_60d"] is not None and item["avg_amount_60d"] < threshold
+        )
+        item["cap_zero"] = item.get("cap") == 0
+        reasons: list[str] = []
+        if unique and item["miss_streak"] >= exit_streak:
+            reasons.append(f"连续 {item['miss_streak']} 个筛选日没有出现")
+        if unique and item["amount_breach"]:
+            reasons.append("近 60 日均成交额已跌破门槛")
+        # cap_zero 只显示、不作出池理由：风险层给 0 仓说的是"今天别加仓"，
+        # 不是"这只票不该再跟踪"。实测里一只上升趋势的票当天也会是 0 仓。
+        item["exit_reasons"] = reasons
+        item["exit_hint"] = False          # 下面按角色与新鲜度逐个判定
+
+    role_by_code = {code: meta["role"] for code, meta in pooled.items()}
+    for item in items:
+        if item["code"] not in role_by_code:
+            continue
+        item["role"] = role_by_code[item["code"]]
+        item["type"] = pooled[item["code"]]["type"]
+        item["held"] = item["role"] == "持仓"
+        # 四条都满足才提示：有硬证据、是个股、不是持仓、筛选结果够新。
+        item["exit_hint"] = bool(
+            item["exit_reasons"]
+            and item["type"] == "stock"        # 基准指数与 ETF 按定义固定配置，不参与轮换
+            and not item["held"]               # 持仓的去留由仓位决定，不由形态决定
+            and not screen_stale
+        )
 
     candidates = [item for item in items if item["code"] not in pooled and item["hits"] >= min_hits]
     candidates.sort(key=_sort_key)
 
-    members = [{**item, "type": pooled[item["code"]]["type"], "role": pooled[item["code"]]["role"]}
-               for item in items if item["code"] in pooled]
+    members = [item for item in items if item["code"] in pooled]
     order = {code: index for index, code in enumerate(pooled)}
     members.sort(key=lambda item: order.get(item["code"], 999))
 
@@ -217,7 +335,14 @@ def build(conn, cfg: dict, days: int | None = None, min_hits: int | None = None)
         "threshold": threshold,
         "candidates": candidates,
         "members": members,
-        "pooled_missing": [code for code in pooled if code not in grouped],
+        "pooled_missing": [code for code in pooled if not grouped[code]["hits"]],
+        # 出池口径与闸门也回传，页面照着显示，不自己编
+        "exit_streak": exit_streak,
+        "exit_stale_days": exit_stale_days,
+        "screen_stale": screen_stale,
+        "screen_gap_days": gap_days,
+        "screen_days_total": len(all_days),
+        "risk_top": risk_top,
     }
 
 

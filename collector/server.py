@@ -28,6 +28,9 @@ from .sources import build_source
 from .sources.base import exchange_of
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+# 筛选池要现算风险层（池外的票没有日终结果），一次接近 1 秒；切标签页时没必要重算。
+# 20 秒的缓存 + 任务启动时作废，足够让手动刷新拿到新数据。
+POOL_CACHE_SECONDS = 20
 INDEX_FILE = WEB_DIR / "index.html"
 
 # 进程启动时间：用来判断"页面比代码新"（改了后端没重启服务）
@@ -173,12 +176,14 @@ def _freshness_payload(cfg: dict) -> dict:
 
 class App:
     QUOTE_TTL = 20.0        # 报价缓存秒数：防止多个标签页把免费源刷爆
+    POOL_TTL = 20.0         # 筛选池缓存秒数：它要现算风险层，切标签页不该重算
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lock = threading.Lock()
         self.jobs = jobs_mod.JobManager()
         self._quote_cache: dict = {}
+        self._pool_cache: tuple[float, dict] | None = None
 
     def quotes(self, codes: list | None = None) -> dict:
         """批量实时报价。只给盯盘用：不落库、不参与任何结论、失败也不影响别的。
@@ -347,7 +352,7 @@ class App:
 
     # ---- 页面上的任务按钮 ----
 
-    def pool(self) -> dict:
+    def pool(self, force: bool = False) -> dict:
         """筛选池：三段拼起来，回答"我现在该看什么"。
 
         ① 口径：回看几个筛选日、至少命中几次、成交额门槛、上次扫描扫了多少只；
@@ -357,6 +362,10 @@ class App:
         这里不做任何新计算——都是把已有的结果凑到一处，页面不发明口径。
         """
         from . import candidates as candidates_mod, screen as screen_mod, universe as universe_mod
+
+        now = time.time()
+        if not force and self._pool_cache and now - self._pool_cache[0] < self.POOL_TTL:
+            return self._pool_cache[1]
 
         conn = db.connect(self.cfg["_db_path"])
         try:
@@ -372,6 +381,7 @@ class App:
             )
             payload["min_avg_amount"] = universe_mod.min_avg_amount(self.cfg)
             payload["outcomes"] = screen_mod.outcome_stats(conn)
+            self._pool_cache = (now, payload)
             return payload
         except Exception as exc:            # 页面永远不该白屏
             return {"ok": False, "message": f"筛选池读不出来：{type(exc).__name__} {exc}"}
@@ -387,6 +397,7 @@ class App:
         `code` / `scope` 只有 AI 分析用得到：单只看 code，台账与回测看 scope。
         """
         cfg = self.cfg
+        self._pool_cache = None      # 任务一开跑就作废缓存，跑完刷新能看到新数据
 
         def daily():
             conn = db.connect(cfg["_db_path"])

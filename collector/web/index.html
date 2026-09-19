@@ -22,6 +22,36 @@
     --shadow:0 10px 30px rgba(15,23,42,.10),0 2px 6px rgba(15,23,42,.05);
     --shadow-pop:0 18px 44px rgba(15,23,42,.16),0 4px 10px rgba(15,23,42,.06);
     --topbar-h:58px;
+    /* 图表用色也在主题里：canvas 读这些变量，切主题时重画一次就行 */
+    --chart-grid:#eceef3; --chart-axis:#9aa3b2;
+    --ma20:#f2a13b; --ma60:#3b82f6; --ma120:#8b5cf6;
+    --band-support:rgba(59,130,246,.10); --band-support-edge:rgba(59,130,246,.45);
+    --band-resistance:rgba(226,69,60,.10); --band-resistance-edge:rgba(226,69,60,.45);
+    --chart-bg:#fff;
+    /* 语义色：悬停面、进度条底、涨跌底色、正常状态 */
+    --hover:#f4f6fa; --track:#eef1f6; --neutral-soft:#f2f3f5;
+    --up-soft:rgba(217,43,43,.10); --down-soft:rgba(15,159,116,.12);
+    --ok:#0b7a55; --ok-soft:#ecfdf5; --ok-line:#bbf0dc;
+  }
+  /* 深色主题：A 股红涨绿跌的口径不变，只把明度提上来（深底上原色太闷） */
+  :root[data-theme="dark"]{
+    --bg:#0e1117; --card:#161b23; --card-2:#12161d;
+    --line:#242b36; --line-soft:#1d232c;
+    --text:#e6eaf0; --text-2:#b6bfcc; --muted:#8b95a5; --faint:#5f6a79;
+    --up:#ff5f5f; --down:#2fbf71;
+    --accent:#3b82f6; --accent-ink:#7bb0ff; --accent-soft:rgba(59,130,246,.16); --accent-line:rgba(59,130,246,.38);
+    --warn:#e0a458; --warn-soft:rgba(224,164,88,.14); --warn-line:rgba(224,164,88,.35);
+    --p2:#7a8391;
+    --shadow:0 12px 32px rgba(0,0,0,.45),0 2px 8px rgba(0,0,0,.30);
+    --shadow-pop:0 20px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);
+    --chart-grid:#232a35; --chart-axis:#6b7684;
+    --ma20:#f0b03c; --ma60:#5b9cf8; --ma120:#a78bfa;
+    --band-support:rgba(91,156,248,.14); --band-support-edge:rgba(91,156,248,.50);
+    --band-resistance:rgba(255,95,95,.13); --band-resistance-edge:rgba(255,95,95,.50);
+    --chart-bg:#161b23;
+    --hover:#1c222b; --track:#232a35; --neutral-soft:#1d232c;
+    --up-soft:rgba(255,95,95,.14); --down-soft:rgba(47,191,113,.14);
+    --ok:#2fbf71; --ok-soft:rgba(47,191,113,.14); --ok-line:rgba(47,191,113,.35);
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
@@ -53,9 +83,13 @@
   .tabs button{border:0;background:transparent;padding:5px 14px;border-radius:var(--r-sm);font-size:12.5px;
                color:var(--muted);cursor:pointer;font-family:inherit;white-space:nowrap;
                transition:background .16s ease,color .16s ease}
-  .tabs button:hover{color:var(--text);background:#f2f5fa}
+  .tabs button:hover{color:var(--text);background:var(--hover)}
   .tabs button.on{background:var(--card);color:var(--accent-ink);font-weight:600;
                   box-shadow:0 1px 2px rgba(15,23,42,.08),inset 0 0 0 1px var(--accent-line)}
+  .theme-toggle{flex:0 0 auto;background:var(--card);border:1px solid var(--line);color:var(--muted);
+                padding:4px 10px;border-radius:var(--r-md);font-size:11.5px;cursor:pointer;font-family:inherit;
+                transition:background .16s ease,color .16s ease,border-color .16s ease}
+  .theme-toggle:hover{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent-line)}
 
   /* ============ 左栏（自选清单） ============ */
   .sidebar{background:var(--card-2);border-right:1px solid var(--line);padding:14px 12px;
@@ -72,13 +106,13 @@
   .results{border:1px solid var(--line);border-radius:var(--r-md);max-height:212px;overflow:auto;display:none}
   .results.on{display:block}
   .results div{padding:7px 9px;cursor:pointer;font-size:13px;display:flex;justify-content:space-between;gap:8px}
-  .results div:hover{background:#f2f5fb}
+  .results div:hover{background:var(--hover)}
   .results div span{color:var(--muted);font-size:12px}
   .watchlist{display:flex;flex-direction:column;gap:2px;overflow:auto}
   .wl-item{position:relative;padding:8px 9px;border-radius:8px;cursor:pointer;
            display:grid;grid-template-columns:1fr auto;gap:2px 6px;align-items:center;
            transition:background .15s ease}
-  .wl-item:hover{background:#f2f5fa}
+  .wl-item:hover{background:var(--hover)}
   .wl-item.on{background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-line)}
   .wl-item .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .wl-item .cd{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
@@ -89,10 +123,10 @@
   .wl-item:hover .del{display:block}
   .side-foot{margin-top:auto;border-top:1px solid var(--line);padding-top:10px;color:var(--muted);font-size:12px}
   .side-foot b{color:var(--text);font-weight:600}
-  .st-up{background:#fdecea;color:var(--up)}
-  .st-down{background:#e7f6ee;color:var(--down)}
-  .st-range{background:#eef0f4;color:var(--muted)}
-  .st-none{background:#f2f3f5;color:var(--faint)}
+  .st-up{background:var(--up-soft);color:var(--up)}
+  .st-down{background:var(--down-soft);color:var(--down)}
+  .st-range{background:var(--track);color:var(--muted)}
+  .st-none{background:var(--neutral-soft);color:var(--faint)}
 
   /* ============ 卡片与面板 ============ */
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg)}
@@ -119,7 +153,7 @@
           border-radius:6px;cursor:help;transition:background .16s ease}
   .metric:first-child{padding-left:2px}
   .metric:last-child{border-right:0}
-  .metric:hover{background:#f5f8fe}
+  .metric:hover{background:var(--hover)}
   .metric span{color:var(--muted);font-size:12px}
   .metric b{font-size:14.5px;font-weight:600;font-variant-numeric:tabular-nums}
 
@@ -129,8 +163,8 @@
   .seg{display:flex;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--card)}
   .seg button{border:0;background:transparent;padding:6px 12px;font-size:12px;color:var(--muted);
               cursor:pointer;font-family:inherit;transition:background .16s ease,color .16s ease}
-  .seg button:hover{background:#f7f9fd;color:var(--text)}
-  .seg button.on{background:#eef3fe;color:var(--accent);font-weight:600}
+  .seg button:hover{background:var(--hover);color:var(--text)}
+  .seg button.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
   .toggle{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
   .toggle input{accent-color:var(--accent)}
   .ghost{background:var(--card);border:1px solid var(--line);color:var(--muted);padding:6px 13px;
@@ -144,26 +178,33 @@
   .chart-wrap{position:relative;padding:6px 4px 0}
 canvas{display:block;width:100%}
 .chart-tabs{display:flex;gap:6px;padding:8px 10px 0}
-.chart-tabs button{border:1px solid #d7dbe3;background:#fff;border-radius:6px;padding:3px 12px;
+.chart-tabs button{border:1px solid var(--line);background:var(--card);border-radius:6px;padding:3px 12px;
   font-size:12px;color:#6b7280;cursor:pointer}
 .chart-tabs button.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink)}
 /* ---------- 数据状态条 + 板块 ---------- */
 .freshness{display:flex;flex-wrap:nowrap;gap:12px;align-items:center;font-size:11.5px;color:var(--muted);
-  overflow-x:auto;min-width:0;scrollbar-width:none}
-.freshness::-webkit-scrollbar{height:0}
+  overflow-x:auto;overflow-y:hidden;min-width:0;
+  scrollbar-width:thin;scrollbar-color:var(--line) transparent;
+  /* 两侧淡出：告诉人"这里能横向滚"，而不是看起来被裁掉了 */
+  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 16px),transparent 100%);
+  mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 16px),transparent 100%)}
+.freshness::-webkit-scrollbar{height:5px}
+.freshness::-webkit-scrollbar-track{background:transparent}
+.freshness::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+.freshness:hover::-webkit-scrollbar-thumb{background:var(--faint)}
 .freshness .fresh-items{display:flex;gap:14px;align-items:center;flex-wrap:nowrap}
 .freshness .fi{display:flex;gap:5px;align-items:center;white-space:nowrap}
 .freshness b{color:var(--text);font-weight:600}
 .badge{border-radius:var(--r-xs);padding:1px 6px;font-size:10.5px;border:1px solid transparent;
   letter-spacing:.02em;white-space:nowrap}
-.badge.live{background:#ecfdf5;color:#0b7a55;border-color:#bbf0dc}
+.badge.live{background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line)}
 .badge.today{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent-line)}
 .badge.stale{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
 .primary-chip{display:inline-block;border-radius:var(--r-xs);padding:0 5px;font-size:10px;
   background:var(--accent-soft);color:var(--accent-ink);border:1px solid var(--accent-line);vertical-align:1px}
 .block-head{display:flex;align-items:center;gap:8px;margin:18px 2px 6px;font-size:13px;color:var(--muted)}
 .block-head h2{margin:0;font-size:13px;font-weight:600;color:var(--text);letter-spacing:.02em}
-.block-head .line{flex:1;height:1px;background:var(--line, #e6e8ee)}
+.block-head .line{flex:1;height:1px;background:var(--line)}
 .quotebar{display:flex;flex-wrap:wrap;gap:16px;align-items:baseline;padding:10px 12px}
 .quotebar .px{font-size:22px;font-weight:600}
 .quotebar .chg{font-size:14px}
@@ -171,7 +212,7 @@ canvas{display:block;width:100%}
 .quotebar .spacer{flex:1}
 .quotebar .up{color:#e2453c}
 .quotebar .down{color:#12a05c}
-  .tip{position:absolute;pointer-events:none;background:rgba(31,36,48,.94);color:#fff;font-size:12px;
+  .tip{position:absolute;pointer-events:none;background:rgba(15,23,42,.94);color:#fff;font-size:12px;
        padding:7px 9px;border-radius:var(--r-sm);line-height:1.6;white-space:nowrap;display:none;z-index:5;
        font-variant-numeric:tabular-nums}
   .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px;padding:6px 10px 8px}
@@ -182,7 +223,7 @@ canvas{display:block;width:100%}
   th{text-align:left;color:var(--muted);font-weight:500;padding:3px 6px 6px 0;white-space:nowrap}
   td{padding:5px 6px 5px 0;border-top:1px solid var(--line-soft);font-variant-numeric:tabular-nums}
   td.num{text-align:right}
-  .bar{height:6px;border-radius:3px;background:#eef0f4;position:relative;min-width:52px}
+  .bar{height:6px;border-radius:3px;background:var(--track);position:relative;min-width:52px}
   .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--accent)}
   .help-table td:first-child{font-weight:600;white-space:nowrap;vertical-align:top}
   .help-table td{vertical-align:top;line-height:1.75}
@@ -199,13 +240,13 @@ canvas{display:block;width:100%}
 
   /* ============ 全市场 ============ */
   .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(108px,1fr));gap:10px;margin-bottom:14px}
-  .stat{background:#fafbfd;border:1px solid var(--line);border-radius:var(--r-md);padding:10px 12px}
+  .stat{background:var(--card-2);border:1px solid var(--line);border-radius:var(--r-md);padding:10px 12px}
   .stat span{display:block;color:var(--muted);font-size:11.5px;margin-bottom:3px}
   .stat b{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums}
   .dist{display:flex;flex-direction:column;gap:5px}
   .distrow{display:grid;grid-template-columns:74px 1fr 54px;align-items:center;gap:10px;
            font-size:12px;color:var(--muted)}
-  .distbar{height:9px;border-radius:5px;background:#eef0f4;overflow:hidden}
+  .distbar{height:9px;border-radius:5px;background:var(--track);overflow:hidden}
   .distbar i{display:block;height:100%;border-radius:5px}
   .distrow b{text-align:right;font-variant-numeric:tabular-nums;color:var(--text)}
   .hint,.screen-hint{color:var(--muted);font-size:12px;line-height:1.8}
@@ -214,7 +255,7 @@ canvas{display:block;width:100%}
 
   /* ============ 任务 ============ */
   .jobbtns{margin-left:auto;display:flex;gap:8px}
-  .joblog{margin:10px 0 0;max-height:210px;overflow:auto;background:#fafbfd;border:1px solid var(--line);
+  .joblog{margin:10px 0 0;max-height:210px;overflow:auto;background:var(--card-2);border:1px solid var(--line);
           border-radius:var(--r-md);padding:10px 12px;font-size:11.5px;line-height:1.75;color:var(--text-2);
           font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;margin-bottom:0}
   .jobdot{display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--accent);
@@ -223,14 +264,14 @@ canvas{display:block;width:100%}
 
   /* ============ 标记与状态 ============ */
   .lv{padding:1px 6px;border-radius:99px;font-size:11px;font-weight:600}
-  .lv-P0{background:#fdecea;color:var(--up)}
-  .lv-P1{background:#fff3e0;color:#b26a00}
-  .lv-P2{background:#eef0f4;color:var(--p2)}
+  .lv-P0{background:var(--up-soft);color:var(--up)}
+  .lv-P1{background:var(--warn-soft);color:var(--warn)}
+  .lv-P2{background:var(--track);color:var(--p2)}
   .empty{color:var(--faint);font-size:12.5px;padding:6px 0}
   .empty-state{padding:26px 10px;text-align:center;color:var(--muted);font-size:13px;line-height:1.9}
   .empty-state b{display:block;color:var(--text);font-size:14px;font-weight:600;margin-bottom:2px}
   .skel{height:12px;border-radius:6px;margin:9px 0;
-        background:linear-gradient(90deg,#eef0f4 25%,#f7f8fb 37%,#eef0f4 63%);
+        background:linear-gradient(90deg,var(--track) 25%,var(--card) 37%,var(--track) 63%);
         background-size:400% 100%;animation:sk 1.4s ease infinite}
   @keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
 
@@ -260,13 +301,13 @@ canvas{display:block;width:100%}
           font-weight:500;font-size:11.5px;letter-spacing:.03em;padding:8px 10px;white-space:nowrap;
           border-bottom:1px solid var(--line)}
   .tbl td{padding:7px 10px;border-top:1px solid var(--line-soft);vertical-align:top}
-  .tbl tr:hover td{background:#f8fafc}
+  .tbl tr:hover td{background:var(--hover)}
   .tbl tr.on td{background:var(--accent-soft)}
   .tbl td.num,.tbl th.num{text-align:right}
   .tbl .name{font-weight:600}
   .tbl .sub{color:var(--muted);font-size:11.5px}
   .tag{display:inline-block;padding:1px 6px;border-radius:var(--r-xs);font-size:10.5px;
-       background:#f1f5f9;color:var(--muted);white-space:nowrap}
+       background:var(--track);color:var(--muted);white-space:nowrap}
 
   /* AI 分析正文：读起来像一段引用，而不是又一个"结论" */
   .ai-answer{font-size:13px;line-height:1.95;color:var(--text-2);margin:2px 0 10px;
@@ -274,7 +315,7 @@ canvas{display:block;width:100%}
   .tag.active{background:var(--accent-soft);color:var(--accent-ink)}
   .tag.shadow{background:var(--warn-soft);color:var(--warn)}
   .pos{color:var(--up)} .neg{color:var(--down)}
-  .prog{height:5px;border-radius:3px;background:#eef1f6;overflow:hidden;min-width:52px;margin-top:4px}
+  .prog{height:5px;border-radius:3px;background:var(--track);overflow:hidden;min-width:52px;margin-top:4px}
   .prog i{display:block;height:100%;background:var(--accent);border-radius:3px}
   .prog i.warn{background:var(--warn)}
 
@@ -305,6 +346,7 @@ canvas{display:block;width:100%}
       <button data-view="backtest">参数回测</button>
       <button data-view="pool">筛选池</button>
     </nav>
+    <button class="theme-toggle" id="themeBtn" type="button" title="切换深浅色">深色</button>
   </header>
 
   <aside class="sidebar">
@@ -383,13 +425,13 @@ canvas{display:block;width:100%}
         <canvas id="chart"></canvas>
         <div class="tip" id="tip"></div>
         <div class="legend">
-          <span><i style="background:#f2a13b"></i>MA20</span>
-          <span><i style="background:#3b82f6"></i>MA60</span>
-          <span><i style="background:#8b5cf6"></i>MA120</span>
-          <span><i style="background:rgba(59,130,246,.55)"></i>支撑带</span>
-          <span><i style="background:rgba(226,69,60,.55)"></i>阻力带</span>
-          <span><i style="background:#e2453c;border-radius:99px;width:8px;height:8px"></i>P0</span>
-          <span><i style="background:#f0a020;border-radius:99px;width:8px;height:8px"></i>P1</span>
+          <span><i style="background:var(--ma20)"></i>MA20</span>
+          <span><i style="background:var(--ma60)"></i>MA60</span>
+          <span><i style="background:var(--ma120)"></i>MA120</span>
+          <span><i style="background:var(--band-support-edge)"></i>支撑带</span>
+          <span><i style="background:var(--band-resistance-edge)"></i>阻力带</span>
+          <span><i style="background:var(--up);border-radius:99px;width:8px;height:8px"></i>P0</span>
+          <span><i style="background:var(--warn);border-radius:99px;width:8px;height:8px"></i>P1</span>
         </div>
       </div>
 
@@ -524,6 +566,7 @@ canvas{display:block;width:100%}
       <div class="block-head"><h2>③ 池内现状</h2><span class="line"></span><span class="kv">观察池里的票最近还有没有出现</span></div>
       <div class="card panel">
         <h3>观察池 <span id="poolMemberNote"></span></h3>
+        <div class="hint" id="poolExitHint"></div>
         <div id="poolMembers"></div>
       </div>
 
@@ -540,13 +583,37 @@ canvas{display:block;width:100%}
 <div class="pop" id="pop"></div>
 
 <script>
-const C = {
+/* 图表配色从 CSS 变量读，切主题时整体换一遍并重画——
+   否则深色主题下会留下一张白底的旧图，看着像贴上去的。 */
+let C = {
   grid:'#eceef3', axis:'#9aa3b2', text:'#6b7280',
   up:'#e2453c', down:'#12a05c',
   ma20:'#f2a13b', ma60:'#3b82f6', ma120:'#8b5cf6',
   support:'rgba(59,130,246,.10)', supportEdge:'rgba(59,130,246,.45)',
   resistance:'rgba(226,69,60,.10)', resistanceEdge:'rgba(226,69,60,.45)'
 };
+
+function readChartColors(){
+  const css = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (css.getPropertyValue(name) || '').trim() || fallback;
+  C = {
+    grid: v('--chart-grid', C.grid), axis: v('--chart-axis', C.axis),
+    text: v('--muted', C.text), up: v('--up', C.up), down: v('--down', C.down),
+    ma20: v('--ma20', C.ma20), ma60: v('--ma60', C.ma60), ma120: v('--ma120', C.ma120),
+    support: v('--band-support', C.support), supportEdge: v('--band-support-edge', C.supportEdge),
+    resistance: v('--band-resistance', C.resistance), resistanceEdge: v('--band-resistance-edge', C.resistanceEdge),
+  };
+}
+
+const THEME_KEY = 'ashare:theme';
+function applyTheme(mode){
+  const next = mode === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try{ localStorage.setItem(THEME_KEY, next); }catch(e){}
+  if ($('themeBtn')) $('themeBtn').textContent = next === 'dark' ? '浅色' : '深色';
+  readChartColors();
+  if (state.data) draw();
+}
 const STATE_NAME = {up:'上升趋势', range:'震荡', down:'下跌趋势'};
 const state = {items:[], code:null, days:250, data:null, hover:null, chart:'kline', intraday:null,
                freshness:null, quotes:null};
@@ -1057,7 +1124,7 @@ function draw(){
     ctx.stroke();
     const yo = yOf(b.open), yc = yOf(b.close);
     const top = Math.min(yo,yc), h = Math.max(1, Math.abs(yc-yo));
-    if (up) { ctx.fillStyle = '#fff'; ctx.fillRect(x-bodyW/2, top, bodyW, h); ctx.strokeRect(x-bodyW/2, top, bodyW, h); }
+    if (up) { ctx.fillStyle = C.upHollow; ctx.fillRect(x-bodyW/2, top, bodyW, h); ctx.strokeRect(x-bodyW/2, top, bodyW, h); }
     else ctx.fillRect(x-bodyW/2, top, bodyW, h);
   });
 
@@ -1605,16 +1672,33 @@ function renderPool(){
   // ③ 池内现状
   const members = d.members || [];
   $('poolMemberNote').textContent = members.length ? `共 ${members.length} 只` : '';
+  const held = members.filter(item => item.held).map(item => item.code);
+  $('poolExitHint').innerHTML = d.screen_stale
+    ? `<b>出池提示暂时关闭</b>：最近一次筛选是 ${d.screen_gap_days} 个交易日前（超过 ${d.exit_stale_days} 天）——
+       尺子没量准的时候不提示，先跑一次 20-全市场筛选。`
+    : `连续 <b>${d.exit_streak}</b> 个筛选日没出现、或成交额跌破门槛的<b>个股</b>会打上「考虑移出」；
+       基准指数与 ETF 按定义固定配置、不参与轮换${held.length ? '；持仓 ' + held.join('、') + ' 也不提示（去留由仓位决定）' : ''}。
+       这只是提示，摘不摘由你点。`;
   $('poolMembers').innerHTML = members.length
     ? `<table class="tbl"><thead><tr>
-         <th>标的</th><th class="num">被筛出</th><th>形态</th><th>状态</th><th>风险层</th><th>操作</th>
+         <th>标的</th><th class="num">被筛出</th><th>形态</th><th>状态</th><th class="num">连续未命中</th>
+         <th class="num">日均成交额</th><th>风险层</th><th>操作</th>
        </tr></thead><tbody>` + members.map(item => {
         const latest = item.latest || {};
+        const streak = (item.type !== 'stock')
+          ? '<span class="sub" title="指数与 ETF 按定义不进筛选标的池">不参与</span>'
+          : (item.miss_streak === null || item.miss_streak === undefined
+             ? '<span class="sub">—</span>'
+             : (item.exit_hint
+                ? `<span class="tag shadow" title="${(item.exit_reasons || []).join('；')}">考虑移出 ${item.miss_streak}</span>`
+                : `<span class="sub">${item.miss_streak}</span>`));
         return `<tr>
           <td><span class="name">${item.name || item.code}</span><div class="sub">${item.code} · ${item.type || ''}${item.role ? ' · ' + item.role : ''}</div></td>
           <td class="num">${item.hits} 次<div class="sub">${latest.trade_date || ''}</div></td>
           <td class="sub">${(item.criteria || []).join('、') || '最近没出现'}</td>
           <td class="sub">${({up:'上升', down:'下跌', range:'震荡'})[item.state] || item.state || '—'}</td>
+          <td class="num">${streak}</td>
+          <td class="num">${poolAmount(item.avg_amount_60d)}${item.amount_breach ? '<div class="sub">低于门槛</div>' : ''}</td>
           <td>${poolRisk(item)}</td>
           <td><button class="ghost" data-drop="${item.code}">移出</button></td>
         </tr>`;
@@ -1888,6 +1972,22 @@ if ($('ledgerAiBtn')) $('ledgerAiBtn').onclick = () => { lastAnalyzeScope = 'led
 if ($('btAiBtn')) $('btAiBtn').onclick = () => { lastAnalyzeScope = 'backtest'; runJob('analyze', '', 'backtest'); };
 $('helpBtn').onclick = () => toggleHelp();
 $('helpClose').onclick = () => toggleHelp();
+/* 主题：默认深色，选择记在 localStorage 里；切换后重画图表 */
+(function initTheme(){
+  let saved = null;
+  try{ saved = localStorage.getItem(THEME_KEY); }catch(e){}
+  applyTheme(saved === 'light' ? 'light' : 'dark');
+})();
+if ($('themeBtn')) $('themeBtn').onclick = () =>
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+/* 状态条：鼠标滚轮也能横向滚（不用去够那根细滚动条，触控板本来就支持） */
+const strip = $('freshness');
+if (strip) strip.addEventListener('wheel', ev => {
+  if (Math.abs(ev.deltaY) <= Math.abs(ev.deltaX)) return;
+  if (strip.scrollWidth <= strip.clientWidth) return;
+  ev.preventDefault();
+  strip.scrollLeft += ev.deltaY;
+}, {passive:false});
 /* 悬停 120ms 后才弹说明：划过时不会闪一下 */
 let popTimer = null;
 document.addEventListener('mouseover', ev => {
