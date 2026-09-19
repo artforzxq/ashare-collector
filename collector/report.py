@@ -191,6 +191,39 @@ def newstock_section(conn, cfg: dict, trade_date: str) -> str:
     )
 
 
+def support_section(conn, cfg: dict, trade_date: str) -> str:
+    """疑似托底那一段：**只在有命中时才出现**（默认沉默，不打扰）。
+
+    份额是 T+1 披露的，所以这段话说的永远是"上一个交易日有没有人进场"。
+    """
+    from . import support as support_mod
+
+    try:
+        result = support_mod.scan(conn, cfg, trade_date)
+    except Exception:
+        return ""
+    if not result.get("ok") or not result.get("hits"):
+        return ""
+    hits = result["hits"]
+    total = result["net_inflow"] / 1e8
+    lines = []
+    for item in hits[:4]:
+        lines.append(
+            '<div style="padding:4px 0;border-top:1px solid #eef1f6">'
+            f'<b>{_esc(item["code"])}</b>'
+            f'<span style="color:#94a3b8;font-size:12px">　份额 {item["shares_pct"]:+.2f}%'
+            f'　成交额 {item["amount_z"] if item["amount_z"] is not None else str(item.get("amount_ratio")) + "×"}</span>'
+            f'<span style="float:right;color:#d92b2b;font-size:13px">'
+            f'净流入 {(item["inflow"] or 0) / 1e8:.1f} 亿</span></div>')
+    return (
+        '<div style="margin-top:14px;padding:10px 12px;border:1px solid #e4e8ef;border-radius:8px">'
+        f'<div style="font-size:13px;font-weight:600">疑似托底 · {_esc(result["level"])}</div>'
+        f'<div style="color:#94a3b8;font-size:11.5px">{len(hits)} 只宽基 ETF 份额净流入且放量，'
+        f'合计 {total:.1f} 亿元（份额 T+1 披露，属事后信号）</div>'
+        + "".join(lines) + "</div>"
+    )
+
+
 def daily_html(conn, cfg: dict, trade_date: str | None = None) -> str:
     """手机推送用的 HTML 简报：标的表 + 提醒 + 新股次新 + 数据质量。"""
     from .levels import distance_pct, nearest_band
@@ -281,6 +314,10 @@ def daily_html(conn, cfg: dict, trade_date: str | None = None) -> str:
                      f'被仲裁压制的信号：{items}</div>')
 
     parts.append(newstock_section(conn, cfg, trade_date))
+
+    support = support_section(conn, cfg, trade_date)
+    if support:
+        parts.append(support)
 
     health = [h for h in db.query(conn, "SELECT * FROM data_health WHERE run_date=?", (trade_date,))
               if h["status"] != "ok"]

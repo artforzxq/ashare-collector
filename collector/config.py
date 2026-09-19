@@ -103,6 +103,16 @@ DEFAULTS: Dict[str, Any] = {
         "push_top": 6,
         "types": ["stock"],
     },
+    # 疑似托底（"国家队"）：宽基 ETF 份额净流入 + 异常放量，见 collector/support.py
+    "support": {
+        "etfs": ["SH510300", "SH510050", "SH510500", "SH512100", "SH588000", "SZ159919", "SZ159915"],
+        "shares_pct": 0.01,
+        "amount_z": 2.0,
+        "amount_ratio": 2.0,
+        "min_inflow": 200_000_000,
+        "multi_count": 3,
+        "history_days": 60,
+    },
     "warehouse": {
         "snapshot_daily": True,
         "history_days": 750,

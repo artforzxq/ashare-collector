@@ -131,6 +131,33 @@ class WarehouseTests(unittest.TestCase):
         )
         self.assertEqual(written["source"], "snapshot")
 
+    def test_snapshot_never_clobbers_names_and_types(self):
+        """快照只给"代码表里还没有"的标的补占位行，绝不能覆盖已有行。
+
+        这条是真踩过的坑：快照以前无条件 upsert，而且把 name 写成代码、type 一律写 stock，
+        于是每跑一次日终，全市场几千只 ETF 和指数的名字与类型就被抹成"个股"，
+        连带市场广度、筛选池、新股表全按错误类型算。
+        """
+        db.upsert_rows(
+            self.conn, "instruments",
+            [{"code": "SH510300", "name": "华泰柏瑞沪深300ETF", "type": "etf"}],
+            ["code"],
+        )
+        written = warehouse.snapshot_bars(self.conn, self.cfg, "2026-09-16", verbose=False)
+        self.assertTrue(written["ok"])
+        kept = db.query_one(
+            self.conn, "SELECT name, type FROM instruments WHERE code='SH510300'")
+        self.assertEqual(kept["type"], "etf")
+        self.assertEqual(kept["name"], "华泰柏瑞沪深300ETF")
+        # 快照里那些代码表没有的标的：补占位行，但类型要按代码段分类，不能一律 stock
+        fresh = db.query_one(
+            self.conn,
+            """SELECT type FROM instruments WHERE code NOT IN ('SZ000005', 'SZ000006')
+               AND in_watchlist=0 AND name=code LIMIT 1""",
+        )
+        if fresh:
+            self.assertIn(fresh["type"], ("stock", "etf", "index", "other"))
+
     def test_status_counts(self):
         warehouse.sync_history(self.conn, self.cfg, verbose=False)
         info = warehouse.status(self.conn)

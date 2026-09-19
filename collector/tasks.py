@@ -10,7 +10,7 @@ from typing import Iterable
 from . import (breadth as breadth_mod, candles as candles_mod, db, features as features_mod,
                intraday as intraday_mod, market_time, newstock as newstock_mod,
                review as review_mod, risk as risk_mod,
-               screen as screen_mod, validate, warehouse)
+               screen as screen_mod, support as support_mod, validate, warehouse)
 from .names import display_name
 from .alerts import apply_budget, apply_cooldown, build_candidates, persist
 from .arbitrate import DecisionContext, arbitrate
@@ -80,10 +80,21 @@ def feature_version(cfg: dict) -> str:
 
 
 def _source_pool(cfg: dict) -> list:
-    """按 主源 → 备份源 → 兜底源 建好可用数据源列表（同名去重）。"""
+    """按 主源 → 备份源 → 兜底源 → 补充源 建好可用数据源列表（同名去重）。
+
+    补充源（sources.extra）也进来：它们提供的能力常常是主备都没有的
+    （交易所的 ETF 份额、北交所的历史行情），不进来就永远选不到。
+    它们不参与日终的主备交叉校验——那是 _fetch 的事，与此无关。
+    """
     pool: list = []
     seen: set[str] = set()
-    for name in (cfg["sources"].get("primary"), cfg["sources"].get("backup"), cfg["sources"].get("fallback")):
+    names = [
+        cfg["sources"].get("primary"),
+        cfg["sources"].get("backup"),
+        cfg["sources"].get("fallback"),
+        *(cfg["sources"].get("extra") or []),
+    ]
+    for name in names:
         if not name or name in seen:
             continue
         seen.add(name)
@@ -105,6 +116,15 @@ def _source_for(pool: list, capability: str):
         if capability in getattr(source, "capabilities", set()):
             return source
     return None
+
+
+def _all_sources_for(pool: list, capability: str) -> list:
+    """所有声明支持该能力的数据源。
+
+    和 _source_for 的区别：那个挑一个就够（交易日历问谁都一样），
+    这个要把结果**并起来**——ETF 份额就是典型：上交所只有沪市、深交所只有深市。
+    """
+    return [source for source in pool if capability in getattr(source, "capabilities", set())]
 
 
 # ---------- 日终任务 ----------
@@ -223,7 +243,9 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
 
     _log("[4/7] 采集交易日历、ETF 份额与杠杆资金", verbose)
     _collect_calendar(conn, _source_for(pool, "trade_calendar"), cfg, trade_date, verbose)
-    _collect_etf_shares(conn, _source_for(pool, "etf_shares"), cfg, trade_date, verbose)
+    # ETF 份额要**问遍所有能提供它的源**：上交所管沪市、深交所管深市，
+    # 一个源覆盖不了两边的票，只挑一个的话另一半永远是空的。
+    _collect_etf_shares(conn, _all_sources_for(pool, "etf_shares"), cfg, trade_date, verbose)
     _collect_margin(conn, _source_for(pool, "margin"), trade_date, verbose)
 
     _log("[5/7] 计算特征与状态（迟滞 + 确认 + 最短持续期）", verbose)
@@ -260,6 +282,11 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
         newstock_mod.refresh(conn, cfg, verbose=verbose)
     except Exception as exc:
         _log(f"      ! 新股清单刷新失败：{exc}", verbose)
+    # 疑似托底：份额刚采完，趁热判一次（份额 T+1 披露，所以这是事后信号）
+    try:
+        support_mod.record(conn, cfg, support_mod.scan(conn, cfg, trade_date), verbose=verbose)
+    except Exception as exc:
+        _log(f"      ! 托底判定失败：{exc}", verbose)
     return summary
 
 
@@ -373,20 +400,64 @@ def _collect_calendar(conn, source, cfg: dict, trade_date: str, verbose: bool) -
     _log(f"      交易日历 {trading[0]} ~ {trading[-1]}，其中 {len(trading)} 个交易日", verbose)
 
 
-def _collect_etf_shares(conn, source, cfg: dict, trade_date: str, verbose: bool) -> None:
-    if source is None:
+def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose: bool) -> None:
+    """ETF 份额：问遍所有能提供的源，再按代码合并。
+
+    为什么要合并而不是挑一个：上交所的接口只有沪市（510xxx/588xxx），
+    深交所的只有深市（159xxx）——一个源永远凑不齐观察池里的 ETF。
+    同一只票被两个源都给了的话，**优先要非估算的那份**（交易所按日披露 > 当日快照）。
+    """
+    if not sources:
         _log("      ! 没有支持 ETF 份额的数据源", verbose)
         db.log_health(conn, trade_date, "none", "etf_shares", "failed", 0, 1.0, 0, "无支持 etf_shares 的数据源")
         return
-    etf_codes = cfg["watchlist"].get("etfs", [])
+    # 采集范围 = 观察池里的 ETF **∪ 托底模块盯的那几只宽基**。
+    # 后者常常不在观察池里（它们是市场信号，不是你要买的票），
+    # 不并进来的话托底判定永远缺数据——这正是 159919/159915 一开始没份额的原因。
+    etf_codes = list(dict.fromkeys(
+        list(cfg["watchlist"].get("etfs") or []) + list(support_mod.settings(cfg).get("etfs") or [])
+    ))
     if not etf_codes:
         return
-    try:
-        rows = source.etf_shares(etf_codes, trade_date)
-    except Exception as exc:
-        _log(f"      ! ETF 份额不可用：{exc}", verbose)
-        db.log_health(conn, trade_date, source.name, "etf_shares", "failed", 0, 1.0, 0, str(exc))
+
+    merged: dict[str, dict] = {}
+    failures: list[str] = []
+    # 谁的数字更可信：**交易所 > 聚合源**。实测同一只深市 ETF，深交所给 63.29 亿份，
+    # 聚合源（新浪"最近总份额"）给 69.39 亿份——差 10%，而份额变化只有几个百分点，
+    # 用错源等于把信号淹掉。所以这里按来源排优先级，再让"正式披露"压过"估算值"。
+    priority = {"sse": 0, "szse": 0, "akshare": 1, "sina": 2}
+    for source in sources:
+        try:
+            rows = source.etf_shares(etf_codes, trade_date)
+        except Exception as exc:
+            failures.append(f"{source.name}：{type(exc).__name__} {str(exc)[:80]}")
+            db.log_health(conn, trade_date, source.name, "etf_shares", "failed", 0, 1.0, 0, str(exc))
+            continue
+        for row in rows:
+            code = row.get("code")
+            # 每行都要带 source：upsert_rows 按**第一行**的字段建 SQL，
+            # 少一行带这个键，整批的 source 就都写不进去（表里会留一堆 NULL）。
+            row.setdefault("source", source.name)
+            current = merged.get(code)
+            if current is None:
+                merged[code] = row
+                continue
+            better_source = priority.get(source.name, 3) < priority.get(current.get("source"), 3)
+            same_source_more_official = (
+                priority.get(source.name, 3) == priority.get(current.get("source"), 3)
+                and current.get("is_estimated") and not row.get("is_estimated")
+            )
+            if better_source or same_source_more_official:
+                merged[code] = row
+        if rows:
+            _log(f"      · ETF 份额：{source.name} 给了 {len(rows)} 只", verbose)
+
+    rows = list(merged.values())
+    if not rows:
+        _log(f"      ! ETF 份额没取到：{'；'.join(failures) or '所有源都返回空'}", verbose)
         return
+    if failures and verbose:
+        _log(f"      · 另有源没成功：{'；'.join(failures)}", verbose)
     # 收盘价直接用当天已入库的日线，省掉一次全市场 ETF 行情请求；
     # 折溢价和规模在这里一起算好，适配器只负责取份额和净值。
     closes = {
@@ -399,8 +470,10 @@ def _collect_etf_shares(conn, source, cfg: dict, trade_date: str, verbose: bool)
         nav, close = row.get("nav"), row.get("close")
         if nav and close:
             row["premium_rate"] = round((close / nav - 1) * 100, 4)
-            if row.get("shares"):
-                row["assets"] = round(row["shares"] * nav, 2)
+        # 规模用净值算最准；沪市那个接口不给净值，就退回收盘价（supported 信号的明细里会注明）
+        price = nav or close
+        if price and row.get("shares"):
+            row["assets"] = round(row["shares"] * price, 2)
         row["updated_at"] = db.now_iso()
     db.upsert_rows(conn, "etf_shares", rows, ["code", "trade_date"])
 

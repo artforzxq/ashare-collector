@@ -25,7 +25,7 @@ from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
 from .sources import build_source
-from .sources.base import exchange_of
+from .sources.base import classify_symbol, exchange_of
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 # 筛选池要现算风险层（池外的票没有日终结果），一次接近 1 秒；切标签页时没必要重算。
@@ -352,6 +352,29 @@ class App:
             conn.close()
 
     # ---- 页面上的任务按钮 ----
+
+    def support(self) -> dict:
+        """疑似托底：当天的判定（现算）+ 最近命中过的日子（库里留的）。
+
+        只描述事实：份额净流入 + 异常放量同时成立才算命中。份额 T+1 披露，
+        所以这是事后信号，页面别把它显示得像实时提示。
+        """
+        from . import support as support_mod
+
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            today = support_mod.scan(conn, self.cfg)
+            days = int(support_mod.settings(self.cfg)["history_days"])
+            return {
+                "ok": bool(today.get("ok")),
+                "message": today.get("message", ""),
+                "today": today if today.get("ok") else None,
+                "history": support_mod.history(conn, days),
+            }
+        except Exception as exc:
+            return {"ok": False, "message": f"读不到托底判定：{type(exc).__name__} {exc}"}
+        finally:
+            conn.close()
 
     def newstock(self) -> dict:
         """新股与次新：单独一摊，因为它们进不了筛选标的池（历史不够长）。
@@ -777,7 +800,7 @@ class App:
             {
                 "code": item["code"],
                 "name": item["name"],
-                "type": "stock",
+                "type": item.get("type") or classify_symbol(item["code"]),
                 "in_watchlist": 0,
                 "updated_at": db.now_iso(),
             }
@@ -931,7 +954,7 @@ def _health_payload(cfg: dict) -> dict:
         "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
                    "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
                    "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis", "/api/pool",
-                   "/api/newstock"],
+                   "/api/newstock", "/api/support"],
     }
 
 
@@ -1035,6 +1058,8 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes(app.pool())
             if path == "/api/newstock":
                 return _payload_bytes(app.newstock())
+            if path == "/api/support":
+                return _payload_bytes(app.support())
             if path == "/api/meta":
                 return _payload_bytes(_meta_payload(app.cfg))
             if path == "/api/market":

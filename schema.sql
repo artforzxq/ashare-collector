@@ -282,6 +282,17 @@ CREATE TABLE IF NOT EXISTS new_listings (
 
 CREATE INDEX IF NOT EXISTS idx_new_listings_stage ON new_listings (stage, trading_days);
 
+-- 疑似托底（"国家队"）：宽基 ETF 份额净流入 + 二级市场异常放量，两条同时成立才算。
+-- 只写有命中的日子；份额是 T+1 披露，所以这是事后信号，用来次日复盘。
+CREATE TABLE IF NOT EXISTS support_days (
+  trade_date  TEXT PRIMARY KEY,  -- 交易日
+  level       TEXT,              -- 级别：P1 多只齐步 / P2 单只异动
+  etf_count   INTEGER,           -- 同时命中的 ETF 只数
+  net_inflow  REAL,              -- 命中标的合计净流入，单位：元
+  detail_json TEXT,              -- 每只的明细：份额增幅、成交额 z 分数、净流入、用哪个价算的
+  created_at  TEXT               -- 记录时间
+);
+
 CREATE TABLE IF NOT EXISTS data_health (
   run_date     TEXT NOT NULL, -- 任务运行日
   source       TEXT NOT NULL, -- 数据源名称

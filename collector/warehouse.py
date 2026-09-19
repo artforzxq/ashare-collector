@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import db, market_time, validate
 from .sources import build_source
+from .sources.base import classify_symbol
 
 SNAPSHOT_SOURCE = "snapshot"
 DEFAULT_HISTORY_DAYS = 750
@@ -376,19 +377,30 @@ def snapshot_bars(conn, cfg, trade_date: str | None = None, verbose: bool = True
     if not rows:
         return {"ok": False, "message": "快照里没有可写入的标的"}
     db.upsert_rows(conn, "bars_daily", rows, ["code", "trade_date"])
-    db.upsert_rows(
-        conn,
-        "instruments",
-        [
-            {"code": row["code"], "name": row["code"], "type": "stock",
-             "exchange": row["code"][:2], "in_watchlist": 0, "updated_at": db.now_iso()}
-            for row in rows
-        ],
-        ["code"],
-    )
+    # 只给"代码表里还没有"的标的补一行，**绝不覆盖已有行**。
+    # 这里以前是无条件 upsert，而且把 name 写成代码、type 一律写成 stock——
+    # 结果每跑一次日终，全市场几千只 ETF 和指数的名字与类型就被抹成"个股"，
+    # 连带市场广度、筛选池、新股表全都按错误类型来算。
+    known = {row["code"] for row in db.query(conn, "SELECT code FROM instruments")}
+    placeholders = []
+    for row in rows:
+        code = row["code"]
+        if code in known:
+            continue
+        placeholders.append({
+            "code": code,
+            "name": code,                       # 只是占位，等代码表同步来补真名
+            "type": classify_symbol(code),      # 别再猜成 stock：用代码段分类
+            "exchange": code[:2],
+            "in_watchlist": 0,
+            "updated_at": db.now_iso(),
+        })
+    if placeholders:
+        db.upsert_rows(conn, "instruments", placeholders, ["code"])
     if verbose:
         print(f"  快照写库：{trade_date} 写入 {len(rows)} 只，"
-              f"跳过已有正式数据的 {len(protected)} 只、字段不全的 {incomplete} 只")
+              f"跳过已有正式数据的 {len(protected)} 只、字段不全的 {incomplete} 只"
+              + (f"，新登记 {len(placeholders)} 只" if placeholders else ""))
     return {"ok": True, "trade_date": trade_date, "written": len(rows),
             "skipped": len(protected), "incomplete": incomplete}
 

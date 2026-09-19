@@ -11,6 +11,8 @@ SOURCE_REGISTRY: dict[str, str] = {
     "akshare": "collector.sources.akshare_source:AkshareSource",
     "tencent": "collector.sources.tencent_source:TencentSource",
     "sina": "collector.sources.sina_source:SinaSource",
+    "sse": "collector.sources.sse_source:SseSource",
+    "szse": "collector.sources.szse_source:SzseSource",
     "adata": "collector.sources.adata_source:AdataSource",
     "baostock": "collector.sources.baostock_source:BaostockSource",
 }

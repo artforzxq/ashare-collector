@@ -472,13 +472,20 @@ canvas{display:block;width:100%}
         <div class="hint" id="marketNote"></div>
       </div>
 
-      <div class="block-head"><h2>③ 涨跌榜 · 日终</h2><span class="line"></span></div>
+      <div class="block-head"><h2>③ 疑似托底 · 事后</h2><span class="badge" id="supportBadge">日终</span><span class="line"></span><span id="supportMeta"></span></div>
+      <div class="card panel">
+        <h3>宽基 ETF 份额净流入 <span id="supportNote"></span></h3>
+        <div id="supportBody"></div>
+        <div class="hint" id="supportHint"></div>
+      </div>
+
+      <div class="block-head"><h2>④ 涨跌榜 · 日终</h2><span class="line"></span></div>
       <div class="panels two">
         <div class="card panel"><h3>涨幅榜</h3><div id="gainers"></div></div>
         <div class="card panel"><h3>跌幅榜</h3><div id="losers"></div></div>
       </div>
 
-      <div class="block-head"><h2>④ 形态筛选 · 按需</h2><span class="line"></span></div>
+      <div class="block-head"><h2>⑤ 形态筛选 · 按需</h2><span class="line"></span></div>
       <div class="card panel">
         <h3>形态筛选 <span id="screenDate"></span></h3>
         <div class="seg" id="critSeg"></div>
@@ -1336,6 +1343,7 @@ function afterJob(last){
   }
   if (last.key === 'screen'){ screenData = null; poolData = null; loadScreen(); loadMarket(); }
   if (last.key === 'sync' || last.key === 'snapshot'){ marketData = null; if (!$('viewMarket').hidden) loadMarket(); }
+  if (last.key === 'daily'){ supportData = null; if (!$('viewMarket').hidden) loadSupport(true); }
   if (last.key === 'backtest'){ backtestData = null; if (!$('viewBacktest').hidden) loadBacktest(); }
   if (last.key === 'analyze'){ delete analysisCache[lastAnalyzeScope]; loadScopeAnalysis(lastAnalyzeScope); }
   if (last.key === 'listings'){ newstockData = null; if (!$('viewNew').hidden) loadNewstock(true); }
@@ -1352,6 +1360,7 @@ function switchView(name){
     btn.classList.toggle('on', btn.dataset.view === name));
   if (name === 'market'){
     loadMarket();
+    loadSupport();
     loadScreen();
   } else if (name === 'factors'){
     loadFactors();
@@ -1616,6 +1625,70 @@ function renderFactors(){
 
 /* ---------- 参数回测：哪组参数真有超额，哪组只是拟合出来的尖峰 ---------- */
 /* ---------- 筛选池：候选进池 / 池内现状 / 形态表现 ---------- */
+/* ---------- 疑似托底：份额净流入 + 异常放量，两条同时成立 ---------- */
+let supportData = null;
+
+async function loadSupport(force){
+  if (supportData && supportData.ok && !force){ renderSupport(); return; }
+  $('supportBody').innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  try{
+    supportData = await api('/api/support');
+  }catch(e){
+    $('supportBody').innerHTML = `<div class="empty">读不到托底判定：${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderSupport();
+}
+
+function renderSupport(){
+  const d = supportData || {};
+  const today = d.today;
+  $('supportHint').innerHTML =
+    '口径：<b>份额</b>来自一级市场申赎——只有真金白银申购才会让它增加；' +
+    '<b>成交额</b>是二级市场换手，混着做市与套利。两条同时成立才记一笔。' +
+    '份额是 <b>T+1 披露</b>的，所以这是<b>事后</b>信号，用来次日复盘，不是盘中提示。';
+  if (!d.ok || !today){
+    $('supportMeta').textContent = '';
+    $('supportNote').textContent = '';
+    $('supportBody').innerHTML =
+      `<div class="empty-state"><b>${escapeHtml(d.message || '还没有 ETF 份额数据')}</b>` +
+      '跑一次 3-每日任务 就有（份额来自交易所，T+1 披露）。</div>';
+    return;
+  }
+  const conf = today.thresholds;
+  $('supportMeta').textContent = `判定日 ${today.trade_date}（份额 T+1 披露）`;
+  $('supportNote').textContent = today.hits.length
+    ? `命中 ${today.hits.length} 只，合计净流入 ${(today.net_inflow / 1e8).toFixed(1)} 亿元`
+    : '';
+
+  const items = today.items || [];
+  $('supportBody').innerHTML = items.length
+    ? `<table class="tbl"><thead><tr>
+         <th>宽基 ETF</th><th class="num">份额(亿份)</th><th class="num">较前一日</th>
+         <th class="num">成交额 z</th><th class="num">净流入(亿)</th><th>判定</th>
+       </tr></thead><tbody>` + items.map(item => {
+        const inflow = item.inflow || 0;
+        return `<tr class="${item.hit ? 'on' : ''}">
+          <td><span class="name">${item.code}</span><div class="sub">${item.price_basis ? '按' + item.price_basis + '折算' : ''}</div></td>
+          <td class="num">${(item.shares / 1e8).toFixed(2)}</td>
+          <td class="num">${posNeg(item.shares_pct, signed(item.shares_pct, 2) + '%')}</td>
+          <td class="num">${item.amount_z === null
+            ? (item.amount_ratio === null || item.amount_ratio === undefined ? '—' : item.amount_ratio.toFixed(2) + '×')
+            : item.amount_z.toFixed(2)}</td>
+          <td class="num">${posNeg(inflow, (inflow / 1e8).toFixed(2))}</td>
+          <td>${item.hit ? '<span class="tag shadow">命中</span>' : '<span class="sub">—</span>'}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>' +
+      `<div class="hint">判定条件：份额增幅 ≥ ${(conf.shares_pct * 100).toFixed(1)}%　且　成交额 z ≥ ${conf.amount_z}`
+      + `（基准太平算不出 z 时用倍数 ≥ ${conf.amount_ratio}×）　且　`
+      + `净流入 ≥ ${(conf.min_inflow / 1e8).toFixed(0)} 亿；同时命中 ≥ ${conf.multi_count} 只 → 升 P1（齐步走）。` +
+      (d.history && d.history.length
+        ? `<br>最近命中：` + d.history.slice(0, 6).map(row =>
+            `${row.trade_date}（${row.etf_count} 只 / ${(row.net_inflow / 1e8).toFixed(0)} 亿 / ${row.level}）`).join('　')
+        : '') + '</div>'
+    : '<div class="empty-state"><b>盯着的这几只宽基还没有份额数据</b>份额来自交易所，跑一次 3-每日任务 就补上了</div>';
+}
+
 /* ---------- 新股与次新：单独一摊，看事实不看故事 ---------- */
 let newstockData = null;
 

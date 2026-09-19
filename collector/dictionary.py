@@ -31,12 +31,21 @@ TABLE_DOCS: dict[str, str] = {
     "arbitration_log": "仲裁日志：记录被压制或降级的信号，以及依据的规则",
     "analysis_log": "AI 分析留痕：模型读过的数字与它说的话（只记录，不参与任何计算）",
     "new_listings": "新股与次新：上市多久、几个板、上市以来涨跌（单独一摊，因为进不了筛选池）",
+    "support_days": "疑似托底：宽基 ETF 份额净流入 + 异常放量同时成立的日子（事后信号）",
     "rule_version": "规则版本：权重或规则每改一次都要留版本",
     "data_dictionary": "数据字典：表与字段的中文说明（本表）",
 }
 
 # 字段说明：(中文名/含义, 补充提示)
 FIELD_DOCS: dict[str, dict[str, tuple[str, str]]] = {
+    "support_days": {
+        "trade_date": ("交易日", "份额 T+1 披露，所以这一行回答的是「上个交易日有没有人进场」"),
+        "level": ("级别", "P1 多只齐步 / P2 单只异动"),
+        "etf_count": ("同时命中的 ETF 只数", ""),
+        "net_inflow": ("命中标的合计净流入", "单位：元；= 份额变化 × 价格"),
+        "detail_json": ("明细", "每只的份额增幅、成交额 z 分数或倍数、净流入、用净值还是收盘价折算"),
+        "created_at": ("记录时间", ""),
+    },
     "new_listings": {
         "code": ("标的代码", ""),
         "name": ("标的名称", ""),

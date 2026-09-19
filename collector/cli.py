@@ -30,6 +30,7 @@ from . import (
     server as server_mod,
     share as share_mod,
     tasks,
+    support as support_mod,
     warehouse as warehouse_mod,
 )
 from .config import load_config, use_fixture_sources, watchlist_codes
@@ -158,6 +159,47 @@ def cmd_push(args) -> int:
         print("")
         print(result["content"])
     return 0 if result.get("ok") or result.get("skipped") else 1
+
+
+def cmd_support(args) -> int:
+    """疑似托底：宽基 ETF 份额净流入 + 异常放量（事后信号）。
+
+    份额是 T+1 披露的，所以它回答的是"昨天有没有人进场"，不是盘中的事。
+    只描述事实，不给买卖建议；命中会同时往 alerts 里记一条（走现成的冷却与预算）。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        result = support_mod.scan(conn, cfg, args.date)
+        if not result.get("ok"):
+            print(result.get("message", "算不出来"))
+            return 1
+        conf = result["thresholds"]
+        print(f"===== 疑似托底 {result['trade_date']} =====")
+        print(f"判定：份额增幅 ≥ {conf['shares_pct']:.1%}　且 成交额 z ≥ {conf['amount_z']}　"
+              f"且 净流入 ≥ {conf['min_inflow'] / 1e8:.0f} 亿"
+              f"（同时命中 ≥ {conf['multi_count']} 只 → P1 齐步走）")
+        print("")
+        header = f"  {'代码':<10}{'份额(亿份)':>12}{'变化':>9}{'成交额z':>9}{'净流入(亿)':>12}  命中"
+        print(header)
+        for item in result["items"][: args.show]:
+            inflow = (item["inflow"] or 0) / 1e8
+            print(f"  {item['code']:<10}{item['shares'] / 1e8:>12.2f}{item['shares_pct']:>8.2f}%"
+                  f"{(item['amount_z'] if item['amount_z'] is not None else float('nan')):>9.2f}"
+                  f"{inflow:>12.2f}  {'★' if item['hit'] else '—'}")
+        if result["hits"]:
+            print(f"\n今天像有托底：{len(result['hits'])} 只命中，合计净流入 "
+                  f"{result['net_inflow'] / 1e8:.1f} 亿元　级别 {result['level']}")
+        else:
+            print("\n今天没有命中：没有「份额净流入 + 异常放量」同时出现的宽基 ETF")
+        if args.record:
+            saved = support_mod.record(conn, cfg, result, verbose=True)
+            print(f"已写入 support_days / alerts：{saved} 只")
+        print("")
+        print("口径：份额来自交易所（T+1 披露）→ 这是事后信号；成交额 z 相对前 20 个交易日。")
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_doctor(args) -> int:
@@ -838,6 +880,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--backtest", action="store_true", help="审最近一次回测的摘要")
     analyze.add_argument("--db", help="数据库路径")
     analyze.set_defaults(func=cmd_analyze)
+
+    support = sub.add_parser("support", help="疑似托底：宽基 ETF 份额净流入 + 异常放量（事后信号）")
+    support.add_argument("--date", help="交易日 YYYY-MM-DD（默认取份额表里最新的一天）")
+    support.add_argument("--show", type=int, default=10, help="打印多少只")
+    support.add_argument("--record", action="store_true", help="把判定写进 support_days / alerts")
+    support.add_argument("--db", help="数据库路径")
+    support.set_defaults(func=cmd_support)
 
     doctor = sub.add_parser("doctor", help="环境体检：Python / 依赖 / 数据库 / 配置（只读）")
     doctor.add_argument("--db", help="数据库路径（默认取配置）")
