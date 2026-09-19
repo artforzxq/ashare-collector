@@ -5,37 +5,61 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>A 股看盘</title>
 <style>
-  /* ============ 设计令牌 ============ */
+  /* ============ 设计令牌 ============
+     一套冷灰中性色 + 一个蓝色强调色。数字一律等宽并开 tabular-nums——
+     看盘页面上"数字能对齐"比"字体好看"重要得多。 */
   :root{
-    --bg:#f5f6f8; --card:#fff; --line:#e8eaee; --line-soft:#f1f2f5;
-    --text:#1f2430; --text-2:#4b5565; --muted:#6b7280; --faint:#9aa3b2;
-    --up:#e2453c; --down:#12a05c; --accent:#2f6feb;
+    --bg:#f4f6f9; --card:#fff; --card-2:#fafbfd;
+    --line:#e4e8ef; --line-soft:#eef1f6;
+    --text:#0f172a; --text-2:#334155; --muted:#64748b; --faint:#94a3b8;
+    --up:#d92b2b; --down:#0f9f74;                 /* A 股口径：红涨绿跌，这条不许改 */
+    --accent:#2563eb; --accent-ink:#1d4ed8; --accent-soft:#eff6ff; --accent-line:#dbeafe;
+    --warn:#b45309; --warn-soft:#fff7ed; --warn-line:#fed7aa;
     --p2:#8b95a5;
-    --r-sm:7px; --r-md:10px; --r-lg:14px;
+    --mono:"SF Mono","JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --r-xs:3px; --r-sm:5px; --r-md:8px; --r-lg:12px;
     --gap:14px;
-    --shadow:0 14px 36px rgba(31,36,48,.16);
+    --shadow:0 10px 30px rgba(15,23,42,.10),0 2px 6px rgba(15,23,42,.05);
+    --shadow-pop:0 18px 44px rgba(15,23,42,.16),0 4px 10px rgba(15,23,42,.06);
+    --topbar-h:58px;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
        font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
-  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-sm)}
+  /* 数字统一等宽 + 等宽数字宽度：价格、分数、超额收益都要能竖着对齐 */
+  .num,.price,.chg,.metric b,.stat b,.quotebar .px,.quotebar .chg,td.num,.row .end,.row .mid,
+  .wl-item .px,.wl-item .cd,.freshness b,.kpi b,.tbl th.sortable{font-family:var(--mono);
+    font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 
-  /* ============ 骨架布局 ============ */
-  .layout{display:grid;grid-template-columns:272px 1fr;min-height:100vh}
-  main{padding:16px 20px 28px;display:flex;flex-direction:column;gap:var(--gap);min-width:0}
+  /* ============ 骨架布局 ============
+     顶部一条 58px 的状态与视图栏，左侧只剩"自选清单"这一件事——
+     它是有用的导航，不是为了对称摆出来的侧边栏。 */
+  .layout{display:grid;grid-template-columns:268px 1fr;min-height:100vh}
+  main{padding:14px 20px 30px;display:flex;flex-direction:column;gap:var(--gap);min-width:0}
   .view{display:flex;flex-direction:column;gap:var(--gap);min-width:0}
+  /* 作者样式里的 display 会盖掉 UA 的 [hidden]{display:none}，视图切换就失效了 */
+  .view[hidden]{display:none!important}
 
+  .topbar{grid-column:1/-1;display:flex;align-items:center;gap:18px;
+          height:var(--topbar-h);padding:0 20px;background:var(--card);
+          border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30;overflow:hidden}
+  .topbar .brand{font-size:14.5px;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+  .topbar .brand i{display:inline-block;width:7px;height:7px;border-radius:2px;background:var(--accent);
+                   margin-right:8px;vertical-align:1px}
   /* ============ 视图切换 ============ */
-  .tabs{display:flex;gap:4px;background:#eceef3;border-radius:var(--r-md);padding:3px;align-self:flex-start}
-  .tabs button{border:0;background:transparent;padding:6px 18px;border-radius:8px;font-size:13px;
-               color:var(--muted);cursor:pointer;font-family:inherit;
+  .tabs{display:flex;gap:2px;flex:0 0 auto;margin-left:auto;border:1px solid var(--line);
+        border-radius:var(--r-md);padding:2px;background:var(--card-2)}
+  .tabs button{border:0;background:transparent;padding:5px 14px;border-radius:var(--r-sm);font-size:12.5px;
+               color:var(--muted);cursor:pointer;font-family:inherit;white-space:nowrap;
                transition:background .16s ease,color .16s ease}
-  .tabs button:hover{color:var(--text)}
-  .tabs button.on{background:var(--card);color:var(--text);font-weight:600;box-shadow:0 1px 3px rgba(31,36,48,.08)}
+  .tabs button:hover{color:var(--text);background:#f2f5fa}
+  .tabs button.on{background:var(--card);color:var(--accent-ink);font-weight:600;
+                  box-shadow:0 1px 2px rgba(15,23,42,.08),inset 0 0 0 1px var(--accent-line)}
 
-  /* ============ 左栏 ============ */
-  .sidebar{background:var(--card);border-right:1px solid var(--line);padding:16px 14px;
-           display:flex;flex-direction:column;gap:12px}
+  /* ============ 左栏（自选清单） ============ */
+  .sidebar{background:var(--card-2);border-right:1px solid var(--line);padding:14px 12px;
+           display:flex;flex-direction:column;gap:12px;min-height:calc(100vh - var(--topbar-h))}
   .brand{font-size:15px;font-weight:600;letter-spacing:.3px}
   .brand small{color:var(--muted);font-weight:400;margin-left:6px;font-size:12px}
   .addbox{display:flex;gap:6px}
@@ -54,8 +78,8 @@
   .wl-item{position:relative;padding:8px 9px;border-radius:8px;cursor:pointer;
            display:grid;grid-template-columns:1fr auto;gap:2px 6px;align-items:center;
            transition:background .15s ease}
-  .wl-item:hover{background:#f4f6fa}
-  .wl-item.on{background:#eef3fe;box-shadow:inset 0 0 0 1px #cfdefb}
+  .wl-item:hover{background:#f2f5fa}
+  .wl-item.on{background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-line)}
   .wl-item .nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .wl-item .cd{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
 .wl-item .px{font-variant-numeric:tabular-nums;font-size:13px}
@@ -112,7 +136,7 @@
   .ghost{background:var(--card);border:1px solid var(--line);color:var(--muted);padding:6px 13px;
          border-radius:var(--r-md);font-size:12px;cursor:pointer;font-family:inherit;
          transition:background .18s ease,color .18s ease,border-color .18s ease}
-  .ghost:hover{background:#f2f5fb;color:var(--accent);border-color:#cfdefb}
+  .ghost:hover{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent-line)}
   .ghost:active{transform:translateY(1px)}
   .ghost[disabled]{opacity:.5;cursor:default}
 
@@ -122,18 +146,21 @@ canvas{display:block;width:100%}
 .chart-tabs{display:flex;gap:6px;padding:8px 10px 0}
 .chart-tabs button{border:1px solid #d7dbe3;background:#fff;border-radius:6px;padding:3px 12px;
   font-size:12px;color:#6b7280;cursor:pointer}
-.chart-tabs button.on{background:#eef2ff;border-color:#c7d2fe;color:#3730a3}
+.chart-tabs button.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink)}
 /* ---------- 数据状态条 + 板块 ---------- */
-.freshness{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 12px;margin-bottom:10px;
-  font-size:12px;color:var(--muted)}
-.freshness .fi{display:flex;gap:4px;align-items:center}
+.freshness{display:flex;flex-wrap:nowrap;gap:12px;align-items:center;font-size:11.5px;color:var(--muted);
+  overflow-x:auto;min-width:0;scrollbar-width:none}
+.freshness::-webkit-scrollbar{height:0}
+.freshness .fresh-items{display:flex;gap:14px;align-items:center;flex-wrap:nowrap}
+.freshness .fi{display:flex;gap:5px;align-items:center;white-space:nowrap}
 .freshness b{color:var(--text);font-weight:600}
-.badge{border-radius:99px;padding:1px 7px;font-size:11px;border:1px solid transparent}
-.badge.live{background:#e7f7ee;color:#0f7a45;border-color:#bfe8d2}
-.badge.today{background:#eef2ff;color:#3949ab;border-color:#d5dcfb}
-.badge.stale{background:#fff4e5;color:#a35a00;border-color:#ffd9a8}
-.primary-chip{display:inline-block;border-radius:99px;padding:0 5px;font-size:10px;
-  background:#eef2ff;color:#3949ab;border:1px solid #d5dcfb;vertical-align:1px}
+.badge{border-radius:var(--r-xs);padding:1px 6px;font-size:10.5px;border:1px solid transparent;
+  letter-spacing:.02em;white-space:nowrap}
+.badge.live{background:#ecfdf5;color:#0b7a55;border-color:#bbf0dc}
+.badge.today{background:var(--accent-soft);color:var(--accent-ink);border-color:var(--accent-line)}
+.badge.stale{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
+.primary-chip{display:inline-block;border-radius:var(--r-xs);padding:0 5px;font-size:10px;
+  background:var(--accent-soft);color:var(--accent-ink);border:1px solid var(--accent-line);vertical-align:1px}
 .block-head{display:flex;align-items:center;gap:8px;margin:18px 2px 6px;font-size:13px;color:var(--muted)}
 .block-head h2{margin:0;font-size:13px;font-weight:600;color:var(--text);letter-spacing:.02em}
 .block-head .line{flex:1;height:1px;background:var(--line, #e6e8ee)}
@@ -207,23 +234,75 @@ canvas{display:block;width:100%}
         background-size:400% 100%;animation:sk 1.4s ease infinite}
   @keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
 
+  /* ============ 台账 / 回测：KPI 条 + 数据表 ============ */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(136px,1fr));gap:1px;
+        background:var(--line);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden}
+  .kpi{background:var(--card);padding:11px 13px}
+  .kpi span{display:block;color:var(--muted);font-size:11.5px;margin-bottom:4px}
+  .kpi b{font-size:19px;font-weight:600;line-height:1.2}
+  .kpi small{display:block;color:var(--faint);font-size:11px;margin-top:3px}
+
+  .toolrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .toolrow .meta{color:var(--muted);font-size:12px}
+  .toolrow .spacer{margin-left:auto}
+  .btn{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:6px 14px;
+       border-radius:var(--r-md);font-size:12.5px;cursor:pointer;font-family:inherit;
+       transition:background .18s ease,box-shadow .18s ease,transform .06s ease}
+  .btn:hover{background:var(--accent-ink);border-color:var(--accent-ink);
+             box-shadow:0 4px 14px rgba(37,99,235,.22)}
+  .btn:active{transform:translateY(1px)}
+  .btn[disabled]{opacity:.5;cursor:default;box-shadow:none}
+
+  .tbl-wrap{overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:var(--r-lg);
+            background:var(--card)}
+  .tbl{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
+  .tbl th{position:sticky;top:0;z-index:2;background:var(--card-2);text-align:left;color:var(--muted);
+          font-weight:500;font-size:11.5px;letter-spacing:.03em;padding:8px 10px;white-space:nowrap;
+          border-bottom:1px solid var(--line)}
+  .tbl td{padding:7px 10px;border-top:1px solid var(--line-soft);vertical-align:top}
+  .tbl tr:hover td{background:#f8fafc}
+  .tbl tr.on td{background:var(--accent-soft)}
+  .tbl td.num,.tbl th.num{text-align:right}
+  .tbl .name{font-weight:600}
+  .tbl .sub{color:var(--muted);font-size:11.5px}
+  .tag{display:inline-block;padding:1px 6px;border-radius:var(--r-xs);font-size:10.5px;
+       background:#f1f5f9;color:var(--muted);white-space:nowrap}
+  .tag.active{background:var(--accent-soft);color:var(--accent-ink)}
+  .tag.shadow{background:var(--warn-soft);color:var(--warn)}
+  .pos{color:var(--up)} .neg{color:var(--down)}
+  .prog{height:5px;border-radius:3px;background:#eef1f6;overflow:hidden;min-width:52px;margin-top:4px}
+  .prog i{display:block;height:100%;background:var(--accent);border-radius:3px}
+  .prog i.warn{background:var(--warn)}
+
   /* ============ 悬浮说明 ============ */
   .pop{position:fixed;z-index:40;background:var(--card);border:1px solid var(--line);
-       border-radius:var(--r-lg);box-shadow:var(--shadow);padding:14px 16px;display:none;
+       border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:14px 16px;display:none;
        font-size:12.5px;line-height:1.8;color:var(--text)}
   .pop h4{margin:0 0 8px;font-size:13.5px;font-weight:600}
   .pop p{margin:0 0 7px;color:var(--text-2)}
   .pop p:last-child{margin-bottom:0}
   .pop .k{display:inline-block;min-width:46px;color:var(--accent);font-weight:600;margin-right:2px}
 
-  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:26px;background:rgba(31,36,48,.94);
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:26px;background:rgba(15,23,42,.94);
          color:#fff;padding:9px 14px;border-radius:var(--r-md);font-size:13px;display:none;z-index:20}
 </style>
 </head>
 <body>
 <div class="layout">
+  <header class="topbar">
+    <div class="brand"><i></i>A 股看盘 <small id="asof"></small></div>
+    <div class="freshness" id="freshness">
+      <div class="fresh-items" id="freshItems">数据状态读取中…</div>
+    </div>
+    <nav class="tabs" id="viewTabs">
+      <button data-view="stock" class="on">自选标的</button>
+      <button data-view="market">市场与扫描</button>
+      <button data-view="factors">因子台账</button>
+      <button data-view="backtest">参数回测</button>
+    </nav>
+  </header>
+
   <aside class="sidebar">
-    <div class="brand">A 股看盘 <small id="asof"></small></div>
     <div class="addbox">
       <input id="q" placeholder="加标的：600519 / 贵州茅台">
       <button id="searchBtn">搜索</button>
@@ -240,13 +319,6 @@ canvas{display:block;width:100%}
 
   <main>
     <div class="card panel" id="banner" hidden></div>
-    <div class="card freshness" id="freshness">
-      <div class="fresh-items" id="freshItems">数据状态读取中…</div>
-    </div>
-    <nav class="tabs" id="viewTabs">
-      <button data-view="stock" class="on">自选标的</button>
-      <button data-view="market">市场与扫描</button>
-    </nav>
 
     <!-- ===================== 单只标的 ===================== -->
     <section id="viewStock" class="view">
@@ -361,6 +433,40 @@ canvas{display:block;width:100%}
         <div class="seg" id="critSeg"></div>
         <div id="screenBody"></div>
       </div>
+    </section>
+
+    <!-- ===================== 因子台账 ===================== -->
+    <section id="viewFactors" class="view" hidden>
+      <div class="block-head"><h2>① 在册因子 · 谁在打分</h2><span class="badge today" id="factorBadge">日终</span><span class="line"></span><span id="factorAsOf"></span></div>
+      <div class="kpis" id="factorKpis"></div>
+      <div class="card panel">
+        <h3>因子清单 <span id="factorSummary"></span></h3>
+        <div class="tbl-wrap"><table class="tbl" id="factorTable"></table></div>
+        <div class="hint">
+          转正口径（规格里的准入流程，不是页面定的）：影子运行 ≥ <b id="shadowDays">20</b> 个交易日、
+          与已生效因子的相关系数绝对值 &lt; <b id="dupCorr">0.7</b>、20 日 IC 绝对值 ≥ 0.02，三项都过才算够格。
+          权重写的是"当前生效权重"——影子因子的权重是 0，它只记贡献分、不参与打分。
+        </div>
+      </div>
+      <div class="block-head"><h2>② 影子因子 · 转正进度</h2><span class="line"></span><span class="kv">样本够不够、跟老因子重不重、有没有独立预测力</span></div>
+      <div class="panels" id="shadowList"></div>
+    </section>
+
+    <!-- ===================== 参数回测 ===================== -->
+    <section id="viewBacktest" class="view" hidden>
+      <div class="block-head"><h2>① 参数网格 · 按需</h2><span class="badge" id="btBadge">本地重算</span><span class="line"></span><span id="btWhen"></span></div>
+      <div class="toolrow">
+        <span class="meta" id="btSample"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="btRun" data-job="backtest">跑一次回测</button>
+      </div>
+      <div class="kpis" id="btKpis"></div>
+      <div class="card panel">
+        <h3>参数组合 <span id="btNote"></span></h3>
+        <div id="btBody"></div>
+      </div>
+      <div class="block-head"><h2>② 怎么读</h2><span class="line"></span></div>
+      <div class="card panel"><div class="hint" id="btHelp"></div></div>
     </section>
   </main>
 </div>
@@ -1069,21 +1175,29 @@ function afterJob(last){
   loadFreshness(); loadQuotes();     // 任务跑完，数据状态跟着变
   if (last.key === 'daily'){
     screenData = null;
+    factorData = null;              // 日终会重算因子贡献，台账体检跟着失效
     loadWatchlist().then(() => { if (state.code) loadKline(); });
     loadRecentAlerts();
   }
   if (last.key === 'screen'){ screenData = null; loadScreen(); loadMarket(); }
   if (last.key === 'sync' || last.key === 'snapshot'){ marketData = null; if (!$('viewMarket').hidden) loadMarket(); }
+  if (last.key === 'backtest'){ backtestData = null; if (!$('viewBacktest').hidden) loadBacktest(); }
 }
 
 function switchView(name){
   $('viewStock').hidden = name !== 'stock';
   $('viewMarket').hidden = name !== 'market';
+  $('viewFactors').hidden = name !== 'factors';
+  $('viewBacktest').hidden = name !== 'backtest';
   document.querySelectorAll('#viewTabs button').forEach(btn =>
     btn.classList.toggle('on', btn.dataset.view === name));
   if (name === 'market'){
     loadMarket();
     loadScreen();
+  } else if (name === 'factors'){
+    loadFactors();
+  } else if (name === 'backtest'){
+    loadBacktest();
   } else {
     draw();          // 隐藏时画布宽度为 0，切回来必须重画
   }
@@ -1163,6 +1277,196 @@ function renderRank(id, items){
 /* ---------- 搜索 / 增删 ---------- */
 /* ---------- 全市场筛选 ---------- */
 let screenData = null, screenCrit = null;
+
+/* ---------- 因子台账：谁在打分、影子因子够不够格转正 ---------- */
+let factorData = null;
+
+function tagOf(status){
+  const map = {active:'生效', shadow:'影子', candidate:'候选', retired:'退役'};
+  return `<span class="tag ${status || ''}">${map[status] || status || '—'}</span>`;
+}
+function signed(value, digits = 2){
+  if (value === null || value === undefined) return '—';
+  return (value > 0 ? '+' : '') + Number(value).toFixed(digits);
+}
+function posNeg(value, text){
+  if (value === null || value === undefined) return '<span class="sub">—</span>';
+  return `<span class="${value > 0 ? 'pos' : (value < 0 ? 'neg' : 'sub')}">${text}</span>`;
+}
+
+async function loadFactors(){
+  if (factorData){ renderFactors(); return; }
+  $('factorKpis').innerHTML = '<div class="kpi"><span>读取中…</span><b>—</b></div>';
+  $('factorTable').innerHTML = '<tbody><tr><td><div class="skel"></div></td></tr></tbody>';
+  try{
+    factorData = await api('/api/factors');
+  }catch(e){
+    $('factorTable').innerHTML = '';
+    $('factorSummary').textContent = '读取失败';
+    $('factorKpis').innerHTML = `<div class="kpi"><span>因子台账</span><b>读不到</b><small>${e.message}</small></div>`;
+    return;
+  }
+  renderFactors();
+}
+
+function renderFactors(){
+  const d = factorData || {};
+  const items = d.items || [];
+  $('factorAsOf').textContent = d.as_of ? `贡献数据截至 ${d.as_of}` : '还没有因子贡献数据';
+  $('shadowDays').textContent = d.shadow_days ?? 20;
+  $('dupCorr').textContent = d.duplicate_corr ?? 0.7;
+
+  const active = (d.by_status || {}).active || 0;
+  const shadow = (d.by_status || {}).shadow || 0;
+  const violations = d.violations || [];
+  $('factorKpis').innerHTML = [
+    `<div class="kpi"><span>生效因子</span><b>${active}</b><small>参与打分</small></div>`,
+    `<div class="kpi"><span>影子因子</span><b>${shadow}</b><small>只记录、不计分</small></div>`,
+    `<div class="kpi"><span>最长覆盖</span><b>${d.max_days || 0}</b><small>个交易日</small></div>`,
+    `<div class="kpi"><span>权重预算</span><b>${violations.length ? violations.length : '正常'}</b>` +
+      `<small>${violations.length ? '有类别超出预算' : '各类别都在预算内'}</small></div>`,
+  ].join('');
+  $('factorSummary').textContent = d.note ? d.note : `共 ${items.length} 个`;
+
+  const rows = items.map(item => {
+    const corr = (item.max_corr === null || item.max_corr === undefined)
+      ? '<span class="sub">—</span>'
+      : `${signed(item.max_corr, 2)} <span class="sub">${item.max_corr_with || ''}</span>`;
+    return `<tr>
+      <td><span class="name">${item.name}</span><div class="sub">${item.factor_id}</div></td>
+      <td class="sub">${({state:'状态', opportunity:'机会', risk:'风险'})[item.layer] || item.layer || '—'}</td>
+      <td class="sub">${item.category || '—'}</td>
+      <td class="num">${item.weight ? Number(item.weight).toFixed(2) : '—'}</td>
+      <td>${tagOf(item.status)}</td>
+      <td class="num">${item.days || 0}<div class="sub">${item.last_date ? String(item.last_date).slice(5) : ''}</div></td>
+      <td class="num">${posNeg(item.ic5, signed(item.ic5, 3))}</td>
+      <td class="num">${posNeg(item.ic20, signed(item.ic20, 3))}</td>
+      <td>${corr}</td>
+      <td class="sub">${item.verdict || '—'}</td>
+    </tr>`;
+  }).join('');
+  $('factorTable').innerHTML =
+    `<thead><tr>
+       <th>因子</th><th>层</th><th>类别</th><th class="num">权重</th><th>状态</th>
+       <th class="num">覆盖</th><th class="num">IC5</th><th class="num">IC20</th>
+       <th>最大相关</th><th>结论</th>
+     </tr></thead>
+     <tbody>${rows || '<tr><td colspan="10" class="sub">还没有因子数据，先跑一次 3-每日任务</td></tr>'}</tbody>`;
+
+  const shadows = items.filter(item => item.status === 'shadow');
+  $('shadowList').innerHTML = shadows.length ? shadows.map(item => {
+    const need = d.shadow_days || 20;
+    const ratio = Math.min(1, (item.days || 0) / (need || 1));
+    const enough = (item.days || 0) >= need;
+    const corr = (item.max_corr === null || item.max_corr === undefined)
+      ? '—' : `${signed(item.max_corr, 2)} ${item.max_corr_with || ''}`;
+    return `<div class="card panel">
+      <h3>${item.name} <span>${item.factor_id}</span></h3>
+      <div class="sub" style="margin-bottom:5px">样本 ${item.days || 0} / ${need} 个交易日</div>
+      <div class="prog"><i class="${enough ? '' : 'warn'}" style="width:${(ratio * 100).toFixed(0)}%"></i></div>
+      <table class="tbl" style="margin-top:8px"><tbody>
+        <tr><td class="sub">20 日 IC</td><td class="num">${posNeg(item.ic20, signed(item.ic20, 3))}</td></tr>
+        <tr><td class="sub">最大相关</td><td class="num">${corr}</td></tr>
+        <tr><td class="sub">结论</td><td class="sub">${item.verdict || '—'}</td></tr>
+      </tbody></table>
+    </div>`;
+  }).join('') : '<div class="card panel"><div class="empty-state"><b>暂无影子因子</b>config.yaml 里 status: shadow 的因子会出现在这里</div></div>';
+}
+
+/* ---------- 参数回测：哪组参数真有超额，哪组只是拟合出来的尖峰 ---------- */
+let backtestData = null;
+
+function fmtNum(value, digits = 2){
+  return (value === null || value === undefined) ? '—' : Number(value).toFixed(digits);
+}
+
+async function loadBacktest(){
+  if (backtestData && backtestData.ok){ renderBacktest(); return; }
+  $('btKpis').innerHTML = '<div class="kpi"><span>读取中…</span><b>—</b></div>';
+  $('btBody').innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  try{
+    backtestData = await api('/api/backtest');
+  }catch(e){
+    $('btBody').innerHTML = `<div class="empty-state"><b>读不到回测结果</b>${e.message}</div>`;
+    return;
+  }
+  renderBacktest();
+}
+
+function renderBacktest(){
+  const d = backtestData || {};
+  $('btHelp').innerHTML = [
+    '<b>先看 20 日净超额</b>：正数才有意义。胜率高但超额为负，说明只是那段时间行情好。',
+    '<b>再看信号数</b>：几十次以下的结果没有统计意义，别据此改参数。',
+    '<b>再看邻域</b>：自己高、邻居也大多为正 → 这片参数都能用；自己高、邻居塌下去 → 尖峰，多半是拟合。',
+    '<b>回撤列</b>是持有 20 天期间的平均最大回撤，代表要忍多大的浮动；',
+    '<b>不可成交列</b>是被剔除的信号数（涨停买不进、跌停卖不掉）。它占比越高，说明这套规则越盯着最强的票，那部分收益现实中拿不到。',
+  ].join('');
+
+  if (!d.ok){
+    $('btWhen').textContent = '';
+    $('btSample').textContent = '';
+    $('btNote').textContent = '';
+    $('btKpis').innerHTML = '';
+    $('btBody').innerHTML = `<div class="empty-state"><b>${d.message || '还没有回测结果'}</b>${d.hint || ''}</div>`;
+    return;
+  }
+
+  const items = d.items || [];
+  const sample = d.sample || {};
+  const cur = d.current || {};
+  const best = items[0] || {};
+  const positive = items.filter(row => (row.excess20 || 0) > 0).length;
+
+  $('btWhen').textContent = d.saved_at ? `上次运行 ${d.saved_at}` : '';
+  $('btSample').innerHTML = [
+    sample.mode === 'watchlist' ? '观察池口径' : '全市场抽样',
+    d.code_count ? `${d.code_count} 只标的` : '',
+    d.years ? `${Number(d.years).toFixed(1)} 年` : '',
+    d.cost !== undefined ? `往返成本 ${(d.cost * 100).toFixed(3)}%` : '',
+    d.limit_check ? '已剔除涨停买不进/跌停卖不出' : '未做可成交性检查',
+  ].filter(Boolean).join(' · ');
+  $('btNote').textContent = `共 ${d.total || items.length} 组，按 20 日净超额排序`;
+  $('btKpis').innerHTML = [
+    `<div class="kpi"><span>参数组合</span><b>${d.total || items.length}</b><small>网格里的组合数</small></div>`,
+    `<div class="kpi"><span>最好的一组</span><b class="${(best.excess20 || 0) > 0 ? 'pos' : 'neg'}">${signed(best.excess20, 2)}%</b>` +
+      `<small>${best.label || '—'}</small></div>`,
+    `<div class="kpi"><span>净超额为正</span><b>${positive} / ${items.length}</b><small>前 ${items.length} 组里</small></div>`,
+    `<div class="kpi"><span>当前配置</span><b>${cur.enter_up ?? '—'}</b>` +
+      `<small>确认 ${cur.confirm_days ?? '—'} 日 · 最短 ${cur.min_state_days ?? '—'} 日</small></div>`,
+  ].join('');
+
+  const rows = items.map(row => {
+    const p = row.params || {};
+    const isCurrent = p.enter_up === cur.enter_up
+      && p.confirm_days === cur.confirm_days
+      && p.min_state_days === cur.min_state_days;
+    const near = row.plateau || {};
+    const nearText = near.mean === null || near.mean === undefined
+      ? '<span class="sub">—</span>'
+      : `${signed(near.mean, 2)} / 最差 ${signed(near.worst, 2)} / 为正 ${Math.round(near.positive || 0)}%`;
+    return `<tr class="${isCurrent ? 'on' : ''}">
+      <td><span class="name">${row.label || `enter_up=${p.enter_up}`}</span>${isCurrent ? ' <span class="tag active">当前</span>' : ''}</td>
+      <td class="num">${row.signals ?? 0}<div class="sub">${row.blocked ? '剔除 ' + row.blocked : ''}</div></td>
+      <td class="num">${fmtNum(row.win20, 1)}%</td>
+      <td class="num">${signed(row.avg20, 2)}%</td>
+      <td class="num sub">${signed(row.base20, 2)}%</td>
+      <td class="num">${posNeg(row.excess20, signed(row.excess20, 2) + '%')}</td>
+      <td class="num sub">${signed(row.mdd20, 1)}%</td>
+      <td class="num sub">${fmtNum(row.freq, 1)}</td>
+      <td class="sub">${nearText}</td>
+    </tr>`;
+  }).join('');
+
+  $('btBody').innerHTML = `<div class="tbl-wrap"><table class="tbl">
+    <thead><tr>
+      <th>参数组合</th><th class="num">信号数</th><th class="num">20日胜率</th>
+      <th class="num">20日均值</th><th class="num">基准</th><th class="num">净超额</th>
+      <th class="num">平均回撤</th><th class="num">年频次</th><th>邻域（均值/最差/为正）</th>
+    </tr></thead>
+    <tbody>${rows || '<tr><td colspan="9" class="sub">这次回测没有产出组合</td></tr>'}</tbody>
+  </table></div>`;
+}
 
 async function loadScreen(){
   if (screenData){ renderScreen(); return; }
@@ -1373,4 +1677,3 @@ document.addEventListener('visibilitychange', async () => {
 </script>
 </body>
 </html>
-.badge{border-radius:99px;padding:1px 7px;font-size:11px;border:1px solid transparent}

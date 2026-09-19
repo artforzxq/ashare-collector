@@ -349,6 +349,7 @@ def cmd_backtest(args) -> int:
     print(text)
     if not args.no_save:
         target = backtest_mod.write_report(text, cfg["_project_root"])
+        backtest_mod.save_result(result, cfg["_project_root"])   # 页面读的是这份 json
         print("")
         print(f"报告已保存：{target}")
     return 0

@@ -223,6 +223,86 @@ class App:
     def freshness(self) -> dict:
         return _freshness_payload(self.cfg)
 
+    # ---- 因子台账 / 参数回测 ----
+
+    def factors(self) -> dict:
+        """因子台账：谁在打分、权重多大、影子因子够不够格转正。
+
+        数据全部来自本地库：factor_registry 是"在册名单"，factor_contributions 是
+        "每个交易日实际记了什么"，相关性与 IC 由 promotion 现算。
+        整段都是只读，所以样本大了最多是这个接口慢，不影响别的接口。
+        """
+        from . import promotion
+        from .registry import FactorRegistry
+
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM factor_contributions")
+            as_of = row["d"] if row else None
+            items: list[dict] = []
+            note = ""
+            try:
+                items = promotion.factor_stats(conn, self.cfg)
+            except Exception as exc:      # 空库、样本太少都不该让页面白屏
+                note = f"体检没算出来：{type(exc).__name__} {exc}"
+
+            by_status: dict[str, int] = {}
+            for item in items:
+                by_status[item["status"]] = by_status.get(item["status"], 0) + 1
+
+            violations: list[str] = []
+            try:
+                registry = FactorRegistry(
+                    self.cfg.get("factors", []),
+                    str(self.cfg["project"].get("feature_version", "v1")),
+                )
+                violations = registry.category_budget_violations()
+            except Exception as exc:
+                note = note or f"权重预算没检查成：{exc}"
+
+            return {
+                "ok": True,
+                "as_of": as_of,
+                "items": items,
+                "by_status": by_status,
+                "shadow_days": promotion.SHADOW_DAYS,
+                "duplicate_corr": promotion.DUPLICATE_CORR,
+                "max_days": max((item["days"] for item in items), default=0),
+                "violations": violations,
+                "note": note,
+            }
+        finally:
+            conn.close()
+
+    def backtest(self) -> dict:
+        """最近一次参数回测的结果。没跑过就直说怎么跑，不假装有数据。"""
+        from . import backtest as backtest_mod
+
+        data = backtest_mod.latest_result(self.cfg["_project_root"])
+        if not data:
+            return {
+                "ok": False,
+                "message": "还没跑过参数回测",
+                "hint": "它会用生产代码里同一套状态机，把参数网格放到本地历史上重跑一遍，"
+                        "告诉你哪组参数真有超额、哪组只是拟合出来的尖峰。",
+            }
+        results = data.get("results") or []
+        return {
+            "ok": True,
+            "saved_at": data.get("_saved_at"),
+            "file": data.get("_file"),
+            "current": data.get("current"),
+            "sample": data.get("sample"),
+            "years": data.get("years"),
+            "bars": data.get("bars"),
+            "code_count": data.get("code_count"),
+            "cost": data.get("cost"),
+            "limit_check": data.get("limit_check"),
+            "plateau": data.get("plateau"),
+            "items": results[:40],
+            "total": len(results),
+        }
+
     # ---- 页面上的任务按钮 ----
 
     def job_state(self) -> dict:
@@ -299,6 +379,20 @@ class App:
             finally:
                 conn.close()
 
+        def backtest():
+            from . import backtest as backtest_mod
+
+            conn = db.connect(cfg["_db_path"])
+            try:
+                result = backtest_mod.run_grid(conn, cfg, verbose=True)
+                if not result.get("ok"):
+                    raise RuntimeError(result.get("message", "回测失败"))
+                backtest_mod.write_report(backtest_mod.render_report(result), cfg["_project_root"])
+                saved = backtest_mod.save_result(result, cfg["_project_root"])
+                return f"扫了 {len(result['results'])} 组参数，页面结果已更新（{saved.name}）"
+            finally:
+                conn.close()
+
         table = {
             "daily": ("更新自选数据", daily),
             "sync": ("同步全市场", sync),
@@ -306,6 +400,7 @@ class App:
             "snapshot": ("补当日快照", snapshot),
             "intraday": ("抓当日分时", intraday),
             "push": ("推送简报到手机", push),
+            "backtest": ("跑参数回测", backtest),
         }
         entry = table.get(key)
         if entry is None:
@@ -685,7 +780,8 @@ def _health_payload(cfg: dict) -> dict:
         "code_mtime": datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S"),
         "stale": newest > PROCESS_STARTED_TS,
         "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
-                   "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search", "/api/jobs"],
+                   "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
+                   "/api/jobs", "/api/factors", "/api/backtest"],
     }
 
 
@@ -703,13 +799,16 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
         if not trade_date:
             return {"trade_date": None, "sample": 0, "note": "本地还没有日线数据"}
 
+        # 只数个股：指数不是"家"，而且指数那列的成交额是整个市场的量（上证指数 ≈ 全市场成交额），
+        # 混进来会把"全市场成交额"直接放大成几万亿的假数字。口径和 breadth.local_rows 一致。
         rows = [
             dict(row)
             for row in db.query(
                 conn,
                 """SELECT b.code, COALESCE(i.name, b.code) AS name, b.close, b.pct_chg, b.amount
                    FROM bars_daily b LEFT JOIN instruments i ON i.code = b.code
-                   WHERE b.trade_date=? AND b.pct_chg IS NOT NULL""",
+                   WHERE b.trade_date=? AND b.pct_chg IS NOT NULL
+                     AND (i.type IS NULL OR i.type = 'stock')""",
                 (trade_date,),
             )
         ]
@@ -776,6 +875,10 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes({"items": app.recent_alerts()})
             if path == "/api/screen":
                 return _payload_bytes(_screen_payload(app.cfg))
+            if path == "/api/factors":
+                return _payload_bytes(app.factors())
+            if path == "/api/backtest":
+                return _payload_bytes(app.backtest())
             if path == "/api/meta":
                 return _payload_bytes(_meta_payload(app.cfg))
             if path == "/api/market":

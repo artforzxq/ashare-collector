@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import statistics
 from datetime import datetime
 from pathlib import Path
@@ -513,3 +514,52 @@ def write_report(text: str, root: str | Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     return target
+
+
+def save_result(result: dict, root: str | Path) -> Path:
+    """把这次回测的结构化结果也存一份。
+
+    报告是给人读的 markdown，页面要的是能排序、能高亮的表格，所以两份都留：
+    markdown 用来存档和回看，json 用来给页面渲染（页面不该为看一眼结果重跑一遍回测）。
+
+    两处要为 json 做转换：
+      - `codes` 那几百个代码对页面没用，存长度就行，不然白白大几百 KB；
+      - `plateau` 的键是元组（python 能当字典键，json 不能），而且页面看的是"某一行的邻域表现"，
+        所以直接并进每一行里，别让前端再自己拼 key。
+    """
+    plateau = result.get("plateau") or {}
+    rows: list[dict] = []
+    for row in result.get("results") or []:
+        params = row.get("params") or {}
+        key = (params.get("enter_up"), params.get("confirm_days"), params.get("min_state_days"))
+        item = dict(row)
+        cell = plateau.get(key)
+        if cell:
+            item["plateau"] = cell
+        rows.append(item)
+
+    slim = {key: value for key, value in result.items() if key not in ("codes", "plateau", "results")}
+    slim["results"] = rows
+    slim["code_count"] = len(result.get("codes") or [])
+    target = Path(root) / "回测" / f"回测结果-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(slim, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+def latest_result(root: str | Path) -> dict | None:
+    """最近一次回测的结构化结果；没跑过就返回 None。"""
+    folder = Path(root) / "回测"
+    if not folder.exists():
+        return None
+    files = sorted(folder.glob("回测结果-*.json"))
+    if not files:
+        return None
+    newest = files[-1]
+    try:
+        data = json.loads(newest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    data["_file"] = newest.name
+    data["_saved_at"] = datetime.fromtimestamp(newest.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    return data
