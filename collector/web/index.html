@@ -23,7 +23,7 @@
     --shadow-pop:0 18px 44px rgba(15,23,42,.16),0 4px 10px rgba(15,23,42,.06);
     --topbar-h:58px;
     /* 图表用色也在主题里：canvas 读这些变量，切主题时重画一次就行 */
-    --chart-grid:#eceef3; --chart-axis:#9aa3b2;
+    --chart-grid:#eceef3; --chart-axis:#9aa3b2; --chart-line:#12a05c;
     --ma20:#f2a13b; --ma60:#3b82f6; --ma120:#8b5cf6;
     --band-support:rgba(59,130,246,.10); --band-support-edge:rgba(59,130,246,.45);
     --band-resistance:rgba(226,69,60,.10); --band-resistance-edge:rgba(226,69,60,.45);
@@ -44,7 +44,7 @@
     --p2:#7a8391;
     --shadow:0 12px 32px rgba(0,0,0,.45),0 2px 8px rgba(0,0,0,.30);
     --shadow-pop:0 20px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);
-    --chart-grid:#232a35; --chart-axis:#6b7684;
+    --chart-grid:#232a35; --chart-axis:#6b7684; --chart-line:#2fbf71;
     --ma20:#f0b03c; --ma60:#5b9cf8; --ma120:#a78bfa;
     --band-support:rgba(91,156,248,.14); --band-support-edge:rgba(91,156,248,.50);
     --band-resistance:rgba(255,95,95,.13); --band-resistance-edge:rgba(255,95,95,.50);
@@ -630,7 +630,7 @@ canvas{display:block;width:100%}
 /* 图表配色从 CSS 变量读，切主题时整体换一遍并重画——
    否则深色主题下会留下一张白底的旧图，看着像贴上去的。 */
 let C = {
-  grid:'#eceef3', axis:'#9aa3b2', text:'#6b7280',
+  grid:'#eceef3', axis:'#9aa3b2', text:'#6b7280', line:'#12a05c',
   up:'#e2453c', down:'#12a05c', warn:'#b45309',
   ma20:'#f2a13b', ma60:'#3b82f6', ma120:'#8b5cf6',
   support:'rgba(59,130,246,.10)', supportEdge:'rgba(59,130,246,.45)',
@@ -643,6 +643,7 @@ function readChartColors(){
   C = {
     grid: v('--chart-grid', C.grid), axis: v('--chart-axis', C.axis),
     text: v('--muted', C.text), up: v('--up', C.up), down: v('--down', C.down),
+    line: v('--chart-line', C.line),
     warn: v('--warn', C.warn),
     ma20: v('--ma20', C.ma20), ma60: v('--ma60', C.ma60), ma120: v('--ma120', C.ma120),
     support: v('--band-support', C.support), supportEdge: v('--band-support-edge', C.supportEdge),
@@ -958,7 +959,10 @@ function drawIntraday(){
     ctx.stroke();
   };
   line('avg', C.ma20);
-  line('p', (d.prev_close && pts[n-1].p < d.prev_close) ? C.down : C.up);
+  // 分时价线固定用绿色（黄=均价），不跟着当日涨跌变色：
+  // 涨跌信息在昨收虚线和下方成交量柱上已经说清楚了，价线再变色只会让同一个信号出现两次、
+  // 而且同样是"绿线"在不同股票上含义不同（一个是跌、一个只是"没涨"）。统一成绿黄更好读。
+  line('p', C.line);
 
   const last = pts[n-1];
   const total = pts.reduce((s, p)=>s + (p.v || 0), 0);
