@@ -302,6 +302,7 @@ canvas{display:block;width:100%}
   .tbl td.num,.tbl th.num{text-align:right}
   .tbl .name{font-weight:600}
   .tbl .sub{color:var(--muted);font-size:11.5px}
+  .tbl tr.total td{border-top:1px solid var(--line);font-weight:600;background:var(--hover)}
   .tag{display:inline-block;padding:1px 6px;border-radius:var(--r-xs);font-size:10.5px;
        background:var(--track);color:var(--muted);white-space:nowrap}
 
@@ -1754,9 +1755,10 @@ function renderSupport(){
   }
   const conf = today.thresholds;
   $('supportMeta').textContent = `判定日 ${today.trade_date}（份额 T+1 披露）`;
-  $('supportNote').textContent = today.hits.length
-    ? `命中 ${today.hits.length} 只，合计净流入 ${(today.net_inflow / 1e8).toFixed(1)} 亿元`
-    : '';
+  const totals = today.totals || {};
+  const sumText = (totals.inflow === null || totals.inflow === undefined) ? ''
+    : `${totals.inflow >= 0 ? '合计净申购' : '合计净赎回'} ${Math.abs(totals.inflow / 1e8).toFixed(1)} 亿元`;
+  $('supportNote').textContent = (today.hits.length ? `命中 ${today.hits.length} 只　` : '') + sumText;
 
   const items = today.items || [];
   $('supportBody').innerHTML = items.length
@@ -1766,7 +1768,7 @@ function renderSupport(){
        </tr></thead><tbody>` + items.map(item => {
         const inflow = item.inflow || 0;
         return `<tr class="${item.hit ? 'on' : ''}">
-          <td><span class="name">${item.code}</span><div class="sub">${item.price_basis ? '按' + item.price_basis + '折算' : ''}</div></td>
+          <td><span class="name">${item.name || item.code}</span><div class="sub">${item.code}${item.price_basis ? ' · 按' + item.price_basis + '折算' : ''}</div></td>
           <td class="num">${(item.shares / 1e8).toFixed(2)}</td>
           <td class="num">${posNeg(item.shares_pct, signed(item.shares_pct, 2) + '%')}</td>
           <td class="num">${item.amount_z === null
@@ -1775,7 +1777,14 @@ function renderSupport(){
           <td class="num">${posNeg(inflow, (inflow / 1e8).toFixed(2))}</td>
           <td>${item.hit ? '<span class="tag shadow">命中</span>' : '<span class="sub">—</span>'}</td>
         </tr>`;
-      }).join('') + '</tbody></table>' +
+      }).join('') + `<tr class="total">
+          <td><span class="name">合计</span><div class="sub">${totals.count || items.length} 只宽基${(totals.unpriced || []).length ? '，' + totals.unpriced.length + ' 只缺价格未计入' : ''}</div></td>
+          <td class="num">${totals.shares ? (totals.shares / 1e8).toFixed(2) : '—'}</td>
+          <td class="num">${(totals.shares_pct === null || totals.shares_pct === undefined) ? '—' : posNeg(totals.shares_pct, signed(totals.shares_pct, 2) + '%')}</td>
+          <td class="num"><span class="sub">不比</span></td>
+          <td class="num">${(totals.inflow === null || totals.inflow === undefined) ? '—' : posNeg(totals.inflow, (totals.inflow / 1e8).toFixed(2))}</td>
+          <td><span class="sub">${today.hits.length ? today.hits.length + ' 只命中' : '无命中'}</span></td>
+        </tr>` + '</tbody></table>' +
       `<div class="hint">判定条件：份额增幅 ≥ ${(conf.shares_pct * 100).toFixed(1)}%　且　成交额 z ≥ ${conf.amount_z}`
       + `（基准太平算不出 z 时用倍数 ≥ ${conf.amount_ratio}×）　且　`
       + `净流入 ≥ ${(conf.min_inflow / 1e8).toFixed(0)} 亿；同时命中 ≥ ${conf.multi_count} 只 → 升 P1（齐步走）。` +

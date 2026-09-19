@@ -69,6 +69,39 @@ class SupportTests(unittest.TestCase):
         self.assertGreaterEqual(item["amount_ratio"], 2.0)
         self.assertGreater(item["inflow"], 200_000_000)
 
+    def test_each_row_carries_a_readable_name(self):
+        """光给代码没人看得懂：名字要么来自代码表，要么来自内置小对照表。"""
+        db.upsert_rows(self.conn, "instruments",
+                       [{"code": CODE, "name": "沪深300ETF", "type": "etf"}], ["code"])
+        self._seed()
+        self.conn.commit()
+        items = support.scan(self.conn, self.cfg)["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["code"], CODE)
+        self.assertTrue(items[0]["name"], items[0])
+
+    def test_unknown_etf_has_no_name_rather_than_a_wrong_one(self):
+        """查不到名字就给空串，页面自己退回显示代码——别拿代码当名字糊上去。"""
+        self.cfg["support"]["etfs"] = ["SH599999"]
+        self._seed(code="SH599999")
+        items = support.scan(self.conn, self.cfg)["items"]
+        self.assertEqual(items[0]["name"], "")
+        self.assertEqual(items[0]["code"], "SH599999")
+
+    def test_totals_add_up_and_use_a_recomputed_ratio(self):
+        """合计份额增幅要重算（Σ份额 ÷ Σ前日份额），不能拿各只增幅平均——
+        一只小基金翻倍就能把"宽基整体"的增幅带跑偏。"""
+        self.cfg["support"]["etfs"] = ["SH510300", "SH510050"]
+        self._seed(code="SH510300", shares_prev=1_000_000_000.0, shares_today=2_000_000_000.0)
+        self._seed(code="SH510050", shares_prev=100_000_000_000.0, shares_today=100_000_000_000.0)
+        self.conn.commit()
+        result = support.scan(self.conn, self.cfg)
+        totals = result["totals"]
+        self.assertEqual(totals["count"], 2)
+        self.assertAlmostEqual(totals["shares"], 102_000_000_000.0, places=0)
+        self.assertAlmostEqual(totals["shares_pct"], 0.99, places=2)      # 不是 (100% + 0%) / 2
+        self.assertAlmostEqual(totals["inflow"], totals["shares_delta"] * 4.0, places=0)
+
     def test_volume_alone_is_not_enough(self):
         """放量但份额没动 → 只是二级市场换手，不算托底。"""
         self._seed(shares_today=10_000_000_000.0)

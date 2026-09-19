@@ -22,6 +22,7 @@ import json
 import statistics
 
 from . import db
+from .names import display_name
 
 # 默认盯这几只宽基：指数基金里"托底资金"最常出现的地方
 DEFAULT_ETFS = ["SH510300", "SH510050", "SH510500", "SH512100", "SH588000", "SZ159919", "SZ159915"]
@@ -81,6 +82,10 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
 
     items: list[dict] = []
     thin = []                                   # 有份额、但只有一天，算不出变化的
+    names = {
+        row["code"]: row["name"]
+        for row in db.query(conn, "SELECT code, name FROM instruments WHERE name IS NOT NULL")
+    }
     for code in conf["etfs"]:
         rows = [
             dict(row)
@@ -120,6 +125,7 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
         )
         items.append({
             "code": code,
+            "name": display_name(code, names.get(code)),
             "shares": today["shares"],
             "shares_prev": prev["shares"],
             "shares_delta": delta,
@@ -139,11 +145,29 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
     level = None
     if hits:
         level = "P1" if len(hits) >= int(conf["multi_count"]) else "P2"
+    # 合计：光看单只 ETF 的份额变化，答不出"宽基整体是净申购还是净赎回"——
+    # 而那才是"有没有人在用宽基进场"这句话的正题。
+    # 口径说明：份额/净流入直接相加；增幅用 Σ份额 ÷ Σ前日份额 重算，
+    # 不能用各只增幅的平均（小基金翻倍会把总数带跑偏）。
+    total_shares = sum(item["shares"] for item in items if item.get("shares"))
+    total_prev = sum(item["shares_prev"] for item in items if item.get("shares_prev"))
+    priced = [item for item in items if item.get("inflow") is not None]
+    totals = {
+        "count": len(items),
+        "shares": total_shares,
+        "shares_prev": total_prev,
+        "shares_delta": total_shares - total_prev,
+        "shares_pct": round((total_shares / total_prev - 1) * 100, 2) if total_prev else None,
+        "inflow": sum(item["inflow"] for item in priced) if priced else None,
+        # 有哪几只算不出净流入（缺价格）要说清楚，不能把"算了一部分"当"合计"
+        "unpriced": [item["code"] for item in items if item.get("inflow") is None],
+    }
     return {
         "ok": True,
         "trade_date": trade_date,
         "thin": thin,
         "level": level,
+        "totals": totals,
         "items": sorted(items, key=lambda item: -(item["inflow"] or 0)),
         "hits": hits,
         "net_inflow": sum(item["inflow"] or 0 for item in hits) if hits else 0.0,
