@@ -434,6 +434,8 @@ canvas{display:block;width:100%}
           <span><i style="background:var(--warn);border-radius:99px;width:8px;height:8px"></i>P1</span>
           <span><i style="background:var(--up);clip-path:polygon(50% 0,100% 100%,0 100%);width:11px;height:8px"></i>形态·反转向上</span>
           <span><i style="background:var(--down);clip-path:polygon(0 0,100% 0,50% 100%);width:11px;height:8px"></i>形态·反转向下</span>
+          <span><i style="background:var(--warn);transform:rotate(45deg);width:7px;height:7px;border-radius:1px"></i>组合形态</span>
+          <span><i style="background:var(--chart-axis);border-radius:99px;width:6px;height:6px"></i>其他形态</span>
         </div>
       </div>
 
@@ -629,7 +631,7 @@ canvas{display:block;width:100%}
    否则深色主题下会留下一张白底的旧图，看着像贴上去的。 */
 let C = {
   grid:'#eceef3', axis:'#9aa3b2', text:'#6b7280',
-  up:'#e2453c', down:'#12a05c',
+  up:'#e2453c', down:'#12a05c', warn:'#b45309',
   ma20:'#f2a13b', ma60:'#3b82f6', ma120:'#8b5cf6',
   support:'rgba(59,130,246,.10)', supportEdge:'rgba(59,130,246,.45)',
   resistance:'rgba(226,69,60,.10)', resistanceEdge:'rgba(226,69,60,.45)'
@@ -641,6 +643,7 @@ function readChartColors(){
   C = {
     grid: v('--chart-grid', C.grid), axis: v('--chart-axis', C.axis),
     text: v('--muted', C.text), up: v('--up', C.up), down: v('--down', C.down),
+    warn: v('--warn', C.warn),
     ma20: v('--ma20', C.ma20), ma60: v('--ma60', C.ma60), ma120: v('--ma120', C.ma120),
     support: v('--band-support', C.support), supportEdge: v('--band-support-edge', C.supportEdge),
     resistance: v('--band-resistance', C.resistance), resistanceEdge: v('--band-resistance-edge', C.resistanceEdge),
@@ -708,12 +711,18 @@ function buildHelp(m){
     },
     candle: {
       label: 'K 线形态',
-      what: '今天这根 K 线长什么样、它是否构成反转确认，以及它长在什么位置上。',
-      how: '看实体与影线比例、是否放量、是否吞没前一根、是否跳空、是否站上前 10 日高点。至少两个独立信号同时出现才算"反转确认"，避免单根 K 线就下结论。',
+      what: '今天这根 K 线（或这组 K 线）长什么样、它是不是反转确认，以及它长在什么位置上。',
+      how: '单根看实体与影线比例（锤子要求小实体 + 下影 ≥2 倍实体 + 另一侧几乎没影线）、是否放量、'
+        + '是否吞没前一根、是否跳空、是否站上前 10 日高点。<b>组合形态看两三根之间的关系</b>：'
+        + '早晨之星/黄昏之星、看涨/看跌孕线、乌云盖顶/刺透、平底/平顶、红三兵/三只乌鸦。'
+        + '两个口径要点：① 反转类形态必须出现在<b>相应的趋势之后</b>——锤子和上吊线的形状一模一样，'
+        + '区别只在前面是涨还是跌；② "反转确认" = 至少两个独立信号，<b>或</b>一个组合形态。',
       use: '均线和 ATR 都是平滑后的指标，天生滞后；形态是它们之前先动的部分。下跌趋势里只有出现反转确认，风险层才允许试探仓。'
-        + '<b>图上的形态标记只画关键位置</b>：20 日区间上下沿 / 破 20 日高或低 / 均线附近或穿越 / 20 日新低新的分型。'
-        + '而且形态本身要够硬（反转确认、吞没、跳空、放量长实体）——一年 250 根 K 线里每根都能被叫做"十字星"或"长阳"，'
-        + '每天都画等于没画。标记不带任何预测：它说的是"这里出现了什么"，不是"该买还是该卖"。'
+        + '<b>图上只画关键位置上的形态</b>：20 日区间上下沿 / 破 20 日高或低 / 均线附近或穿越 / 20 日极值分型。'
+        + '不这么筛的话，一年 250 根 K 线里有六成以上都能叫出某个形态名，每天都画等于没画。'
+        + '标记的形状：<b>三角</b>=反转确认，<b>菱形</b>=组合形态，<b>小圆点</b>=其他关键位形态。'
+        + '提醒只在关键位置响：反转 + 放量 → P1，组合形态或放量单根 → P2，平量的单根只画图不打扰。'
+        + '标记不带任何预测：它说的是"这里出现了什么"，不是"该买还是该卖"。'
     },
     rr: {
       label: '盈亏比',
@@ -1216,7 +1225,8 @@ function draw(){
   }
 
   // 形态标记：只画"关键位置上的明显形态"（口径在后端 candles.marks，页面不自己判断）。
-  // 反转确认画三角，其余的关键位置形态画小点——一年下来三十来个，不会把图铺满。
+  // 三角 = 反转确认（≥2 个信号），菱形 = 组合形态（星线/孕线/乌云/刺透/平头/三兵三鸦），
+  // 其余的关键位置形态画小点——一年下来三十来个，不会把图铺满。
   let shapeCount = 0;
   if ($('tPattern').checked){
     bars.forEach((b,i)=>{
@@ -1224,7 +1234,7 @@ function draw(){
       shapeCount++;
       const x = xs(i);
       const isUp = c.up, isDown = c.down;
-      const color = isUp ? C.up : (isDown ? C.down : C.axis);
+      const color = isUp ? C.up : (isDown ? C.down : (c.combo ? C.warn : C.axis));
       ctx.fillStyle = color;
       if (isUp || isDown){
         const y = isUp ? Math.max(yOf(b.low) + 8, priceTop + 7) : Math.min(yOf(b.high) - 8, priceBottom - 7);
@@ -1234,6 +1244,10 @@ function draw(){
         ctx.lineTo(x - 4.5, y - 4*dir);
         ctx.lineTo(x + 4.5, y - 4*dir);
         ctx.closePath(); ctx.fill();
+      } else if (c.combo){
+        const y = Math.min(yOf(b.low) + 7, priceBottom - 4);
+        ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI/4);
+        ctx.fillRect(-3, -3, 6, 6); ctx.restore();
       } else {
         ctx.beginPath();
         ctx.arc(x, Math.min(yOf(b.low) + 7, priceBottom - 3), 2.2, 0, Math.PI*2);
@@ -1282,14 +1296,23 @@ function draw(){
     ctx.setLineDash([]);
     const tip = $('tip');
     tip.style.display = 'block';
-    tip.innerHTML = `${b.trade_date}<br>开 ${fmt(b.open)} 高 ${fmt(b.high)}<br>低 ${fmt(b.low)} 收 ${fmt(b.close)}<br>` +
+      // 有形态标记的那一根，把"是什么形态 + 长在什么关键位置"一起说清楚：
+      // 只看形态名没有意义，位置才是它成立的理由。
+      const candleText = b.candle
+        ? `<br><b>${b.candle.combo ? '组合形态' : '形态'}</b> ${b.candle.pattern}` +
+          `<br><span style="color:var(--muted)">关键位置：${(b.candle.reasons||[]).join('、') || '—'}</span>`
+        : '';
+      tip.innerHTML = `${b.trade_date}<br>开 ${fmt(b.open)} 高 ${fmt(b.high)}<br>低 ${fmt(b.low)} 收 ${fmt(b.close)}<br>` +
                     `涨跌 ${pct(b.pct_chg)} 量比 ${fmt(b.vol_ratio_20,2)}<br>` +
                     `趋势 ${fmt(b.trend_score,1)} ${b.state?STATE_NAME[b.state]:''}` +
-                    (b.candle ? `<br><b>形态</b> ${b.candle.pattern}<br><span style="color:var(--muted)">${(b.candle.reasons||[]).join('、')}</span>` : '') +
+                    candleText +
                     (d.alerts.some(a=>a.trade_date===b.trade_date) ? '<br><b>有提醒</b>' : '');
-    const left = Math.min(x + 14, W - 150);
+    // 提示框现在会带形态与关键位置两行，宽度不再固定：先量出真实宽度再夹住，
+    // 否则靠右那几根 K 线的提示会被画布边缘切掉半句。
+    const tipW = tip.offsetWidth || 160, tipH = tip.offsetHeight || 110;
+    const left = Math.max(6, Math.min(x + 14, W - tipW - 8));
     tip.style.left = left + 'px';
-    tip.style.top = Math.max(6, yOf(b.high) - 90) + 'px';
+    tip.style.top = Math.max(6, Math.min(yOf(b.high) - 90, H - tipH - 6)) + 'px';
   } else {
     $('tip').style.display = 'none';
   }

@@ -737,6 +737,7 @@ class App:
                         "pattern": mark["pattern"],
                         "up": mark["up"],
                         "down": mark["down"],
+                        "combo": mark.get("combo", False),
                         "reasons": mark["reasons"],
                     }
             alerts = [
