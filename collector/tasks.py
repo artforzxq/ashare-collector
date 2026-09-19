@@ -298,6 +298,15 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
 
     _log("[7/7] 仲裁并生成提醒", verbose)
     alerts = _decide(conn, cfg, trade_date, state_rows, bands_by_code, level, summary, verbose)
+    # 资金去向落一行（四把尺子 + 集中度）。放在最后：ETF 份额、融资余额、日线都已入库，
+    # 这一行才是当天最终的口径；也是"宽基净申购日后面行情好不好"这类问题的唯一数据来源。
+    try:
+        recorded = flow_mod.record(conn, cfg, trade_date)
+        if recorded.get("ok"):
+            _log(f"      资金去向已落库：宽基 {recorded['row']['broad_etf_inflow']} 亿，"
+                 f"集中度 {recorded['row']['top100_pct']}%", verbose)
+    except Exception as exc:
+        _log(f"      ! 资金去向没落库：{type(exc).__name__} {exc}", verbose)
     summary["alerts"] = alerts
 
     # 顺手回填历史提醒的实际表现（复盘要用），失败不影响当日流程

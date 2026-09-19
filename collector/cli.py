@@ -765,6 +765,26 @@ def cmd_flow(args) -> int:
         if study.get("contrast"):
             c = study["contrast"]
             print(f"  {c['label']}：{c['gap']:+.2f}pp（t {c['t']}，校正 p {c['p_adj']}）")
+    if getattr(args, "save", False):
+        saved = flow_mod.record(conn, cfg)
+        print("")
+        print(f"已落库 market_flow：{saved.get('trade_date')}" if saved.get("ok") else saved.get("message"))
+    if getattr(args, "backfill", None):
+        info = flow_mod.backfill(conn, cfg, days=int(args.backfill), verbose=True)
+        print("")
+        print(f"回填 market_flow：{info['written']}/{info['days']} 个交易日")
+    history = flow_mod.flow_study(conn, cfg, days=int(args.days or 60), horizon=int(args.horizon or 20))
+    if history.get("buckets"):
+        print("")
+        print(f"资金面分档（之后 {history['horizon']} 日沪深300，窗口 {history['days']} 个交易日）")
+        print(f"  {'条件':<10}{'交易日':>7}{'平均涨跌':>10}{'t':>8}{'校正p':>9}  说明")
+        for item in history["buckets"]:
+            note = "样本不足" if item["days"] < 20 else ("显著" if (item["p_adj"] or 1) < 0.05 else "不显著")
+            print(f"  {item['bucket']:<10}{item['days']:>7}"
+                  f"{(item['mean'] if item['mean'] is not None else 0):>9.2f}%"
+                  f"{(item['t'] if item['t'] is not None else 0):>8.2f}{(item['p_adj'] or 1):>9.3f}  {note}")
+        if not history["enough"]:
+            print("  （ETF 申赎只有 20 来个交易日的历史，先攒样本；集中度那两组已经有数了）")
     conn.close()
     return 0
 
@@ -1134,6 +1154,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     flow = sub.add_parser("flow", help="资金面体检：钱在往哪走 + 背离 + 集中度分档")
     flow.add_argument("--horizon", type=int, help="集中度分档看之后几个交易日（默认 20）")
+    flow.add_argument("--days", type=int, help="资金面分档的回看窗口（默认 60 个交易日）")
+    flow.add_argument("--save", action="store_true", help="把当天这一行写进 market_flow")
+    flow.add_argument("--backfill", type=int, help="回填最近 N 个交易日的 market_flow")
     flow.add_argument("--db", help="数据库路径")
     flow.set_defaults(func=cmd_flow)
 

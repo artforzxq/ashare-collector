@@ -302,6 +302,25 @@ CREATE TABLE IF NOT EXISTS support_days (
   created_at  TEXT               -- 记录时间
 );
 
+-- 资金去向的日序列：每天一行，"钱在往哪走"要有历史才能回测。
+-- 四把尺子里的 ETF 申赎只有 20 来个交易日的历史（交易所按日披露、深市还得靠快照攒），
+-- 成交额与集中度能回溯到有日线的地方——所以早期那些行的 ETF 列会是空的，不许拿 0 顶。
+CREATE TABLE IF NOT EXISTS market_flow (
+  trade_date        TEXT PRIMARY KEY, -- 交易日
+  broad_etf_inflow  REAL,             -- 宽基 ETF 合计净流入，单位：亿元
+  sector_etf_inflow REAL,             -- 行业/主题 ETF 合计净流入，单位：亿元
+  etf_covered       INTEGER,          -- 参与统计的 ETF 只数（份额有变化的）
+  amount            REAL,             -- 全市场个股成交额，单位：万亿
+  amount_ratio      REAL,             -- 成交额 ÷ 近 60 日中位数
+  margin_delta      REAL,             -- 融资余额较前一披露日变化，单位：亿元
+  margin_balance    REAL,             -- 融资余额，单位：万亿
+  top100_pct        REAL,             -- 成交额前 100 只占比，单位：%
+  hhi               REAL,             -- 赫芬达尔指数（Σ份额² × 10000）
+  big_count         INTEGER,          -- 单只成交额 ≥50 亿的只数
+  index_pct         REAL,             -- 当日沪深300涨跌幅，单位：%（分档回测的落点）
+  updated_at        TEXT              -- 本行最后更新时间
+);
+
 CREATE TABLE IF NOT EXISTS data_health (
   run_date     TEXT NOT NULL, -- 任务运行日
   source       TEXT NOT NULL, -- 数据源名称

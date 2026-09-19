@@ -1757,8 +1757,8 @@ function renderFlow(f){
     </tbody></table></div>
     <div class="ai-answer" style="margin-top:10px"><b>读法</b>　${escapeHtml(f.verdict || '')}
       ${dv.ok && dv.note ? `<br><b>背离</b>　${escapeHtml(dv.note)}` : ''}</div>
-    ${detailRows(f.detail)}
     ${benchmarkRows(dv)}
+    ${detailRows(f.detail)}
     ${stockRows(con)}`;
   $('flowHint').innerHTML =
     '<b>覆盖范围</b>：沪市 911 只按日披露、能算"较前一日"；'
