@@ -125,5 +125,53 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("背离", result["message"])
 
 
+class ConcentrationTests(unittest.TestCase):
+    """集中度：缩量大涨时区分"存量抱团"还是"增量进场"。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = load_config(PROJECT_ROOT / "config.yaml", project_root=Path(self.tmp.name))
+        self.cfg["_db_path"] = str(Path(self.tmp.name) / "t.db")
+        self.cfg["market"] = {"concentration": {"window": 60, "top": 5, "big_amount": 1e9}}
+        self.conn = db.connect(self.cfg["_db_path"])
+        db.init_db(self.conn, PROJECT_ROOT / "schema.sql")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _seed(self, amounts_by_day: dict[str, list[float]]):
+        rows, instruments = [], []
+        for day, amounts in amounts_by_day.items():
+            for index, amount in enumerate(amounts):
+                code = f"SH{600000 + index}"
+                rows.append({"code": code, "trade_date": day, "close": 10.0, "amount": amount,
+                             "pct_chg": 1.0, "quality_flag": "ok"})
+                instruments.append({"code": code, "name": f"票{index}", "type": "stock"})
+        db.upsert_rows(self.conn, "instruments", instruments, ["code"])
+        db.upsert_rows(self.conn, "bars_daily", rows, ["code", "trade_date"])
+        self.conn.commit()
+
+    def test_concentrated_day_has_a_higher_share_in_the_top_names(self):
+        flat = [1e8] * 1200                       # 1200 只，每只 1 亿：很分散
+        self._seed({"2026-09-17": flat, "2026-09-18": [1e11] + [1e8] * 1199})
+        result = flow.concentration(self.conn, self.cfg, "2026-09-18")
+        self.assertTrue(result["ok"])
+        self.assertGreater(result["top100_pct"], 45)          # 一只独大（其余 1199 只都很小）
+        self.assertEqual(result["top10"][0]["amount"], 1000.0)  # 1e11 / 1e8
+
+    def test_thin_sample_gives_no_conclusion(self):
+        self._seed({"2026-09-18": [1e8] * 50})               # 样本太少
+        result = flow.concentration(self.conn, self.cfg, "2026-09-18")
+        self.assertFalse(result["ok"])
+        self.assertIn("集中度", result["message"])
+
+    def test_percentile_needs_history(self):
+        self._seed({"2026-09-18": [1e8] * 1200})
+        result = flow.concentration(self.conn, self.cfg, "2026-09-18")
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["top100_rank"])              # 只有一天，没有分位可比
+
+
 if __name__ == "__main__":
     unittest.main()

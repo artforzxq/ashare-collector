@@ -1635,6 +1635,39 @@ function renderScopeAnalysis(scope){
 /* 和"涨跌家数"放同一页：它们回答同一个问题——今天这波涨跌背后，钱是进来还是出去。 */
 // 明细：汇总只看出"宽基在流出、行业在流入"，看不出**具体流到哪个方向**。
 // 同一套数字往下钻一层，不加新口径。
+// 按指数看背离：只看沪深300 会把"科创50ETF 在赎回、而科创50 指数在涨"这类结构差异盖掉。
+function benchmarkRows(dv){
+  const rows = (dv && dv.by_benchmark) || [];
+  if (!rows.length) return '';
+  return `<div class="hint" style="margin-top:12px"><b>按指数看背离</b>`
+    + '：跟踪同一指数的 ETF 合计净流入 vs 该指数自己的涨跌。背离的排在前面。</div>'
+    + '<table class="tbl" style="margin-top:6px"><thead><tr><th>指数</th><th class="num">ETF 合计净流入(亿)</th>'
+    + '<th class="num">指数当日</th><th class="num">指数 20 日</th><th>判定</th></tr></thead><tbody>'
+    + rows.map(item => `<tr>
+        <td><span class="name">${escapeHtml(item.name || item.index)}</span><div class="sub">${item.index} · ${item.etf_count} 只 ETF</div></td>
+        <td class="num">${posNeg(item.etf_flow, signed(item.etf_flow, 2))}</td>
+        <td class="num sub">${item.index_pct == null ? '—' : signed(item.index_pct, 2) + '%'}</td>
+        <td class="num sub">${item.window_index_pct == null ? '—' : signed(item.window_index_pct, 2) + '%'}</td>
+        <td>${item.diverged === true ? '<span class="tag neg">背离</span>'
+             : (item.diverged === false ? '<span class="tag pos">同向</span>' : '<span class="sub">—</span>')}</td>
+      </tr>`).join('') + '</tbody></table>';
+}
+
+// 个股成交额 Top：这是"个股板块分析"的轻量替代——不用行业分类表，直接看钱落在哪几只。
+function stockRows(con){
+  const rows = (con && con.top10) || [];
+  if (!rows.length) return '';
+  return `<div class="hint" style="margin-top:12px"><b>成交额 Top ${rows.length} 个股</b>`
+    + '：钱具体落在哪几只（不看行业分类，只看成交额）。</div>'
+    + '<table class="tbl" style="margin-top:6px"><thead><tr><th>标的</th><th class="num">成交额(亿)</th>'
+    + '<th class="num">当日涨跌</th></tr></thead><tbody>'
+    + rows.map(item => `<tr>
+        <td><span class="name">${escapeHtml(item.name)}</span><div class="sub">${item.code}</div></td>
+        <td class="num">${Number(item.amount).toFixed(1)}</td>
+        <td class="num">${item.pct_chg == null ? '—' : posNeg(item.pct_chg, signed(item.pct_chg, 2) + '%')}</td>
+      </tr>`).join('') + '</tbody></table>';
+}
+
 function detailRows(detail){
   if (!detail || (!(detail.inflow_top || []).length && !(detail.outflow_top || []).length)) return '';
   const row = item => `<tr>
@@ -1669,6 +1702,7 @@ function renderFlow(f){
   const broad = f.broad_etf || {}, sector = f.sector_etf || {}, amount = f.amount || {}, margin = f.margin || {};
   const regime = f.regime || {};
   const dv = f.divergence || {};
+  const con = f.concentration || {};
   // 覆盖范围直接标在数字旁边：哪些市场进来了、哪些没进来，是一眼要看出来的前提。
   const scope = f.scope || {};
   const scopeText = (kind) => {
@@ -1713,10 +1747,19 @@ function renderFlow(f){
         <td class="sub">当日：宽基资金 vs 沪深300 ${dv.ok && dv.daily.index_pct != null ? (dv.daily.index_pct > 0 ? '+' : '') + Number(dv.daily.index_pct).toFixed(2) + '%' : '—'}
           <div class="sub">近 ${dv.days || 20} 日累计：宽基 ${dv.ok ? signed(dv.window.flow, 1) + ' 亿' : '—'} vs 沪深300 ${dv.ok ? signed(dv.window.index_pct, 2) + '%' : '—'}
           ${dv.ok && dv.window.diverged === true ? '<span class="tag neg">也背离</span>' : ''}</div></td></tr>
+      <tr><td><span class="name">成交额集中度</span><div class="sub">前 100 只占比</div></td>
+        <td class="num">${con.ok ? Number(con.top100_pct).toFixed(1) + '%' : '—'}</td>
+        <td>${!con.ok ? '<span class="sub">—</span>'
+            : `<span class="tag ${con.stance === '集中' ? 'neg' : (con.stance === '分散' ? 'pos' : '')}">${con.stance}</span>`}</td>
+        <td class="sub">${con.ok
+            ? `近 ${con.window} 日分位 ${con.top100_rank}%　HHI ${con.hhi}（分位 ${con.hhi_rank}%）　成交额 ≥50 亿的有 ${con.big_count} 只`
+            : '样本不够'}<div class="sub">集中度越高，后续 20 日大盘越弱（240 日分档：集中 −1.28% vs 分散 +0.52%，t −3.5 / vs 分散 −1.8pp，校正 p 0.004）</div></td></tr>
     </tbody></table></div>
     <div class="ai-answer" style="margin-top:10px"><b>读法</b>　${escapeHtml(f.verdict || '')}
       ${dv.ok && dv.note ? `<br><b>背离</b>　${escapeHtml(dv.note)}` : ''}</div>
-    ${detailRows(f.detail)}`;
+    ${detailRows(f.detail)}
+    ${benchmarkRows(dv)}
+    ${stockRows(con)}`;
   $('flowHint').innerHTML =
     '<b>覆盖范围</b>：沪市 911 只按日披露、能算"较前一日"；'
     + '<b>深市暂缺</b>——深交所那个接口只给"最新份额"、而且无视日期参数（实测两个日期返回一模一样），'

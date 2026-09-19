@@ -234,20 +234,20 @@ def snapshot(conn, cfg: dict, trade_date: str | None = None) -> dict:
     payload["verdict"] = verdict(payload)
     payload["detail"] = etf_detail(conn, cfg, trade_date)
     payload["divergence"] = divergence(conn, cfg)
+    payload["concentration"] = concentration(conn, cfg, trade_date)
     return payload
 
 
-def etf_detail(conn, cfg: dict, trade_date: str | None = None, limit: int = 6) -> dict:
-    """明细：今天被申购最多 / 被赎回最多的 ETF 各几只。
+def _code_flows(conn, cfg: dict, trade_date: str | None = None) -> tuple[list[dict], str | None, str | None]:
+    """每只 ETF 当天的净流入明细（同一套口径：同源比较、缺价格不计入）。
 
-    汇总只能看出"宽基在流出、行业在流入"，看不出**具体流到哪个方向**——
-    而后者才是"钱去了哪"的正题。明细是同一套数字往下钻一层，不加新口径。
+    `etf_detail` 与"按指数聚合的背离"都从这里取，免得两处各写一遍过滤条件。
     """
     if trade_date is None:
         row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM etf_shares")
         trade_date = row["d"] if row and row["d"] else None
     if not trade_date:
-        return {"inflow_top": [], "outflow_top": []}
+        return [], None, None
     prev_row = db.query_one(
         conn,
         """SELECT trade_date FROM etf_shares WHERE trade_date<?
@@ -255,7 +255,7 @@ def etf_detail(conn, cfg: dict, trade_date: str | None = None, limit: int = 6) -
         (trade_date,),
     )
     if not prev_row:
-        return {"inflow_top": [], "outflow_top": []}
+        return [], trade_date, None
     prev = prev_row["trade_date"]
     rows = [
         dict(row)
@@ -286,16 +286,52 @@ def etf_detail(conn, cfg: dict, trade_date: str | None = None, limit: int = 6) -
         delta = float(now["shares"]) - float(before["shares"])
         if abs(delta) < 1e-6:
             continue
+        name = now.get("name") or code
         items.append({
             "code": code,
-            "name": (now.get("name") or code),
+            "name": name,
             "kind": regime.KIND_LABEL.get(regime.kind_of(cfg, code, now.get("type")), ""),
+            "benchmark": benchmark_for(cfg, name),
             "inflow": round(delta * float(price) / 1e8, 2),
             "shares_pct": round(delta / float(before["shares"]) * 100, 2),
             "pct_chg": now.get("pct_chg"),
             "price": float(price),
         })
     items.sort(key=lambda item: -item["inflow"])
+    return items, trade_date, prev
+
+
+def _index_change(conn, code: str, days: int) -> dict | None:
+    """指数当日涨跌与近 N 个交易日累计涨跌幅。"""
+    rows = [
+        dict(row)
+        for row in db.query(
+            conn,
+            """SELECT trade_date, COALESCE(close_adj, close) AS close, pct_chg
+                 FROM bars_daily WHERE code=? ORDER BY trade_date DESC LIMIT ?""",
+            (code, days + 1),
+        )
+    ]
+    if len(rows) < 2:
+        return None
+    rows.reverse()
+    return {
+        "code": code,
+        "daily_pct": rows[-1].get("pct_chg"),
+        "window_pct": round((float(rows[-1]["close"]) / float(rows[0]["close"]) - 1) * 100, 2),
+        "window_start": rows[0]["trade_date"],
+    }
+
+
+def etf_detail(conn, cfg: dict, trade_date: str | None = None, limit: int = 6) -> dict:
+    """明细：今天被申购最多 / 被赎回最多的 ETF 各几只。
+
+    汇总只能看出"宽基在流出、行业在流入"，看不出**具体流到哪个方向**——
+    而后者才是"钱去了哪"的正题。明细是同一套数字往下钻一层，不加新口径。
+    """
+    items, trade_date, prev = _code_flows(conn, cfg, trade_date)
+    if not items:
+        return {"inflow_top": [], "outflow_top": [], "trade_date": trade_date, "prev_date": prev}
     inflow_items = [item for item in items if item["inflow"] > 0]
     outflow_items = [item for item in items if item["inflow"] < 0]
     return {
@@ -310,15 +346,28 @@ def etf_detail(conn, cfg: dict, trade_date: str | None = None, limit: int = 6) -
 # 为什么按名字：ETF 与指数的对应关系是发行时就定死的，我们没有那张表，
 # 但宽基 ETF 的简称里一定带着指数名（"华泰柏瑞沪深300ETF"）。行业 ETF 不参与——
 # 一个行业对应几十只指数，硬配会配错。
-BENCHMARK_HINTS = (
+DEFAULT_BENCHMARKS = (
     ("上证50", "SH000016"), ("沪深300", "SH000300"), ("中证500", "SH000905"),
-    ("中证1000", "SH000852"), ("科创50", "SH000688"), ("创业板", "SZ399006"),
+    ("中证1000", "SH000852"), ("科创50", "SH000688"), ("科创100", "SH000698"),
+    ("创业板", "SZ399006"), ("深证100", "SZ399330"), ("中证A500", "SH000510"),
+    ("上证红利", "SH000015"),
 )
 
 
-def _benchmark_for(name: str) -> str | None:
+def benchmarks(cfg: dict | None = None) -> list[tuple[str, str]]:
+    """ETF 简称关键词 → 指数代码。配置里能加，加不了就落回内置那几条。
+
+    匹配有顺序：**长关键词优先**（"中证A500"要在"中证500"之前判，否则前者会被后者吃掉）。
+    """
+    configured = ((cfg or {}).get("market") or {}).get("benchmarks") or {}
+    table = [(str(key), str(value)) for key, value in configured.items()]
+    merged = table or list(DEFAULT_BENCHMARKS)
+    return sorted(merged, key=lambda pair: -len(pair[0]))
+
+
+def benchmark_for(cfg: dict | None, name: str) -> str | None:
     text = str(name or "")
-    for hint, code in BENCHMARK_HINTS:
+    for hint, code in benchmarks(cfg):
         if hint in text:
             return code
     return None
@@ -366,6 +415,36 @@ def divergence(conn, cfg: dict, days: int = 20) -> dict:
             return None
         return (flow_value > 0) != (price_value > 0)
 
+    # 按指数聚合：每个宽基指数看"跟踪它的那些 ETF 合计净流入"和它自己的涨跌。
+    # 只看沪深300 会把"科创50ETF 在赎回、而科创50 指数在涨"这类结构差异盖掉——
+    # 那也是背离，只不过是某个板块内部的。
+    items, _, _ = _code_flows(conn, cfg)
+    grouped: dict[str, dict] = {}
+    for item in items:
+        code = item.get("benchmark")
+        if not code:
+            continue
+        slot = grouped.setdefault(code, {"index": code, "etf_flow": 0.0, "etf_count": 0})
+        slot["etf_flow"] += item["inflow"]
+        slot["etf_count"] += 1
+    by_benchmark = []
+    for code, slot in grouped.items():
+        change = _index_change(conn, code, days)
+        if not change:
+            continue
+        entry = {
+            "index": code,
+            "name": (db.query_one(conn, "SELECT name FROM instruments WHERE code=?", (code,)) or {"name": code})["name"],
+            "etf_flow": round(slot["etf_flow"], 2),
+            "etf_count": slot["etf_count"],
+            "index_pct": change["daily_pct"],
+            "window_index_pct": change["window_pct"],
+        }
+        entry["diverged"] = opposed(entry["etf_flow"], entry["index_pct"])
+        by_benchmark.append(entry)
+    # 背离的排前面：那才是要看的东西
+    by_benchmark.sort(key=lambda item: (item["diverged"] is not True, item["etf_flow"]))
+
     daily_diverged = opposed(today_flow, today_change)
     window_diverged = opposed(window_flow, bench_change)
     notes = []
@@ -384,6 +463,7 @@ def divergence(conn, cfg: dict, days: int = 20) -> dict:
         "daily": {"flow": today_flow, "index_pct": today_change, "diverged": daily_diverged},
         "window": {"flow": round(window_flow, 2), "index_pct": round(bench_change, 2),
                    "diverged": window_diverged},
+        "by_benchmark": by_benchmark,
         "note": "；".join(notes) or "样本不足",
     }
 
@@ -408,3 +488,184 @@ def history(conn, cfg: dict, days: int = 20) -> list[dict]:
             "sector_etf": flows.get("sector_etf", {}).get("inflow"),
         })
     return list(reversed(out))
+
+
+def _concentration_of_day(conn, trade_date: str, big_amount: float) -> dict | None:
+    """某一天个股成交额的集中度：前 100 占比 / 前 10% 占比 / HHI / 大票只数。"""
+    amounts = sorted(
+        (
+            float(row["amount"])
+            for row in db.query(
+                conn,
+                """SELECT b.amount FROM bars_daily b JOIN instruments i ON i.code = b.code
+                    WHERE b.trade_date=? AND i.type='stock' AND b.amount>0""",
+                (trade_date,),
+            )
+        ),
+        reverse=True,
+    )
+    if len(amounts) < 1000:          # 样本太少时"集中度"没有意义
+        return None
+    total = sum(amounts)
+    if total <= 0:
+        return None
+    cut = max(1, int(len(amounts) * 0.1))
+    return {
+        "trade_date": trade_date,
+        "total": total,
+        "count": len(amounts),
+        "top100_pct": round(sum(amounts[:100]) / total * 100, 2),
+        "top10pct_pct": round(sum(amounts[:cut]) / total * 100, 2),
+        # HHI：Σ(份额²) × 10000。标准集中度度量，对头部特别敏感、不受"只数"影响。
+        "hhi": round(sum((value / total) ** 2 for value in amounts) * 10000, 2),
+        "big_count": sum(1 for value in amounts if value >= big_amount),
+    }
+
+
+def concentration(conn, cfg: dict, trade_date: str | None = None) -> dict:
+    """个股成交额集中度：**缩量大涨时用来区分"存量抱团"还是"增量进场"**。
+
+    只看成交额总量区分不了这两件事：
+      · 增量进场 = 总量放大 + 集中度不升（钱铺开了）；
+      · 存量抱团 = 总量不放大 + 集中度升高（钱挤向少数方向）。
+    所以这个数**必须和历史分位一起读**：不同市值结构下绝对值没法横比，分位可以。
+    """
+    conf = ((cfg or {}).get("market") or {}).get("concentration") or {}
+    window = int(conf.get("window", 60))
+    top = int(conf.get("top", 10))
+    big_amount = float(conf.get("big_amount", 5_000_000_000))
+    if trade_date is None:
+        row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM bars_daily")
+        trade_date = row["d"] if row and row["d"] else None
+    if not trade_date:
+        return {"ok": False, "message": "本地还没有日线数据"}
+
+    dates = [
+        row["trade_date"]
+        for row in db.query(
+            conn,
+            """SELECT DISTINCT b.trade_date FROM bars_daily b JOIN instruments i ON i.code = b.code
+                WHERE i.type='stock' AND b.trade_date<=? ORDER BY b.trade_date DESC LIMIT ?""",
+            (trade_date, window + 1),
+        )
+    ]
+    series = []
+    for day in sorted(dates):
+        entry = _concentration_of_day(conn, day, big_amount)
+        if entry:
+            series.append(entry)
+    if not series:
+        return {"ok": False, "message": "算不出集中度（个股成交额样本不够）"}
+    today = series[-1]
+    history = series[:-1]
+
+    def percentile(key: str) -> float | None:
+        values = [entry[key] for entry in history]
+        if not values:
+            return None
+        return round(sum(1 for value in values if value < today[key]) / len(values) * 100, 1)
+
+    top10 = [
+        {"code": row["code"], "name": row["name"] or row["code"],
+         "amount": round(float(row["amount"]) / 1e8, 2), "pct_chg": row["pct_chg"]}
+        for row in db.query(
+            conn,
+            """SELECT b.code, COALESCE(i.name, b.code) AS name, b.amount, b.pct_chg
+                 FROM bars_daily b JOIN instruments i ON i.code = b.code
+                WHERE b.trade_date=? AND i.type='stock' AND b.amount>0
+                ORDER BY b.amount DESC LIMIT ?""",
+            (trade_date, top),
+        )
+    ]
+    rank = percentile("top100_pct")
+    stance = "集中" if (rank or 0) >= 80 else ("分散" if (rank if rank is not None else 100) <= 20 else "中性")
+    return {
+        "ok": True,
+        "trade_date": today["trade_date"],
+        "total": round(today["total"] / 1e12, 2),          # 万亿
+        "count": today["count"],
+        "top100_pct": today["top100_pct"],
+        "top100_rank": rank,
+        "top10pct_pct": today["top10pct_pct"],
+        "hhi": today["hhi"],
+        "hhi_rank": percentile("hhi"),
+        "big_count": today["big_count"],
+        "big_rank": percentile("big_count"),
+        "stance": stance,
+        "window": window,
+        "top10": top10,
+        "series": series[-window:],
+    }
+
+
+def concentration_study(conn, cfg: dict, days: int = 240, horizon: int = 20) -> dict:
+    """集中度分档：把每个交易日的集中度按分位分三档，看之后 horizon 日沪深300 的涨跌。
+
+    为什么用沪深300：集中度是**全市场**的现象，要配一个全市场的刻度，而沪深300 是现成的、
+    每天都有的序列，口径稳定。（全市场等权要重算几百万行——等这个指标先证明自己有信息量再说。）
+
+    这一步的意义：如果三档的后续涨跌没有差别，那它就只是个"读法"，**不许进决策**。
+    """
+    from . import stats as stats_mod
+
+    conf = ((cfg or {}).get("market") or {}).get("concentration") or {}
+    big_amount = float(conf.get("big_amount", 5_000_000_000))
+    bench = "SH000300"
+    closes = [
+        dict(row)
+        for row in db.query(
+            conn,
+            """SELECT trade_date, COALESCE(close_adj, close) AS close FROM bars_daily
+                WHERE code=? ORDER BY trade_date""",
+            (bench,),
+        )
+    ]
+    if len(closes) < horizon + 30:
+        return {"ok": False, "message": "基准指数历史不够，算不出分档"}
+    index_of = {row["trade_date"]: position for position, row in enumerate(closes)}
+
+    daily = []
+    for row in closes[-(days + horizon + 1):]:
+        entry = _concentration_of_day(conn, row["trade_date"], big_amount)
+        position = index_of.get(row["trade_date"])
+        if not entry or position is None or position + horizon >= len(closes):
+            continue
+        forward = (float(closes[position + horizon]["close"]) / float(row["close"]) - 1) * 100
+        daily.append({"trade_date": row["trade_date"], "top100_pct": entry["top100_pct"],
+                      "forward": forward})
+    if len(daily) < 40:
+        return {"ok": False, "message": f"样本只有 {len(daily)} 天，先跑更多历史"}
+
+    values = sorted(item["top100_pct"] for item in daily)
+    low_edge = values[int(len(values) * 0.33)]
+    high_edge = values[int(len(values) * 0.67)]
+    buckets: dict[str, dict[str, list[float]]] = {"分散": {}, "中性": {}, "集中": {}}
+    for item in daily:
+        label = ("分散" if item["top100_pct"] <= low_edge
+                 else "集中" if item["top100_pct"] >= high_edge else "中性")
+        buckets[label].setdefault(item["trade_date"], []).append(item["forward"])
+    tests = sum(1 for values_ in buckets.values() if values_)
+    rows = []
+    for label in ("分散", "中性", "集中"):
+        stats = stats_mod.daily_mean_stats(buckets[label])
+        rows.append({
+            "bucket": label,
+            "days": stats["days"],
+            "mean": round(stats["mean"], 2) if stats["mean"] is not None else None,
+            "t": stats["t"],
+            "p_adj": stats_mod.sidak_adjust(stats_mod.two_sided_p(stats["t"]), tests),
+        })
+    contrast = None
+    low_days, high_days = buckets["分散"], buckets["集中"]
+    if len(low_days) >= 5 and len(high_days) >= 5:
+        low_means = [statistics.mean(values_) for values_ in low_days.values()]
+        high_means = [statistics.mean(values_) for values_ in high_days.values()]
+        gap = statistics.mean(high_means) - statistics.mean(low_means)
+        se = (statistics.pstdev(high_means) ** 2 / len(high_means)
+              + statistics.pstdev(low_means) ** 2 / len(low_means)) ** 0.5
+        t_value = round(gap / se, 2) if se > 0 else None
+        contrast = {"label": "集中 − 分散", "gap": round(gap, 2), "t": t_value,
+                    "p_adj": stats_mod.sidak_adjust(stats_mod.two_sided_p(t_value), tests)}
+    return {"ok": True, "days": len(daily), "horizon": horizon, "benchmark": bench,
+            "buckets": rows, "contrast": contrast,
+            "edges": {"low": low_edge, "high": high_edge}}

@@ -19,6 +19,7 @@ from . import (
     db,
     dictionary as dictionary_mod,
     doctor as doctor_mod,
+    flow as flow_mod,
     intraday as intraday_mod,
     newstock as newstock_mod,
     notify,
@@ -713,6 +714,61 @@ def cmd_flows(args) -> int:
     return 0 if (lhb.get("ok") or flow.get("ok")) else 1
 
 
+def cmd_flow(args) -> int:
+    """资金面体检：钱在往哪走（宽基/行业 ETF、成交额、杠杆）+ 背离 + 集中度分档。
+
+    一次把三张表打出来，因为它们要一起读才成立：
+      ① 四把尺子（同一个量纲：亿元）；
+      ② 背离（一级市场申赎 vs 二级市场涨跌，含按指数拆分）；
+      ③ 集中度（缩量大涨时区分"存量抱团"还是"增量进场"）与它的历史分档。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    snap = flow_mod.snapshot(conn, cfg)
+    if not snap.get("ok"):
+        print(snap.get("message", "算不出资金去向"))
+        conn.close()
+        return 1
+    broad, sector = snap["broad_etf"], snap["sector_etf"]
+    amount, margin = snap.get("amount") or {}, snap.get("margin") or {}
+    print(f"资金去向 {snap['trade_date']}（对比 {snap['prev_date']}，覆盖 {snap['covered']} 只 ETF）")
+    print(f"  宽基 ETF   净流入 {broad['inflow']:+8.2f} 亿（{broad['count']} 只有变化）")
+    print(f"  行业/主题  净流入 {sector['inflow']:+8.2f} 亿（{sector['count']} 只有变化）")
+    print(f"  全市场成交额 {amount.get('amount')} 万亿（近 60 日中位数的 {amount.get('amount_ratio')} 倍）")
+    if margin:
+        print(f"  融资余额    {margin['balance']} 万亿，较前一披露日 {margin.get('delta')} 亿")
+    print(f"  读法：{snap['verdict']}")
+    dv = snap.get("divergence") or {}
+    if dv.get("ok"):
+        print("")
+        print(f"背离（一级市场申赎 vs 二级市场涨跌）：{dv['note']}")
+        print(f"  {'指数':<12}{'ETF 净流入(亿)':>14}{'指数当日':>10}{'指数 20 日':>11}  判定")
+        for item in dv["by_benchmark"]:
+            mark = "背离" if item["diverged"] else ("同向" if item["diverged"] is False else "—")
+            print(f"  {(item.get('name') or item['index']):<12}{item['etf_flow']:>14.2f}"
+                  f"{item['index_pct']:>9.2f}%{item['window_index_pct']:>10.2f}%  {mark}")
+    con = snap.get("concentration") or {}
+    if con.get("ok"):
+        print("")
+        print(f"成交额集中度 {con['trade_date']}：前 100 只占 {con['top100_pct']}%（近 {con['window']} 日分位 "
+              f"{con['top100_rank']}%），HHI {con['hhi']}（分位 {con['hhi_rank']}%），"
+              f"成交额 ≥50 亿的有 {con['big_count']} 只 → {con['stance']}")
+        print("  成交额 Top5：" + "　".join(f"{item['name']}({item['amount']:.0f}亿)" for item in con["top10"][:5]))
+    study = flow_mod.concentration_study(conn, cfg, horizon=int(args.horizon or 20))
+    if study.get("ok"):
+        print("")
+        print(f"集中度分档（之后 {study['horizon']} 日沪深300，{study['days']} 个交易日）")
+        print(f"  {'档位':<6}{'交易日':>7}{'平均涨跌':>10}{'t':>8}{'校正p':>9}")
+        for item in study["buckets"]:
+            print(f"  {item['bucket']:<6}{item['days']:>7}{item['mean']:>9.2f}%"
+                  f"{(item['t'] if item['t'] is not None else 0):>8.2f}{(item['p_adj'] or 1):>9.3f}")
+        if study.get("contrast"):
+            c = study["contrast"]
+            print(f"  {c['label']}：{c['gap']:+.2f}pp（t {c['t']}，校正 p {c['p_adj']}）")
+    conn.close()
+    return 0
+
+
 def cmd_regime(args) -> int:
     """市场层（Beta）体检：宽基指数状态 + 广度 + 成交额合成 0–1，再看它有没有信息量。
 
@@ -1075,6 +1131,11 @@ def build_parser() -> argparse.ArgumentParser:
     margin.add_argument("--days", type=int, help="补最近几个交易日（默认 20）")
     margin.add_argument("--db", help="数据库路径")
     margin.set_defaults(func=cmd_margin)
+
+    flow = sub.add_parser("flow", help="资金面体检：钱在往哪走 + 背离 + 集中度分档")
+    flow.add_argument("--horizon", type=int, help="集中度分档看之后几个交易日（默认 20）")
+    flow.add_argument("--db", help="数据库路径")
+    flow.set_defaults(func=cmd_flow)
 
     riskstats = sub.add_parser("riskstats", help="风险层分布：盈亏比、止损距离、仓位上限")
     riskstats.add_argument("--db", help="数据库路径")
