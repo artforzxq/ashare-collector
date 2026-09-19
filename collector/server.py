@@ -293,6 +293,7 @@ class App:
                         "告诉你哪组参数真有超额、哪组只是拟合出来的尖峰。",
             }
         results = data.get("results") or []
+        turnover = backtest_mod.latest_turnover(self.cfg["_project_root"])
         return {
             "ok": True,
             "saved_at": data.get("_saved_at"),
@@ -307,6 +308,7 @@ class App:
             "plateau": data.get("plateau"),
             "items": results[:40],
             "total": len(results),
+            "turnover": turnover,      # 换手率研究（同一次任务里一起跑的）
         }
 
     def analysis(self, code: str = "", scope: str = "") -> dict:
@@ -525,9 +527,15 @@ class App:
                 result = backtest_mod.run_grid(conn, cfg, verbose=True)
                 if not result.get("ok"):
                     raise RuntimeError(result.get("message", "回测失败"))
+                # 换手率研究跟参数回测一起跑：它回答的是"放量之后怎么了"，
+                # 和"哪组参数行"是两个问题，但用的是同一批本地数据和同一把尺子。
+                study = backtest_mod.turnover_study(conn, cfg, verbose=False)
+                if study.get("ok"):
+                    backtest_mod.save_turnover(study, cfg["_project_root"])
                 backtest_mod.write_report(backtest_mod.render_report(result), cfg["_project_root"])
                 saved = backtest_mod.save_result(result, cfg["_project_root"])
-                return f"扫了 {len(result['results'])} 组参数，页面结果已更新（{saved.name}）"
+                return (f"扫了 {len(result['results'])} 组参数，另做了换手率研究，"
+                        f"页面结果已更新（{saved.name}）")
             finally:
                 conn.close()
 

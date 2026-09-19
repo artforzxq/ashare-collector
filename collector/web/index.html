@@ -532,7 +532,13 @@ canvas{display:block;width:100%}
         <h3>参数组合 <span id="btNote"></span></h3>
         <div id="btBody"></div>
       </div>
-      <div class="block-head"><h2>② 怎么读</h2><span class="line"></span></div>
+      <div class="block-head"><h2>② 换手率分组 · 放量之后怎么了</h2><span class="line"></span><span class="kv" id="turnoverNote"></span></div>
+      <div class="card panel">
+        <h3>按「当日换手 ÷ 自己近 20 日常态」分档 <span id="turnoverWhen"></span></h3>
+        <div id="turnoverBody"></div>
+        <div class="hint" id="turnoverHint"></div>
+      </div>
+      <div class="block-head"><h2>③ 怎么读</h2><span class="line"></span></div>
       <div class="card panel"><div class="hint" id="btHelp"></div></div>
 
       <div class="card panel">
@@ -2000,6 +2006,37 @@ function renderBacktest(){
     </tr></thead>
     <tbody>${rows || '<tr><td colspan="9" class="sub">这次回测没有产出组合</td></tr>'}</tbody>
   </table></div>`;
+
+  renderTurnover(d.turnover);
+}
+
+function renderTurnover(t){
+  if (!t || !t.ok){
+    $('turnoverWhen').textContent = '';
+    $('turnoverNote').textContent = '';
+    $('turnoverBody').innerHTML = '<div class="empty-state"><b>还没有换手率研究</b>它的样本口径与参数回测一致</div>';
+    $('turnoverHint').textContent = '';
+    return;
+  }
+  $('turnoverWhen').textContent = t._saved_at ? `跑于 ${t._saved_at}` : '';
+  $('turnoverNote').textContent = `${t.codes} 只标的 · 约 ${Number(t.years || 0).toFixed(1)} 年 · ${t.covered} 个样本`;
+  $('turnoverBody').innerHTML = `<table class="tbl"><thead><tr>
+      <th>分档</th><th class="num">样本</th><th class="num">5 日均值</th><th class="num">5 日超额</th>
+      <th class="num">20 日均值</th><th class="num">20 日超额</th><th class="num">20 日胜率</th>
+    </tr></thead><tbody>` + (t.buckets || []).map(b => `<tr>
+      <td class="name">${b.bucket}</td>
+      <td class="num">${b.n20.toLocaleString()}</td>
+      <td class="num">${posNeg(b.avg5, signed(b.avg5, 2) + '%')}</td>
+      <td class="num">${posNeg(b.excess5, signed(b.excess5, 2) + '%')}</td>
+      <td class="num">${posNeg(b.avg20, signed(b.avg20, 2) + '%')}</td>
+      <td class="num">${posNeg(b.excess20, signed(b.excess20, 2) + '%')}</td>
+      <td class="num sub">${b.win20 === null ? '—' : b.win20.toFixed(1) + '%'}</td>
+    </tr>`).join('') + '</tbody></table>';
+  $('turnoverHint').innerHTML =
+    '分档用「当日换手 ÷ 自己近 20 日均值」，所以剔除了股本规模差异——小盘股不会因为天生换手高就整档算进"暴力放量"。' +
+    '口径与参数回测一致：次日建仓、扣同一笔成本、涨停买不进的样本剔除。' +
+    '<br>看<b>超额</b>（比"同一批日期随便买一只"强不强）和<b>单调性</b>：放量越大之后越弱才叫反转效应；' +
+    '忽高忽低多半是噪声。样本几百个以下的档别单独下结论。';
 }
 
 async function loadScreen(){

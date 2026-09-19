@@ -165,6 +165,10 @@ CREATE TABLE IF NOT EXISTS margin (
 CREATE TABLE IF NOT EXISTS features_daily (
   avg_amount_20d     REAL,          -- 近 20 个交易日日均成交额（元）：窗口不含当日
   avg_amount_60d     REAL,          -- 近 60 个交易日日均成交额（元）：小票过滤用这一列
+  turnover_rate      REAL,          -- 当日换手率（%）：成交量 ÷ 流通股本，只有 baostock 给
+  turnover_20d       REAL,          -- 前 20 日平均换手率（%）：这只票自己的"常态"，允许缺值
+  turnover_ratio     REAL,          -- 当日换手 ÷ 常态：换手放量倍数，剔除股本规模差异
+  turnover_coverage  REAL,          -- 上面那个 20 日窗口里有效值的比例（换手率有缺失，得看得见）
   code               TEXT NOT NULL, -- 标的代码
   trade_date         TEXT NOT NULL, -- 交易日
   ma20               REAL,          -- 20 日前复权收盘均线

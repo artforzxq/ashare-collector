@@ -420,3 +420,29 @@ factors:
     status: shadow
     source_field: etf_share_chg
     normalize: {type: linear, x0: -0.03, x1: 0.03}
+
+  # 换手率的两条读法：都先进影子（权重 0，只记录不参与打分）。
+  # 为什么先影子：换手率对**反转**的意义多半是"越高之后越弱"，也就是负 IC；
+  # 而台账的转正判定现在只认正向（ic20 < 0 会判"方向是反的"）。所以先跑 20 个交易日，
+  # 用它把真实 IC 和与现有因子的相关性量出来，再决定走风险层折价还是给台账加 direction。
+  - factor_id: turnover_ratio
+    name: 换手放量倍数
+    layer: state
+    role: modifier
+    category: volume
+    weight: 0.0
+    min_samples: 60
+    status: shadow
+    source_field: turnover_ratio
+    normalize: {type: linear, x0: 0.5, x1: 2.5}
+
+  - factor_id: turnover_20d
+    name: 常态换手率
+    layer: state
+    role: modifier
+    category: volume
+    weight: 0.0
+    min_samples: 60
+    status: shadow
+    source_field: turnover_20d
+    normalize: {type: linear, x0: 1.0, x1: 8.0}

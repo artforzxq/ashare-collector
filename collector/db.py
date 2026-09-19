@@ -43,6 +43,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "risk_note": "TEXT",
         "avg_amount_20d": "REAL",
         "avg_amount_60d": "REAL",
+        "turnover_rate": "REAL",
+        "turnover_20d": "REAL",
+        "turnover_ratio": "REAL",
+        "turnover_coverage": "REAL",
     },
     # 筛选结果也要能回填真实表现，才能回答"筛出来的票后来怎么样了"
     "screen_results": {

@@ -35,6 +35,26 @@ def _prior_stats(values: Sequence[float], index: int, n: int) -> tuple[float | N
     return mean, variance ** 0.5
 
 
+def _prior_mean_tolerant(
+    values: Sequence[float | None], index: int, n: int, min_ratio: float = 0.6
+) -> tuple[float | None, float | None]:
+    """当日之前 n 根的均值，**允许缺值**。
+
+    换手率只有部分数据源给（腾讯、新浪都不给），本地大约四分之一的行是空的。
+    用严格的 _prior_stats，缺一天就把整个窗口判成不可用——那会让这个因子的覆盖率
+    低到没法用。所以这里按"窗口里有几个有效值"算，覆盖率一起返回，供体检判断。
+    """
+    if index < n:
+        return None, None
+    window = [v for v in values[index - n:index] if v is not None]
+    if not window:
+        return None, 0.0
+    coverage = len(window) / n
+    if coverage < min_ratio:
+        return None, round(coverage, 4)
+    return sum(window) / len(window), round(coverage, 4)
+
+
 def atr_series(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], n: int = 14) -> list[float | None]:
     length = len(closes)
     out: list[float | None] = [None] * length
@@ -116,6 +136,14 @@ def compute_feature_series(
     # 同一个标的内部口径统一，所以量比、z-score 这些相对指标仍然可比。
     amounts = [float(b.get("amount") or b.get("volume") or 0.0) for b in bars]
     pcts = [b.get("pct_chg") for b in bars]
+    # 换手率：只有 baostock 给（腾讯、新浪都不给），所以往下走的时候要容忍缺值
+    turnovers: list[float | None] = []
+    for bar in bars:
+        value = bar.get("turnover_rate")
+        try:
+            turnovers.append(float(value) if value is not None else None)
+        except (TypeError, ValueError):
+            turnovers.append(None)
 
     ma20 = sma(closes, 20)
     ma60 = sma(closes, 60)
@@ -159,6 +187,18 @@ def compute_feature_series(
         raw["vol_confirm"] = (
             round(max(-2.0, min(2.0, amount_z)) * _sign(pcts[index]), 4) if amount_z is not None else None
         )
+
+        # 换手率的三个读法（都是影子因子，先只记录不参与打分）：
+        #   turnover_rate  当日换手率
+        #   turnover_20d   这只票自己的"常态"（前 20 日均值，允许缺值）
+        #   turnover_ratio 今日 / 常态 —— 与 vol_ratio_20 同思路，但换手率剔除了股本规模的干扰：
+        #                  大盘股天生换手低、小盘股天然高，拿绝对值横比没有意义
+        turn = turnovers[index]
+        turn_mean, turn_cover = _prior_mean_tolerant(turnovers, index, 20)
+        raw["turnover_rate"] = round(turn, 4) if turn is not None else None
+        raw["turnover_20d"] = round(turn_mean, 4) if turn_mean else None
+        raw["turnover_ratio"] = round(turn / turn_mean, 4) if (turn and turn_mean) else None
+        raw["turnover_coverage"] = turn_cover
 
         if index >= 20:
             prior_high = max(highs[index - 20:index])
@@ -226,6 +266,10 @@ def compute_feature_series(
                 "amount_zscore": raw["amount_zscore"],
                 "avg_amount_20d": raw["avg_amount_20d"],
                 "avg_amount_60d": raw["avg_amount_60d"],
+                "turnover_rate": raw["turnover_rate"],
+                "turnover_20d": raw["turnover_20d"],
+                "turnover_ratio": raw["turnover_ratio"],
+                "turnover_coverage": raw["turnover_coverage"],
                 "dist_to_high_250": raw["dist_to_high_250"],
                 "donchian_break": raw["donchian_break"],
                 "consolidation_days": consolidation_days,

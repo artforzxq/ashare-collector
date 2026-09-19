@@ -202,6 +202,31 @@ def cmd_support(args) -> int:
         conn.close()
 
 
+def cmd_turnover(args) -> int:
+    """换手率研究：放量之后到底怎么了（按"当日换手 ÷ 自己常态"分档看超额）。"""
+    cfg = _apply_index_choice(_prepare(args), args)
+    conn = _connect(cfg)
+    try:
+        result = backtest_mod.turnover_study(conn, cfg, mode=args.universe, limit=args.sample)
+        conn.close()
+        if not result.get("ok"):
+            print(result.get("message", "换手率研究没跑成"))
+            return 1
+        text = backtest_mod.render_turnover_study(result)
+        print("")
+        print(text)
+        if not args.no_save:
+            target = backtest_mod.save_turnover(result, cfg["_project_root"])
+            print("")
+            print(f"结果已存：{target}")
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def cmd_doctor(args) -> int:
     """环境体检：Python / 依赖 / 数据库 / 配置，只读，不修东西。"""
     cfg = _prepare(args)
@@ -887,6 +912,14 @@ def build_parser() -> argparse.ArgumentParser:
     support.add_argument("--record", action="store_true", help="把判定写进 support_days / alerts")
     support.add_argument("--db", help="数据库路径")
     support.set_defaults(func=cmd_support)
+
+    turnover = sub.add_parser("turnover", help="换手率研究：放量之后到底怎么了（只看本地数据）")
+    turnover.add_argument("--universe", choices=("market", "watchlist"), help="样本口径，默认取配置")
+    turnover.add_argument("--sample", type=int, help="全市场抽样时抽多少只")
+    turnover.add_argument("--no-save", action="store_true", help="只打印，不存结果文件")
+    turnover.add_argument("--include-index", action="store_true", help="把指数也放进来（默认剔除）")
+    turnover.add_argument("--db", help="数据库路径")
+    turnover.set_defaults(func=cmd_turnover)
 
     doctor = sub.add_parser("doctor", help="环境体检：Python / 依赖 / 数据库 / 配置（只读）")
     doctor.add_argument("--db", help="数据库路径（默认取配置）")

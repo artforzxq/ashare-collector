@@ -341,6 +341,133 @@ def plateau(results: list[dict], grid: dict) -> dict[tuple, dict]:
     return out
 
 
+# ---------------------------------------------------------------- 换手率研究
+#
+# 和状态机回测是两个问题：那个问"这套参数行不行"，这个问"放量之后到底怎么了"。
+# 所以它**不经过状态机**——把全市场每个 (标的, 交易日) 按换手放量倍数分档，
+# 看之后 5/20 日的收益，再减去同一批日期上"随便买一只"的等权基准。
+# 只减基准这一点不能省：不减的话，放量日恰好在大盘上涨阶段就会得出"放量有用"的假结论。
+
+# 分档：以"当日换手 ÷ 自己近 20 日均值"为准，所以天然剔除了股本规模和冷热差异
+TURNOVER_BUCKETS = (
+    ("缩量 <0.8", 0.0, 0.8),
+    ("常态 0.8–1.2", 0.8, 1.2),
+    ("温和放量 1.2–2", 1.2, 2.0),
+    ("明显放量 2–3", 2.0, 3.0),
+    ("暴力放量 >3", 3.0, float("inf")),
+)
+
+
+def _bucket_of(ratio: float) -> str | None:
+    for label, low, high in TURNOVER_BUCKETS:
+        if low <= ratio < high:
+            return label
+    return None
+
+
+def turnover_study(conn, cfg, mode: str | None = None, limit: int | None = None,
+                   verbose: bool = True) -> dict:
+    """按换手放量倍数分档，看之后 5 / 20 日的表现（相对同日期等权基准的超额）。
+
+    三个口径都跟回测保持一致：用生产代码算特征、次日建仓、扣同一笔成本、
+    涨停买不进的样本剔除——这样这里的结论和参数回测是同一把尺子。
+    """
+    bars, names, sample = load_bars(conn, cfg, mode=mode, limit=limit, verbose=verbose)
+    if not bars:
+        return {"ok": False, "message": "没有足够的日线数据，先跑一次 3-每日任务"}
+    cost = cost_pct(cfg)
+    section = backtest_cfg(cfg)
+    check_limits = bool(section.get("limit_check", True))
+    delay_max = int(section.get("exit_delay_max", DEFAULT_EXIT_DELAY))
+
+    fwd = forward_arrays(bars, names, limit_check=check_limits, delay_max=delay_max)
+    fillable = fillable_mask(bars, names) if check_limits else None
+    baseline = baseline_returns(fwd, cost)
+
+    # bucket → horizon → 收益列表
+    samples: dict[str, dict[int, list[float]]] = {
+        label: {horizon: [] for horizon in HORIZONS} for label, _, _ in TURNOVER_BUCKETS
+    }
+    missing = 0
+    for code, rows in bars.items():
+        base = base_features(rows, cfg)
+        for index, feature in enumerate(base):
+            ratio = feature.get("turnover_ratio")
+            if ratio is None:
+                missing += 1
+                continue
+            label = _bucket_of(float(ratio))
+            if label is None:
+                continue
+            if fillable is not None and not fillable[code][index]:
+                continue          # 次日涨停买不进，这天的收益不算你的
+            for horizon in HORIZONS:
+                value = fwd[code][horizon][index]
+                if value is not None:
+                    samples[label][horizon].append(value - cost)
+
+    rows_out: list[dict] = []
+    for label, _, _ in TURNOVER_BUCKETS:
+        entry = {"bucket": label}
+        for horizon in HORIZONS:
+            values = samples[label][horizon]
+            base_values = baseline[horizon]
+            entry[f"n{horizon}"] = len(values)
+            entry[f"avg{horizon}"] = statistics.mean(values) if values else None
+            entry[f"win{horizon}"] = (sum(1 for v in values if v > 0) / len(values) * 100) if values else None
+            base_avg = statistics.mean(base_values) if base_values else None
+            entry[f"base{horizon}"] = base_avg
+            entry[f"excess{horizon}"] = (
+                (entry[f"avg{horizon}"] - base_avg)
+                if (entry[f"avg{horizon}"] is not None and base_avg is not None) else None
+            )
+        rows_out.append(entry)
+
+    return {
+        "ok": True,
+        "buckets": rows_out,
+        "covered": sum(entry["n20"] for entry in rows_out),
+        "missing_turnover": missing,
+        "sample": sample,
+        "years": _sample_years(bars),
+        "cost": cost,
+        "limit_check": check_limits,
+        "codes": len(bars),
+    }
+
+
+def render_turnover_study(result: dict, verbose: bool = True) -> str:
+    """给人看的换手率研究：先看超额，再看样本量，最后看单调性。"""
+    if not result.get("ok"):
+        return result.get("message", "换手率研究没跑成")
+    lines = ["===== 换手率与之后的收益 =====", ""]
+    lines.append(f"样本：{result['codes']} 只标的，约 {_cell(result.get('years'), 1)} 年；"
+                 f"往返成本 {_cell(result['cost'] * 100, 3, suffix='%')}；"
+                 f"实际参与 {result['covered']} 个样本（换手率缺失跳过 {result['missing_turnover']} 个）")
+    lines.append("")
+    lines.append("分档按「当日换手 ÷ 自己近 20 日均值」——这样剔除了股本规模差异，")
+    lines.append("小盘股不会因为天生换手高就被整档算进「暴力放量」。")
+    lines.append("")
+    lines.append(f"  {'分档':<16}{'样本':>8}{'5日均值':>10}{'5日超额':>10}{'20日均值':>10}{'20日超额':>10}{'20日胜率':>10}")
+    for entry in result["buckets"]:
+        lines.append(
+            f"  {entry['bucket']:<16}{entry['n20']:>8}"
+            f"{_cell(entry['avg5'], 2, suffix='%', signed=True):>10}"
+            f"{_cell(entry['excess5'], 2, suffix='%', signed=True):>10}"
+            f"{_cell(entry['avg20'], 2, suffix='%', signed=True):>10}"
+            f"{_cell(entry['excess20'], 2, suffix='%', signed=True):>10}"
+            f"{_cell(entry['win20'], 1, suffix='%'):>10}"
+        )
+    lines.append("")
+    lines.append("怎么读：")
+    lines.append("  1. 超额才是结论——均值只说「涨没涨」，超额说「比随便买一只强不强」；")
+    lines.append("  2. 看**单调性**：如果放量越大之后越弱（超额一路往下），那是真的反转效应；")
+    lines.append("     如果忽高忽低，多半是噪声，别据此改规则。")
+    lines.append("  3. 样本少的档（几百个以下）没有统计意义，别单独下结论。")
+    lines.append("  4. 这里的收益是「次日建仓、持有到期」的口径，与参数回测同一把尺子。")
+    return "\n".join(lines)
+
+
 def run_grid(conn, cfg, grid: dict | None = None, gates=DEFAULT_GATES, verbose: bool = True,
              mode: str | None = None, limit: int | None = None) -> dict:
     """扫参数网格：按 20 日净超额收益排序，并给出每个组合的邻域表现。"""
@@ -507,6 +634,33 @@ def render_report(result: dict, top: int = 15) -> str:
     if mode != "market":
         lines.append("  5. 当前是观察池口径，样本小，结论只是方向性的。")
     return "\n".join(lines)
+
+
+def save_turnover(result: dict, root: str | Path) -> Path:
+    """换手率研究的结构化结果落盘（页面读它，不重跑）。"""
+    target = Path(root) / "回测" / f"换手率结果-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    slim = {key: value for key, value in result.items() if key != "sample"}
+    target.write_text(json.dumps(slim, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+def latest_turnover(root: str | Path) -> dict | None:
+    """最近一次换手率研究的结果；没跑过返回 None。"""
+    folder = Path(root) / "回测"
+    if not folder.exists():
+        return None
+    files = sorted(folder.glob("换手率结果-*.json"))
+    if not files:
+        return None
+    newest = files[-1]
+    try:
+        data = json.loads(newest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    data["_file"] = newest.name
+    data["_saved_at"] = datetime.fromtimestamp(newest.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    return data
 
 
 def write_report(text: str, root: str | Path) -> Path:
