@@ -80,6 +80,7 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
         return {"ok": False, "message": "还没有 ETF 份额数据，先跑一次 3-每日任务"}
 
     items: list[dict] = []
+    thin = []                                   # 有份额、但只有一天，算不出变化的
     for code in conf["etfs"]:
         rows = [
             dict(row)
@@ -91,7 +92,9 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
             )
         ]
         if len(rows) < 2 or rows[0]["trade_date"] != trade_date:
-            continue                      # 今天还没份额，或历史不够两天
+            if rows:
+                thin.append(code)         # 有数据，但只有一天——不是"没数据"，是"还差一天"
+            continue
         today, prev = rows[0], rows[1]
         if not today["shares"] or not prev["shares"]:
             continue
@@ -139,6 +142,7 @@ def scan(conn, cfg: dict | None = None, trade_date: str | None = None) -> dict:
     return {
         "ok": True,
         "trade_date": trade_date,
+        "thin": thin,
         "level": level,
         "items": sorted(items, key=lambda item: -(item["inflow"] or 0)),
         "hits": hits,

@@ -707,6 +707,30 @@ def cmd_flows(args) -> int:
     return 0 if (lhb.get("ok") or flow.get("ok")) else 1
 
 
+def cmd_etf_shares(args) -> int:
+    """补 ETF 份额历史：托底判定与页面上的"较前一日"都至少要两天的份额。
+
+    交易所的接口能按日期查历史，所以"只有一天数据"是可以补的——
+    补完 `托底` 那个模块和页面才有东西可算。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    pool = tasks._source_pool(cfg)
+    sources = tasks._all_sources_for(pool, "etf_shares")
+    trade_date = warehouse_mod.latest_trade_date(conn, cfg)
+    etf_codes = list(dict.fromkeys(
+        list(cfg["watchlist"].get("etfs") or []) + list(support_mod.settings(cfg).get("etfs") or [])
+    ))
+    written = tasks._topup_etf_share_history(
+        conn, sources, etf_codes, trade_date, verbose=True,
+        target_days=int(args.days or tasks.ETF_SHARE_BACKFILL_DAYS),
+    )
+    rows = db.query_one(conn, "SELECT COUNT(DISTINCT trade_date) AS n, MAX(trade_date) AS d FROM etf_shares")
+    conn.close()
+    print(f"补了 {written} 条；本地现有 {rows['n']} 个交易日的份额（最新 {rows['d']}）")
+    return 0
+
+
 def cmd_breadth(args) -> int:
     """用本地 K 线补市场广度：涨跌家数 / 涨跌停 / 中位数涨跌幅 / 成交额。
 
@@ -995,6 +1019,11 @@ def build_parser() -> argparse.ArgumentParser:
     breadth.add_argument("--days", type=int, help="只补最近 N 个交易日（默认全部）")
     breadth.add_argument("--db", help="数据库路径")
     breadth.set_defaults(func=cmd_breadth)
+
+    etf_shares = sub.add_parser("etf-shares", help="补 ETF 份额历史（托底判定与页面上的“较前一日”要用）")
+    etf_shares.add_argument("--days", type=int, help="往前补几个交易日（默认 10）")
+    etf_shares.add_argument("--db", help="数据库路径")
+    etf_shares.set_defaults(func=cmd_etf_shares)
 
     riskstats = sub.add_parser("riskstats", help="风险层分布：盈亏比、止损距离、仓位上限")
     riskstats.add_argument("--db", help="数据库路径")

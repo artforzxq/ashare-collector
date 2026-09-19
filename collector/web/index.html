@@ -1778,7 +1778,11 @@ function renderSupport(){
         ? `<br>最近命中：` + d.history.slice(0, 6).map(row =>
             `${row.trade_date}（${row.etf_count} 只 / ${(row.net_inflow / 1e8).toFixed(0)} 亿 / ${row.level}）`).join('　')
         : '') + '</div>'
-    : '<div class="empty-state"><b>盯着的这几只宽基还没有份额数据</b>份额来自交易所，跑一次 3-每日任务 就补上了</div>';
+    : (today.thin && today.thin.length
+       ? `<div class="empty-state"><b>这几只宽基只有一天的份额，还算不出变化</b>`
+         + `份额是 T+1 披露的，"较前一日"至少要两天：${today.thin.join('、')}。`
+         + `下一次日终会自动补上（也可以直接跑 <code>python run.py etf-shares --days 20</code> 一次补一段历史）。</div>`
+       : '<div class="empty-state"><b>盯着的这几只宽基还没有份额数据</b>份额来自交易所，跑一次 3-每日任务 就补上了</div>');
 }
 
 /* ---------- 新股与次新：单独一摊，看事实不看故事 ---------- */

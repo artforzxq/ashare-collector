@@ -465,10 +465,6 @@ def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose
 
     merged: dict[str, dict] = {}
     failures: list[str] = []
-    # 谁的数字更可信：**交易所 > 聚合源**。实测同一只深市 ETF，深交所给 63.29 亿份，
-    # 聚合源（新浪"最近总份额"）给 69.39 亿份——差 10%，而份额变化只有几个百分点，
-    # 用错源等于把信号淹掉。所以这里按来源排优先级，再让"正式披露"压过"估算值"。
-    priority = {"sse": 0, "szse": 0, "akshare": 1, "sina": 2}
     for source in sources:
         try:
             rows = source.etf_shares(etf_codes, trade_date)
@@ -476,22 +472,7 @@ def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose
             failures.append(f"{source.name}：{type(exc).__name__} {str(exc)[:80]}")
             db.log_health(conn, trade_date, source.name, "etf_shares", "failed", 0, 1.0, 0, str(exc))
             continue
-        for row in rows:
-            code = row.get("code")
-            # 每行都要带 source：upsert_rows 按**第一行**的字段建 SQL，
-            # 少一行带这个键，整批的 source 就都写不进去（表里会留一堆 NULL）。
-            row.setdefault("source", source.name)
-            current = merged.get(code)
-            if current is None:
-                merged[code] = row
-                continue
-            better_source = priority.get(source.name, 3) < priority.get(current.get("source"), 3)
-            same_source_more_official = (
-                priority.get(source.name, 3) == priority.get(current.get("source"), 3)
-                and current.get("is_estimated") and not row.get("is_estimated")
-            )
-            if better_source or same_source_more_official:
-                merged[code] = row
+        _merge_etf_rows(merged, rows, source)
         if rows:
             _log(f"      · ETF 份额：{source.name} 给了 {len(rows)} 只", verbose)
 
@@ -519,6 +500,102 @@ def _collect_etf_shares(conn, sources: list, cfg: dict, trade_date: str, verbose
             row["assets"] = round(row["shares"] * price, 2)
         row["updated_at"] = db.now_iso()
     db.upsert_rows(conn, "etf_shares", rows, ["code", "trade_date"])
+    _topup_etf_share_history(conn, sources, etf_codes, trade_date, verbose)
+
+
+# 谁的数字更可信：**交易所 > 聚合源**。实测同一只深市 ETF，深交所给 63.29 亿份，
+# 聚合源（新浪"最近总份额"）给 69.39 亿份——差 10%，而份额变化只有几个百分点，
+# 用错源等于把信号淹掉。所以按来源排优先级，再让"正式披露"压过"估算值"。
+ETF_SHARE_PRIORITY = {"sse": 0, "szse": 0, "akshare": 1, "sina": 2}
+ETF_SHARE_MIN_DAYS = 5          # 历史少于这么多天就补
+ETF_SHARE_BACKFILL_DAYS = 10    # 每次最多往前补几天
+
+
+def _merge_etf_rows(merged: dict, rows: list, source) -> None:
+    """按来源优先级合并同一天的份额。每个源各管一段市场，同一只票要挑更可信的那份。"""
+    for row in rows:
+        code = row.get("code")
+        # 每行都要带 source：upsert_rows 按**第一行**的字段建 SQL，
+        # 少一行带这个键，整批的 source 就都写不进去（表里会留一堆 NULL）。
+        row.setdefault("source", source.name)
+        current = merged.get(code)
+        if current is None:
+            merged[code] = row
+            continue
+        better_source = ETF_SHARE_PRIORITY.get(source.name, 3) < ETF_SHARE_PRIORITY.get(current.get("source"), 3)
+        same_source_more_official = (
+            ETF_SHARE_PRIORITY.get(source.name, 3) == ETF_SHARE_PRIORITY.get(current.get("source"), 3)
+            and current.get("is_estimated") and not row.get("is_estimated")
+        )
+        if better_source or same_source_more_official:
+            merged[code] = row
+
+
+def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
+                             verbose: bool, target_days: int | None = None) -> int:
+    """本地份额历史太薄时，顺手往前补几天。
+
+    为什么需要它：托底判定要"今天 vs 前一天"，页面上的份额表也要"较前一日"——
+    **只有一天数据时，整个模块看起来像坏的**（页面直接显示"盯着的这几只宽基
+    还没有份额数据"）。而交易所的接口本来就能按日期查历史，补起来很直接：
+    沪市一天一次请求（一次覆盖全部沪市 ETF），深市每只两次。
+
+    只在历史薄的时候补（不足 5 天时补到 10 天），补过就不再重复请求。
+    """
+    target = int(target_days or ETF_SHARE_BACKFILL_DAYS)
+    have = {row["trade_date"] for row in db.query(conn, "SELECT DISTINCT trade_date FROM etf_shares")}
+    if not codes or len(have) >= ETF_SHARE_MIN_DAYS:
+        return 0
+    days = [
+        row["trade_date"]
+        for row in db.query(
+            conn,
+            """SELECT trade_date FROM trade_calendar
+                WHERE is_trading_day=1 AND trade_date<=? ORDER BY trade_date DESC LIMIT ?""",
+            (trade_date, target),
+        )
+    ]
+    if not days:                       # 日历还没同步时的兜底：拿本地 K 线里的日期
+        days = [
+            row["trade_date"]
+            for row in db.query(
+                conn,
+                """SELECT DISTINCT trade_date FROM bars_daily
+                    WHERE trade_date<=? ORDER BY trade_date DESC LIMIT ?""",
+                (trade_date, target),
+            )
+        ]
+    missing = sorted(day for day in days if day not in have)
+    written = 0
+    for day in missing:
+        merged: dict[str, dict] = {}
+        for source in sources:
+            try:
+                _merge_etf_rows(merged, source.etf_shares(codes, day), source)
+            except Exception:
+                continue               # 补历史失败不影响当天：能补多少补多少
+        if not merged:
+            continue
+        closes = {
+            row["code"]: row["close"]
+            for row in db.query(conn, "SELECT code, close FROM bars_daily WHERE trade_date=?", (day,))
+        }
+        payload = []
+        for row in merged.values():
+            if not row.get("close"):
+                row["close"] = closes.get(row["code"])
+            nav, close = row.get("nav"), row.get("close")
+            if nav and close:
+                row["premium_rate"] = round((close / nav - 1) * 100, 4)
+            price = nav or close
+            if price and row.get("shares"):
+                row["assets"] = round(row["shares"] * price, 2)
+            row["updated_at"] = db.now_iso()
+            payload.append(row)
+        written += db.upsert_rows(conn, "etf_shares", payload, ["code", "trade_date"])
+    if written:
+        _log(f"      · ETF 份额历史太薄，往前补了 {written} 条", verbose)
+    return written
 
 
 def _collect_margin(conn, source, trade_date: str, verbose: bool) -> None:
