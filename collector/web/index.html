@@ -501,6 +501,10 @@ canvas{display:block;width:100%}
         <h3>因子清单 <span id="factorSummary"></span></h3>
         <div class="tbl-wrap"><table class="tbl" id="factorTable"></table></div>
         <div class="hint">
+          <b>IC 是按"超额收益"算的</b>——减掉了当日全体标的的平均涨跌，所以它和回测里的"净超额"是同一把尺子；
+          原始收益里混着大盘涨跌，不减的话行情好的时候什么因子都"有效"。
+          <b>残差 IC20</b> 是剔掉"与最相关那个因子重复的部分"之后剩下的预测力：相关系数 0.65 就已经高度重复了，
+          单看 IC 会把"换个名字的同一个因子"当成新信息（实测 ma_slope 的 IC 就是这么来的）。<br>
           转正口径（规格里的准入流程，不是页面定的）：影子运行 ≥ <b id="shadowDays">20</b> 个交易日、
           与已生效因子的相关系数绝对值 &lt; <b id="dupCorr">0.7</b>、20 日 IC 绝对值 ≥ 0.02，三项都过才算够格。
           权重写的是"当前生效权重"——影子因子的权重是 0，它只记贡献分、不参与打分。
@@ -1601,6 +1605,9 @@ function renderFactors(){
     const corr = (item.max_corr === null || item.max_corr === undefined)
       ? '<span class="sub">—</span>'
       : `${signed(item.max_corr, 2)} <span class="sub">${item.max_corr_with || ''}</span>`;
+    const partial = (item.ic20_partial === null || item.ic20_partial === undefined)
+      ? '<span class="sub">—</span>'
+      : posNeg(item.ic20_partial, signed(item.ic20_partial, 3));
     return `<tr>
       <td><span class="name">${item.name}</span><div class="sub">${item.factor_id}</div></td>
       <td class="sub">${({state:'状态', opportunity:'机会', risk:'风险'})[item.layer] || item.layer || '—'}</td>
@@ -1610,6 +1617,7 @@ function renderFactors(){
       <td class="num">${item.days || 0}<div class="sub">${item.last_date ? String(item.last_date).slice(5) : ''}</div></td>
       <td class="num">${posNeg(item.ic5, signed(item.ic5, 3))}</td>
       <td class="num">${posNeg(item.ic20, signed(item.ic20, 3))}</td>
+      <td class="num">${partial}</td>
       <td>${corr}</td>
       <td class="sub">${item.verdict || '—'}</td>
     </tr>`;
@@ -1618,7 +1626,7 @@ function renderFactors(){
     `<thead><tr>
        <th>因子</th><th>层</th><th>类别</th><th class="num">权重</th><th>状态</th>
        <th class="num">覆盖</th><th class="num">IC5</th><th class="num">IC20</th>
-       <th>最大相关</th><th>结论</th>
+       <th class="num">残差 IC20</th><th>最大相关</th><th>结论</th>
      </tr></thead>
      <tbody>${rows || '<tr><td colspan="10" class="sub">还没有因子数据，先跑一次 3-每日任务</td></tr>'}</tbody>`;
 
@@ -2020,6 +2028,15 @@ function renderBacktest(){
     <tbody>${rows || '<tr><td colspan="9" class="sub">这次回测没有产出组合</td></tr>'}</tbody>
   </table></div>`;
 
+  // 显著性：扫了这么多组之后，最好那组还站得住吗
+  const sig = d.significance;
+  if (sig && sig.ok){
+    const ok = sig.significant;
+    $('btNote').innerHTML = `共 ${d.total || items.length} 组，按 20 日净超额排序　` +
+      (ok ? `<span class="tag active">修正后仍显著</span>`
+          : `<span class="tag shadow" title="扫 ${sig.searched} 组取最好的一组，本身就是数据窥探；修正后不显著">修正后不显著</span>`) +
+      `<span class="sub">　最好那组 t=${sig.t}，这个搜索规模下要 |t| ≥ ${sig.crit_t}；修正后 p ${sig.p_adj}</span>`;
+  }
   renderTurnover(d.turnover);
 }
 
@@ -2034,24 +2051,31 @@ function renderTurnover(t){
   $('turnoverWhen').textContent = t._saved_at ? `跑于 ${t._saved_at}` : '';
   $('turnoverNote').textContent = `${t.codes} 只标的 · 约 ${Number(t.years || 0).toFixed(1)} 年 · ${t.covered} 个样本`;
   $('turnoverBody').innerHTML = `<table class="tbl"><thead><tr>
-      <th>分档</th><th class="num">样本</th><th class="num">5 日均值</th><th class="num">5 日超额</th>
-      <th class="num">20 日均值</th><th class="num">20 日超额</th><th class="num">20 日胜率</th>
+      <th>分档</th><th class="num">样本</th><th class="num">交易日</th>
+      <th class="num">20 日超额（按日）</th><th class="num">t 值</th>
+      <th class="num">20 日超额（按样本）</th><th class="num">20 日胜率</th>
     </tr></thead><tbody>` + (t.buckets || []).map(b => `<tr>
       <td class="name">${b.bucket}</td>
       <td class="num">${b.n20.toLocaleString()}</td>
-      <td class="num">${posNeg(b.avg5, signed(b.avg5, 2) + '%')}</td>
-      <td class="num">${posNeg(b.excess5, signed(b.excess5, 2) + '%')}</td>
-      <td class="num">${posNeg(b.avg20, signed(b.avg20, 2) + '%')}</td>
-      <td class="num">${posNeg(b.excess20, signed(b.excess20, 2) + '%')}</td>
-      <td class="num sub">${b.win20 === null ? '—' : b.win20.toFixed(1) + '%'}</td>
+      <td class="num sub">${b.days20 ?? '—'}</td>
+      <td class="num">${posNeg(b.excess_by_day20, signed(b.excess_by_day20, 2) + '%')}</td>
+      <td class="num">${b.t20 == null ? '—' : (Math.abs(b.t20) >= 2 ? `<b>${b.t20.toFixed(2)}</b>` : b.t20.toFixed(2))}</td>
+      <td class="num sub">${posNeg(b.excess20, signed(b.excess20, 2) + '%')}</td>
+      <td class="num">${posNeg(b.win20, b.win20 == null ? '—' : b.win20.toFixed(1) + '%')}</td>
     </tr>`).join('') + '</tbody></table>';
   $('turnoverHint').innerHTML =
     '分档用「当日换手 ÷ 自己近 20 日均值」，所以剔除了股本规模差异——小盘股不会因为天生换手高就整档算进"暴力放量"。' +
     '口径与参数回测一致：次日建仓、扣同一笔成本、涨停买不进的样本剔除。' +
     '<br>看<b>超额</b>（比"同一批日期随便买一只"强不强）和<b>单调性</b>：放量越大之后越弱才叫反转效应；' +
     '忽高忽低多半是噪声。样本几百个以下的档别单独下结论。' +
-    '<br><b>这条结论已经接进风险层</b>：当日换手 ≥ 自己 20 日常态 2 倍时，仓位上限打 6 折' +
-    '（只缩仓位、不否决）——它是负向信号，所以不塞进趋势分，只回答"做多大"。阈值在 config.yaml 的 risk.turnover_discount 里。';
+    (function(){
+      const td = (meta.risk || {}).turnover_discount || {};
+      if (!td.enabled) return '';
+      return `<br><b>这条结论已经接进风险层</b>：当日换手 ≥ 自己 20 日常态 ${td.ratio} 倍时，` +
+        `仓位上限打 ${Math.round(td.factor * 10)} 折（只缩仓位、不否决）——它是负向信号，` +
+        `所以不塞进趋势分，只回答"做多大"。门槛定在 ${td.ratio} 倍是按证据来的：` +
+        `<b>2~3 倍那档还不够硬</b>（t 约 −1.5），3 倍以上才站得住（t 约 −3.1）。`;
+    })();
 }
 
 async function loadScreen(){

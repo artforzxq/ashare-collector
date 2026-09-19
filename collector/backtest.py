@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from datetime import datetime
 from pathlib import Path
@@ -214,6 +215,128 @@ def baseline_returns(fwd: dict, cost: float = 0.0) -> dict[int, list[float]]:
     }
 
 
+def baseline_by_day(fwd: dict, cost: float = 0.0) -> dict[int, dict[str, float]]:
+    """同一批标的里"随便买一只"的**每日**平均收益。
+
+    和 baseline_returns 的区别：那个是把所有样本汇成一锅（按样本算误差棒会偏乐观），
+    这个保留交易日维度——同一天几千只票高度相关，真实的独立观测数是**交易日**级别。
+    """
+    out: dict[int, dict[str, float]] = {}
+    for horizon in HORIZONS:
+        per_day: dict[str, list[float]] = {}
+        for code, series in fwd.items():
+            rows = series.get(horizon) or []
+            for index, value in enumerate(rows):
+                if value is None:
+                    continue
+                day = _day_of(fwd, code, index)
+                if day is None:
+                    continue
+                per_day.setdefault(day, []).append(value - cost)
+        out[horizon] = {day: statistics.mean(values) for day, values in per_day.items() if values}
+    return out
+
+
+# forward_arrays 只存收益、没存日期，但按交易日聚合必须知道"这一行是哪天"。
+# 这里挂一张旁表，带上 fwd 本体做同一性校验——只用 id() 的话，对象被回收后
+# 新对象可能复用同一个 id，那就会把日期张冠李戴（很难查的错）。
+_DAY_INDEX: dict[int, tuple[dict, dict[str, list[str | None]]]] = {}
+_DAY_INDEX_LIMIT = 4          # 只留最近几次，长驻进程里不至于越攒越多
+
+
+def index_days(fwd: dict, bars: dict) -> None:
+    """登记 (code, 行号) → 交易日 的映射。算完前瞻收益后调一次即可。"""
+    table = {code: [row.get("trade_date") for row in rows] for code, rows in bars.items()}
+    _DAY_INDEX[id(fwd)] = (fwd, table)
+    while len(_DAY_INDEX) > _DAY_INDEX_LIMIT:
+        _DAY_INDEX.pop(next(iter(_DAY_INDEX)))
+
+
+def _day_of(fwd: dict, code: str, index: int) -> str | None:
+    entry = _DAY_INDEX.get(id(fwd))
+    if not entry or entry[0] is not fwd:
+        return None
+    days = entry[1].get(code)
+    return days[index] if days and index < len(days) else None
+
+
+def daily_stats(by_day: dict[str, list[float]]) -> dict:
+    """把"每个交易日一组收益"汇成 均值 / 标准差 / 天数 / t 值 / 95% 置信区间。
+
+    按交易日聚合的意义：信号在时间上是相关的，同一天的几千只票几乎算一个观测。
+    不这么做，误差棒会窄得离谱，"显著"两个字就变得一文不值。
+    """
+    means = [statistics.mean(values) for values in by_day.values() if values]
+    days = len(means)
+    if days < 2:
+        return {"days": days, "mean": (means[0] if means else None), "sd": None,
+                "t": None, "ci95": None}
+    mean = statistics.mean(means)
+    sd = statistics.pstdev(means) * (days / max(1, days - 1)) ** 0.5
+    se = sd / (days ** 0.5)
+    return {
+        "days": days,
+        "mean": mean,
+        "sd": sd,
+        "t": round(mean / se, 2) if se > 0 else None,
+        "ci95": round(1.96 * se, 4),
+    }
+
+
+def normal_two_sided_p(t: float | None) -> float | None:
+    """双侧 p 值（正态近似）。样本是几百个交易日，用正态足够，不引 scipy。"""
+    if t is None:
+        return None
+    z = abs(float(t))
+    return round(max(0.0, min(1.0, 2 * (1 - 0.5 * (1 + math.erf(z / math.sqrt(2)))))), 6)
+
+
+def significance(results: list[dict], searched: int, horizon: int = 20, alpha: float = 0.05) -> dict:
+    """考虑"我们扫了多少组参数"之后，最好的那组还站得住吗。
+
+    为什么必须做：扫 36 组取最好的，等于在数据里挑噪声——纯随机数据也能挑出"很棒"的一组。
+    做法：拿最好那组的**按交易日聚合**的 t 值算原始 p，再用 Šidák 按搜索次数修正
+    （`p_adj = 1 − (1 − p)^N`），并给出"在这个搜索规模下要显著需要多大的 t"。
+    """
+    if not results:
+        return {"ok": False}
+    best = results[0]
+    t_value = best.get(f"t{horizon}")
+    p_raw = normal_two_sided_p(t_value)
+    searched = max(1, int(searched))
+    p_adj = None
+    if p_raw is not None:
+        p_adj = round(min(1.0, 1 - (1 - p_raw) ** searched), 4)
+    # Bonferroni 的反函数：临界 t（双侧，alpha/searched）
+    target = alpha / searched
+    crit_z = _z_for_two_sided(target)
+    return {
+        "ok": p_raw is not None,
+        "horizon": horizon,
+        "searched": searched,
+        "days": best.get(f"days{horizon}"),
+        "t": t_value,
+        "p_raw": p_raw,
+        "p_adj": p_adj,
+        "crit_t": round(crit_z, 2),
+        "significant": bool(p_adj is not None and p_adj < alpha),
+        "excess": best.get(f"excess{horizon}"),
+        "label": best.get("label"),
+    }
+
+
+def _z_for_two_sided(p: float) -> float:
+    """双侧 p → 临界 z（二分求解，够用且不引依赖）。"""
+    low, high = 0.0, 6.0
+    for _ in range(60):
+        mid = (low + high) / 2
+        if 2 * (1 - 0.5 * (1 + math.erf(mid / math.sqrt(2)))) > p:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2
+
+
 def evaluate(
     bars: dict[str, list[dict]],
     base: dict[str, list[dict]],
@@ -230,7 +353,10 @@ def evaluate(
     `cost` 是往返成本（%），信号和基准都扣同一笔——不扣的话，比较的是谁的摩擦小。
     """
     signal_returns: dict[int, list[float]] = {h: [] for h in HORIZONS}
+    # 按交易日留一份：同一天几千只票高度相关，独立观测其实是"交易日"级别
+    daily_signal: dict[int, dict[str, list[float]]] = {h: {} for h in HORIZONS}
     baseline = base_returns or baseline_returns(fwd, cost)
+    baseline_daily = baseline_by_day(fwd, cost)
     drawdowns: list[float] = []
     signal_count = 0
     blocked = 0
@@ -253,6 +379,9 @@ def evaluate(
                 value = fwd[code][horizon][index]
                 if value is not None:
                     signal_returns[horizon].append(value - cost)
+                    day = _day_of(fwd, code, index)
+                    if day:
+                        daily_signal[horizon].setdefault(day, []).append(value - cost)
             entry = index + 1
             exit_pos = entry + 19
             if entry < len(rows) and exit_pos < len(rows):
@@ -277,6 +406,18 @@ def evaluate(
         result[f"median{horizon}"] = statistics.median(values) if values else None
         result[f"base{horizon}"] = base_avg
         result[f"excess{horizon}"] = (avg - base_avg) if (avg is not None and base_avg is not None) else None
+
+        # 按交易日聚合：每日超额 = 当天信号的均值 − 当天基准均值，再对"日"求统计量
+        per_day: dict[str, list[float]] = {}
+        base_daily = baseline_daily.get(horizon) or {}
+        for day, values in daily_signal[horizon].items():
+            if day in base_daily:
+                per_day[day] = [value - base_daily[day] for value in values]
+        stats_daily = daily_stats(per_day)
+        result[f"days{horizon}"] = stats_daily["days"]
+        result[f"excess_by_day{horizon}"] = stats_daily["mean"]
+        result[f"t{horizon}"] = stats_daily["t"]
+        result[f"ci{horizon}"] = stats_daily["ci95"]
     result["mdd20"] = statistics.mean(drawdowns) if drawdowns else None
     return result
 
@@ -381,12 +522,18 @@ def turnover_study(conn, cfg, mode: str | None = None, limit: int | None = None,
     delay_max = int(section.get("exit_delay_max", DEFAULT_EXIT_DELAY))
 
     fwd = forward_arrays(bars, names, limit_check=check_limits, delay_max=delay_max)
+    index_days(fwd, bars)
     fillable = fillable_mask(bars, names) if check_limits else None
     baseline = baseline_returns(fwd, cost)
+    baseline_daily = baseline_by_day(fwd, cost)      # 按交易日聚合要用的每日基准
 
     # bucket → horizon → 收益列表
     samples: dict[str, dict[int, list[float]]] = {
         label: {horizon: [] for horizon in HORIZONS} for label, _, _ in TURNOVER_BUCKETS
+    }
+    # 同一份样本按交易日再收一份：算置信区间要用"日"当独立单位
+    daily: dict[str, dict[int, dict[str, list[float]]]] = {
+        label: {horizon: {} for horizon in HORIZONS} for label, _, _ in TURNOVER_BUCKETS
     }
     missing = 0
     for code, rows in bars.items():
@@ -401,10 +548,15 @@ def turnover_study(conn, cfg, mode: str | None = None, limit: int | None = None,
                 continue
             if fillable is not None and not fillable[code][index]:
                 continue          # 次日涨停买不进，这天的收益不算你的
+            day = feature.get("trade_date")
             for horizon in HORIZONS:
                 value = fwd[code][horizon][index]
-                if value is not None:
-                    samples[label][horizon].append(value - cost)
+                if value is None:
+                    continue
+                excess = value - cost
+                samples[label][horizon].append(excess)
+                if day:
+                    daily[label][horizon].setdefault(day, []).append(excess)
 
     rows_out: list[dict] = []
     for label, _, _ in TURNOVER_BUCKETS:
@@ -421,6 +573,17 @@ def turnover_study(conn, cfg, mode: str | None = None, limit: int | None = None,
                 (entry[f"avg{horizon}"] - base_avg)
                 if (entry[f"avg{horizon}"] is not None and base_avg is not None) else None
             )
+            # 按交易日聚合：当天这档的平均收益 − 当天基准均值，再对"日"求 t 与 95% 区间
+            base_daily = baseline_daily.get(horizon) or {}
+            per_day = {
+                day: [value - base_daily[day] for value in values]
+                for day, values in daily[label][horizon].items() if day in base_daily
+            }
+            stats_daily = daily_stats(per_day)
+            entry[f"days{horizon}"] = stats_daily["days"]
+            entry[f"excess_by_day{horizon}"] = stats_daily["mean"]
+            entry[f"t{horizon}"] = stats_daily["t"]
+            entry[f"ci{horizon}"] = stats_daily["ci95"]
         rows_out.append(entry)
 
     return {
@@ -448,18 +611,20 @@ def render_turnover_study(result: dict, verbose: bool = True) -> str:
     lines.append("分档按「当日换手 ÷ 自己近 20 日均值」——这样剔除了股本规模差异，")
     lines.append("小盘股不会因为天生换手高就被整档算进「暴力放量」。")
     lines.append("")
-    lines.append(f"  {'分档':<16}{'样本':>8}{'5日均值':>10}{'5日超额':>10}{'20日均值':>10}{'20日超额':>10}{'20日胜率':>10}")
+    lines.append(f"  {'分档':<16}{'样本':>8}{'天数':>6}{'20日超额(按日)':>16}{'t 值':>8}"
+                 f"{'20日超额(按样本)':>18}{'20日胜率':>10}")
     for entry in result["buckets"]:
         lines.append(
-            f"  {entry['bucket']:<16}{entry['n20']:>8}"
-            f"{_cell(entry['avg5'], 2, suffix='%', signed=True):>10}"
-            f"{_cell(entry['excess5'], 2, suffix='%', signed=True):>10}"
-            f"{_cell(entry['avg20'], 2, suffix='%', signed=True):>10}"
-            f"{_cell(entry['excess20'], 2, suffix='%', signed=True):>10}"
+            f"  {entry['bucket']:<16}{entry['n20']:>8}{entry['days20']:>6}"
+            f"{_cell(entry.get('excess_by_day20'), 2, suffix='%', signed=True):>16}"
+            f"{_cell(entry.get('t20'), 2):>8}"
+            f"{_cell(entry['excess20'], 2, suffix='%', signed=True):>18}"
             f"{_cell(entry['win20'], 1, suffix='%'):>10}"
         )
     lines.append("")
     lines.append("怎么读：")
+    lines.append("  0. **先看「按日」那一列**：同一天几千只票高度相关，按样本算会把误差棒压窄、")
+    lines.append("     让「显著」变得廉价。按交易日聚合后各档权重才一样，t 值也才有意义（|t| ≥ 2 才算像样）。")
     lines.append("  1. 超额才是结论——均值只说「涨没涨」，超额说「比随便买一只强不强」；")
     lines.append("  2. 看**单调性**：如果放量越大之后越弱（超额一路往下），那是真的反转效应；")
     lines.append("     如果忽高忽低，多半是噪声，别据此改规则。")
@@ -484,6 +649,7 @@ def run_grid(conn, cfg, grid: dict | None = None, gates=DEFAULT_GATES, verbose: 
     delay_max = int(section.get("exit_delay_max", DEFAULT_EXIT_DELAY))
     check_limits = bool(section.get("limit_check", True))
     fwd = forward_arrays(bars, names, limit_check=check_limits, delay_max=delay_max)
+    index_days(fwd, bars)          # 按交易日聚合、算显著性都要用
     mask = fillable_mask(bars, names) if check_limits else None
     cost = cost_pct(cfg)
     years = _sample_years(bars)
@@ -515,6 +681,8 @@ def run_grid(conn, cfg, grid: dict | None = None, gates=DEFAULT_GATES, verbose: 
         "limit_check": check_limits,
         "exit_delay_max": delay_max,
         "plateau": plateau(results, grid),
+        # 扫了这么多组，最好那组还显著吗——不做修正的话，随机数据也能挑出"很棒"的一组
+        "significance": significance(results, searched=len(results)),
     }
 
 
@@ -624,7 +792,20 @@ def render_report(result: dict, top: int = 15) -> str:
         lines.append("怎么读高原：邻域均值和自身差不多、邻域最差还在 0 以上 → 这片参数都能用；")
         lines.append("            自身很高但邻域塌下去 → 尖峰，多半是拟合，别拿它去改配置。")
 
-    lines.append("")
+    sig = result.get("significance") or {}
+    if sig.get("ok"):
+        lines.append("")
+        lines.append("=== 这组结果经得起「扫了多少组」的检验吗 ===")
+        lines.append(f"  最好的那组：{sig.get('label')}　20 日净超额 "
+                     f"{_cell(sig.get('excess'), 2, suffix='%', signed=True)}"
+                     f"（{sig.get('days')} 个交易日）")
+        lines.append(f"  原始 p {sig.get('p_raw')} → 按搜索次数 {sig.get('searched')} "
+                     f"修正后 p {sig.get('p_adj')}")
+        lines.append(f"  这个搜索规模下，|t| 至少要 {sig.get('crit_t')} 才算显著；这组是 t = {sig.get('t')}")
+        lines.append("  → " + ("显著，值得进一步验证" if sig.get("significant")
+                               else "不显著：扫这么多组取最好的，多半是挑出来的噪声，别据此改配置"))
+        lines.append("")
+
     lines.append("怎么读：")
     lines.append("  1. 先看 20 日净超额，它是正数才有意义；胜率高但超额为负，说明只是行情好。")
     lines.append("  2. 再看信号数：几十次以下的结果没有统计意义，别据此改参数。")
@@ -633,6 +814,7 @@ def render_report(result: dict, top: int = 15) -> str:
     lines.append("     说明这套规则越盯着最强势的票——那部分收益现实中你拿不到。")
     if mode != "market":
         lines.append("  5. 当前是观察池口径，样本小，结论只是方向性的。")
+    lines.append("  6. t 值按**交易日**聚合算：同一天几千只票高度相关，按样本算会虚高。")
     return "\n".join(lines)
 
 

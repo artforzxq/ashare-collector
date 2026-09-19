@@ -40,10 +40,10 @@ DEFAULTS = {
     "open_space_high_tolerance_pct": 8.0,
     "cap_floor": 0.3,
     "max_stop_pct": 8.0,     # 止损离现价超过这个百分比就不做（位置太远，风险预算不够）
-    # 换手放量折价：实证依据见 turnover_discount 的注释
+    # 换手放量折价：门槛 3 倍是按证据定的（2~3 倍那档 t≈−1.5 不够硬，>3 倍 t≈−3.1）
     "turnover_discount": {
         "enabled": True,
-        "ratio": 2.0,
+        "ratio": 3.0,
         "factor": 0.6,
         "high_position_pct": None,
     },
@@ -67,9 +67,9 @@ def _clamp(value: float, low: float, high: float) -> float:
 def turnover_discount(params: dict, row: dict, notes: list[str]) -> float | None:
     """换手放量时把仓位上限打折；不触发就返回 None。
 
-    实证依据（`run.py turnover`，200 只标的、2.1 年、7 万个样本）：
-    当日换手超过自己 20 日常态 **2 倍**时，之后 5 日平均跑输同批标的 0.68 个百分点；
-    **3 倍**以上跑输 1.73 个百分点，20 日胜率从 52% 掉到 48%。放量之后短期偏弱。
+    实证依据（`run.py turnover`，400 只标的、2.1 年、12.9 万样本，按交易日聚合）：
+    换手 **2~3 倍**时 20 日超额 −0.38%（t = −1.53，不够硬）；
+    **3 倍以上** −1.29%（t = −3.13，站得住）。放量之后偏弱这件事，证据集中在最极端那一档。
 
     所以这里**只缩仓位、不否决**：它是"少做一点"的证据，不是"不能做"。
     注意这是负向信号——按规格它进不了状态分（台账的转正判定只认正向 IC），
