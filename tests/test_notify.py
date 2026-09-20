@@ -246,7 +246,9 @@ class NotifyTests(unittest.TestCase):
         with mock.patch.object(notify, "_post", return_value=SUCCESS):
             result = notify.send_test(self.cfg)
         self.assertTrue(result["ok"], result["note"])
-        self.assertIn("data/pushplus.token", result["content"])
+        # 只断言文件名，不断言整条路径：Windows 上路径分隔符是反斜杠，
+        # 写死 "data/pushplus.token" 会变成"只在 mac 上过"的测试。
+        self.assertIn("pushplus.token", result["content"])
 
     def test_test_message_without_token_is_readable(self):
         result = notify.send_test(self.cfg)

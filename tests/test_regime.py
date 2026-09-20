@@ -105,6 +105,9 @@ class SeriesTests(unittest.TestCase):
     def test_rising_market_scores_higher_than_falling(self):
         self._seed(rising=True)
         up = regime.series(self.conn, self.cfg)
+        # 换一份干净数据再算"下跌市"之前，必须先关掉连接：Windows 上删不掉
+        # 还被进程占着的临时库（WinError 32），macOS 允许，所以这个坑只在 Windows 上露头。
+        self.conn.close()
         self.tmp.cleanup()
         self.setUp()
         self._seed(rising=False)
