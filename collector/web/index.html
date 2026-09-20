@@ -1392,8 +1392,11 @@ function renderLevels(){
     if (L.level_type === 'neckline'){
       const back = Math.abs(dist) <= 1.5;
       const label = dist >= 0 ? '回踩' : '反抽';
+      // 颈线来自顶部形态还是底部形态，看 engine（pattern_resistance / pattern_support）：
+      // 底部形态的颈线在突破之前也在价格上方，光看位置分不出来。
+      const from = (L.engine || '').includes('support') ? '底' : '顶';
       return `<div class="row">
-        <span class="lead" style="color:${C.neckline}">颈线${back ? ' · ' + label : ''}</span>
+        <span class="lead" style="color:${C.neckline}">颈线（${from}）${back ? ' · ' + label : ''}</span>
         <span class="mid">${fmt(L.price_low, decimals)}</span>
         <span class="end" style="color:var(--muted);font-weight:500">${dist>0?'+':''}${dist.toFixed(2)}%</span>
       </div>`;

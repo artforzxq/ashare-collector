@@ -727,7 +727,7 @@ class App:
                 dict(row)
                 for row in db.query(
                     conn,
-                    """SELECT level_type, price_low, price_high, weight FROM levels
+        """SELECT level_type, price_low, price_high, weight, engine FROM levels
                        WHERE code=? AND trade_date=(SELECT MAX(trade_date) FROM levels WHERE code=?)
                        ORDER BY price_low""",
                     (code, code),

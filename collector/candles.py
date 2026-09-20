@@ -469,6 +469,13 @@ def _graphic(bars: Sequence[dict], index: int, context: dict) -> tuple[list[str]
     # 因为"回踩颈线"本来就发生在突破之后的某一天。
     flags["neckline"] = None
     flags["neckline_kind"] = ""
+    # 顶/底两套读法可能同时成立（三个峰、三个谷都找得出来）。这时候不能"谁后算谁赢"——
+    # 实测 SZ000333：顶部读法给出 84.44（三个峰下面的那条，正是刚被跌破、形态已确认的），
+    # 底部读法给出 88.50（三个谷上面的那条，形态并没成立），后算的底部把顶部的覆盖掉了，
+    # 于是图上画出一条在价格上方的"颈线"。改成：**只认形态真正成立的那一种**
+    # （峰等高 / 头肩比例过关），两种都成立时取"最近形成的那个"。
+    top_shape: dict | None = None
+    bottom_shape: dict | None = None
     t = THRESHOLDS
     span = int(t["peak_swing_span"])
     if index < int(t["peak_min_bars"]):
@@ -502,21 +509,20 @@ def _graphic(bars: Sequence[dict], index: int, context: dict) -> tuple[list[str]
         # 确认必须是**刚发生的那一次跌破**（昨天还在颈线上方），不能是"现在处在颈线下方"——
         # 后者意味着跌下去之后的每一天都算命中，实测单这一条就让三重顶多出十几倍。
         if neckline and retraced:
-            # 形态成立就把颈线带出来，不等"今天正好跌破"——"回踩颈线"发生在突破之后的某天。
-            # 代价是它出现得比想象中频繁，所以它只能当**配合条件**用，不能单独当信号
-            # （覆盖率实测写在 README 里）。
-            flags["neckline"] = round(neckline, 4)
-            flags["neckline_kind"] = "resistance"
-        if neckline and retraced and prev_close >= neckline > close:
             # 头肩顶：中间那个峰明显更高、两肩大致同高
             shoulders = [p1, p3]
+            label = ""
             if (p2 >= max(shoulders) * (1 + t["hs_head_margin"])
                     and abs(p1 - p3) / max(1e-9, max(p1, p3)) <= t["hs_shoulder_tol"]):
-                flags["head_shoulders_top"] = True
-                down.append("头肩顶")
+                label = "head_shoulders_top"
             elif spread <= t["peak_level_tol"]:
-                flags["triple_top"] = True
-                down.append("三重顶")
+                label = "triple_top"
+            if label:
+                top_shape = {"neckline": neckline, "kind": "resistance",
+                             "shape": label, "last_day": d3}
+                if prev_close >= neckline > close:          # 刚跌破才算形态确认
+                    flags[label] = True
+                    down.append("头肩顶" if label == "head_shoulders_top" else "三重顶")
 
     # ---- 三重底 / 头肩底：三个谷，镜像 ----
     if len(lows) == 3:
@@ -529,17 +535,28 @@ def _graphic(bars: Sequence[dict], index: int, context: dict) -> tuple[list[str]
                          and peak1 >= levels[0] * (1 + t["peak_drop"])
                          and peak2 >= levels[0] * (1 + t["peak_drop"]))
         if neckline and rebounded:
-            flags["neckline"] = round(neckline, 4)
-            flags["neckline_kind"] = "support"
-        if neckline and rebounded and prev_close <= neckline < close:
             shoulders = [p1, p3]
+            label = ""
             if (p2 <= min(shoulders) * (1 - t["hs_head_margin"])
                     and abs(p1 - p3) / max(1e-9, max(p1, p3)) <= t["hs_shoulder_tol"]):
-                flags["head_shoulders_bottom"] = True
-                up.append("头肩底")
+                label = "head_shoulders_bottom"
             elif spread <= t["peak_level_tol"]:
-                flags["triple_bottom"] = True
-                up.append("三重底")
+                label = "triple_bottom"
+            if label:
+                bottom_shape = {"neckline": neckline, "kind": "support",
+                                "shape": label, "last_day": d3}
+                if prev_close <= neckline < close:
+                    flags[label] = True
+                    up.append("头肩底" if label == "head_shoulders_bottom" else "三重底")
+
+    # 两种读法都成立时取"最近形成的那个"：第三个摆动点更近 = 那个形态更新、更贴近当下的走势。
+    picked = None
+    for candidate in (top_shape, bottom_shape):
+        if candidate and (picked is None or candidate["last_day"] > picked["last_day"]):
+            picked = candidate
+    if picked:
+        flags["neckline"] = round(picked["neckline"], 4)
+        flags["neckline_kind"] = picked["kind"]
 
     # ---- 圆弧顶 / 圆弧底：把窗口分三段，看中段是不是凹/凸，而且全程以小实体为主 ----
     lookback = min(int(t["peak_lookback"]), index)

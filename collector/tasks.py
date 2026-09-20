@@ -971,7 +971,7 @@ def _compute_levels(conn, cfg: dict, trade_date: str, verbose: bool, codes: list
         # 颈线（头肩/三重的突破线）也放进 levels 表：它跟成交量密集带走同一条通路，
         # 页面就能画出来。**只用于看图**——风险层的 support_for 按 level_type 取带，
         # 不会把它算成止损参照，所以止损逻辑一个字没动。
-        neckline = neckline_band(bars)
+        neckline = neckline_band(bars, cfg=cfg)
         if neckline:
             bands = bands + [neckline]
         conn.execute("DELETE FROM levels WHERE code=? AND trade_date=?", (code, trade_date))

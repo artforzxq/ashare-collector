@@ -112,7 +112,7 @@ def _classify(low: float, high: float, close: float) -> str:
     return "support" if high < close else "resistance"
 
 
-def neckline_band(bars: Sequence[dict], index: int | None = None) -> dict | None:
+def neckline_band(bars: Sequence[dict], index: int | None = None, cfg: dict | None = None) -> dict | None:
     """把形态层的颈线变成一条"零宽带"，好跟成交量密集带一起走同一条通路。
 
     为什么用零宽带而不是新加一个字段：`levels` 表、页面画带、风险层取支撑全都
@@ -121,17 +121,30 @@ def neckline_band(bars: Sequence[dict], index: int | None = None) -> dict | None
 
     注意它的**位置决定角色**（和成交量带同一个规则）：在收盘下方算支撑，上方算压力。
     顶部形态的颈线（跌破之后是压力）和底部形态的颈线（站上之后是支撑）因此自动各就各位。
+
+    离现价太远的不要：页面画带时会用它来定纵轴范围，一条在 20% 之外的旧形态颈线
+    会把 K 线压成一条线。默认超过 15% 就不画（`levels.neckline_max_gap_pct`）。
     """
     if not bars:
         return None
     index = len(bars) - 1 if index is None else index
     if index < 2 or index >= len(bars):
         return None
-    price = candles.analyze(bars, index).get("neckline")
+    result = candles.analyze(bars, index)
+    price = result.get("neckline")
     if not price:
         return None
+    # 把"这条颈线来自顶部形态还是底部形态"一起带上（engine 列）。
+    # 页面要据此标"颈线（顶）/ 颈线（底）"——光看价格在颈线上方还是下方分不出来：
+    # 底部形态的颈线在**突破之前**也在价格上方。
+    kind = result.get("neckline_kind") or ""
+    limit = float(((cfg or {}).get("levels") or {}).get("neckline_max_gap_pct", 15.0))
+    close = candles._num(bars[index].get("close"))
+    if close and limit > 0 and abs(close - float(price)) / close * 100 > limit:
+        return None
     return {"level_type": "neckline", "price_low": round(float(price), 4),
-            "price_high": round(float(price), 4), "weight": 0.0, "engine": "pattern"}
+            "price_high": round(float(price), 4), "weight": 0.0,
+            "engine": f"pattern_{kind}" if kind else "pattern"}
 
 
 def nearest_band(bands: Sequence[dict], close: float, level_type: str | None = None) -> dict | None:
