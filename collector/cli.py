@@ -16,6 +16,7 @@ from . import (
     breadth as breadth_mod,
     candidates as candidates_mod,
     dashboard as dashboard_mod,
+    dig as dig_mod,
     explore as explore_mod,
     db,
     dictionary as dictionary_mod,
@@ -920,6 +921,24 @@ def cmd_add(args) -> int:
     return 0 if added else 1
 
 
+def cmd_dig(args) -> int:
+    """单票体检：把这只票在各层里的说法按决策链路摆到一张纸上。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    data = dig_mod.collect(conn, cfg, args.code)
+    if not data.get("ok"):
+        print(f"  {data.get('message')}")
+        conn.close()
+        return 1
+    buckets = None
+    if not args.fast:
+        print("  正在算全市场分档（半分钟左右；加 --fast 可以跳过）…", flush=True)
+        buckets = dig_mod.bucket_position(conn, cfg, data["code"], days=int(args.days or 0) or 250)
+    print(dig_mod.report(data, with_buckets_text=buckets))
+    conn.close()
+    return 0
+
+
 def cmd_buckets(args) -> int:
     """分档研究：把"某个维度分档之后怎么样"算出来，而不是靠印象。
 
@@ -1240,6 +1259,13 @@ def build_parser() -> argparse.ArgumentParser:
     candidates.add_argument("--min-hits", type=int, help="至少被命中几次才算候选")
     candidates.add_argument("--db", help="数据库路径")
     candidates.set_defaults(func=cmd_candidates)
+
+    dig = sub.add_parser("dig", help="单票体检：状态/因子/位置/形态/风险/提醒/筛选命中一次看完")
+    dig.add_argument("code", help="标的代码（600519 / SH600519 / 600519.SH 都认）")
+    dig.add_argument("--fast", action="store_true", help="跳过全市场分档对照（省半分钟）")
+    dig.add_argument("--days", type=int, help="分档对照回看多少个交易日（默认 250）")
+    dig.add_argument("--db", help="数据库路径")
+    dig.set_defaults(func=cmd_dig)
 
     buckets = sub.add_parser("buckets", help="分档研究：某个维度分档之后，20 日表现如何")
     buckets.add_argument("--days", type=int, help="回看多少个交易日（默认 250）")

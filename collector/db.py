@@ -56,6 +56,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         # 而"先低后高"是斐波那契回撤成立的前提（见 features._retrace）
         "bars_since_swing_high": "INTEGER",
         "retrace": "REAL",
+        "range_position": "REAL",
     },
     # 筛选结果也要能回填真实表现，才能回答"筛出来的票后来怎么样了"
     "screen_results": {

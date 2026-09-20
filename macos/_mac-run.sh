@@ -327,6 +327,15 @@ TIP
     echo
     run_py buckets "$@"
     ;;
+  dig)
+    ensure_python || { pause; exit 1; }
+    if [ -z "${1:-}" ]; then
+      printf "要体检哪只票？输入代码（600519 或 SH600519）："
+      read -r code
+      set -- "$code"
+    fi
+    run_py dig "$@"
+    ;;
   pack)
     ensure_python || { pause; exit 1; }
     echo "打包数据库（先确认没有程序正在用它；压缩 480MB 大约要一分钟）…"

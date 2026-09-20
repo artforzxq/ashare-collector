@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS features_daily (
   bars_since_swing_low INTEGER,     -- 结构低点是几根 K 线之前确认的（太旧的结构位不算数）
   bars_since_swing_high INTEGER,    -- 结构高点同理；"低点在高点之前"是斐波那契回撤成立的前提
   retrace            REAL,          -- 斐波那契回撤比例：(结构高点−收盘)/(结构高点−结构低点)，0=贴着高点
+  range_position     REAL,          -- 收盘在 20 日区间里的位置：0=贴低点，1=贴高点（筛选与分档研究都用）
   code               TEXT NOT NULL, -- 标的代码
   trade_date         TEXT NOT NULL, -- 交易日
   ma20               REAL,          -- 20 日前复权收盘均线

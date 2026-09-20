@@ -177,6 +177,7 @@ echo   23   push today's briefing to the phone
 echo   24   turn the daily job into a scheduled task (on / off)
 echo   25   environment check: python / packages / database / config
 echo   26   bucket the market by one dimension (what actually matters)
+echo   27   one-symbol check-up (state / factors / position / risk / history)
 echo   10   create a desktop shortcut for the daily job
 echo.
 echo From a command line: win-run.bat STEP [args]   e.g.  win-run.bat daily
@@ -216,6 +217,7 @@ if /i "%STEP%"=="screen"          goto :screen
 if /i "%STEP%"=="candidates"      goto :candidates
 if /i "%STEP%"=="replay"          goto :replay
 if /i "%STEP%"=="buckets"         goto :buckets
+if /i "%STEP%"=="dig"             goto :dig
 if /i "%STEP%"=="pack"            goto :pack
 if /i "%STEP%"=="push"            goto :push
 if /i "%STEP%"=="doctor"          goto :doctor
@@ -385,6 +387,12 @@ echo Bucketing the whole market by one dimension (position / volume / turnover .
 echo Reads local bars only; about half a minute. Add --field or --cross to narrow it down.
 echo.
 "%PY%" run.py buckets %EXTRA%
+exit /b %ERRORLEVEL%
+
+:dig
+echo One-symbol check-up. Usage: dig 600519
+echo.
+"%PY%" run.py dig %EXTRA%
 exit /b %ERRORLEVEL%
 
 :pack

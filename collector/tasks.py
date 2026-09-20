@@ -854,6 +854,11 @@ def _compute_features(
                     "swing_high_1": row["swing_high_1"],
                     "dist_to_swing_low": row["dist_to_swing_low"],
                     "bars_since_swing_low": row["bars_since_swing_low"],
+                    "bars_since_swing_high": row["bars_since_swing_high"],
+                    "retrace": row["retrace"],
+                    # 区间位置以前只活在内存里（筛选能用、页面和体检读不到）。
+                    # 筛选条件和分档研究都在用它，就该有地方存——同一个真相源。
+                    "range_position": row["range_position"],
                     "dist_to_high_250": row["dist_to_high_250"],
                     "donchian_break": row["donchian_break"],
                     "consolidation_days": row["consolidation_days"],
