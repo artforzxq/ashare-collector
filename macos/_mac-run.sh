@@ -320,6 +320,13 @@ TIP
     echo
     run_py replay "$@"
     ;;
+  buckets)
+    ensure_python || { pause; exit 1; }
+    echo "分档研究：把全市场按某个维度分档（位置 / 量能 / 成交额 / 距支撑…），看之后 20 天怎么样。"
+    echo "只读本地日线，半分钟左右。加 --field 或 --cross 可以只算关心的那几维。"
+    echo
+    run_py buckets "$@"
+    ;;
   pack)
     ensure_python || { pause; exit 1; }
     echo "打包数据库（先确认没有程序正在用它；压缩 480MB 大约要一分钟）…"

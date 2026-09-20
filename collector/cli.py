@@ -16,6 +16,7 @@ from . import (
     breadth as breadth_mod,
     candidates as candidates_mod,
     dashboard as dashboard_mod,
+    explore as explore_mod,
     db,
     dictionary as dictionary_mod,
     doctor as doctor_mod,
@@ -919,6 +920,33 @@ def cmd_add(args) -> int:
     return 0 if added else 1
 
 
+def cmd_buckets(args) -> int:
+    """分档研究：把"某个维度分档之后怎么样"算出来，而不是靠印象。
+
+    只读本地日线，顺手能把两维交叉也打出来（哪个维度在起作用、还是必须两个一起）。
+    """
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        fields = [part.strip() for part in (args.field or "").replace("，", ",").split(",") if part.strip()]
+        crosses = []
+        for part in (args.cross or "").replace("，", ",").split(","):
+            if "x" in part:
+                left, _, right = part.partition("x")
+                crosses.append((left.strip(), right.strip()))
+        result = explore_mod.run(conn, cfg, days=int(args.days or 0) or explore_mod.DEFAULT_DAYS,
+                                 horizon=int(args.horizon or 0) or explore_mod.DEFAULT_HORIZON,
+                                 fields=fields or None, crosses=crosses or None,
+                                 with_cross=not args.no_cross)
+    except explore_mod.ExploreError as exc:
+        print(f"  {exc}")
+        conn.close()
+        return 1
+    print(result["text"])
+    conn.close()
+    return 0
+
+
 def cmd_candidates(args) -> int:
     """观察池候选清单：池子该进谁、谁该出来。
 
@@ -1212,6 +1240,15 @@ def build_parser() -> argparse.ArgumentParser:
     candidates.add_argument("--min-hits", type=int, help="至少被命中几次才算候选")
     candidates.add_argument("--db", help="数据库路径")
     candidates.set_defaults(func=cmd_candidates)
+
+    buckets = sub.add_parser("buckets", help="分档研究：某个维度分档之后，20 日表现如何")
+    buckets.add_argument("--days", type=int, help="回看多少个交易日（默认 250）")
+    buckets.add_argument("--horizon", type=int, help="持有多少个交易日（默认 20）")
+    buckets.add_argument("--field", help="只算这些维度，逗号分隔（成交额/位置/量能/距支撑/距关键位/波动）")
+    buckets.add_argument("--cross", help="两维交叉，写法 位置x量能（逗号分隔多个）")
+    buckets.add_argument("--no-cross", action="store_true", help="只打单维度分档表")
+    buckets.add_argument("--db", help="数据库路径")
+    buckets.set_defaults(func=cmd_buckets)
 
     replay = sub.add_parser("replay", help="历史重放：把筛选条件在过去每一天跑一遍，立刻得到 5/20 日真实表现")
     replay.add_argument("--days", type=int, help="重放多少个交易日（默认 120）")

@@ -52,6 +52,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "swing_high_1": "REAL",
         "dist_to_swing_low": "REAL",
         "bars_since_swing_low": "INTEGER",
+        # 结构高点也记"过了几根"：判断低点是否在高点之前需要它，
+        # 而"先低后高"是斐波那契回撤成立的前提（见 features._retrace）
+        "bars_since_swing_high": "INTEGER",
+        "retrace": "REAL",
     },
     # 筛选结果也要能回填真实表现，才能回答"筛出来的票后来怎么样了"
     "screen_results": {

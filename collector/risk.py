@@ -55,6 +55,12 @@ DEFAULTS = {
         "buffer_pct": 0.5,    # 在结构低点下方再留一点，避免贴着整数位被扫
         "min_risk_pct": 1.0,  # 离现价太近的止损是噪声，不如不放
     },
+    # 斐波那契扩展目标：给风险层**第二个目标位参照**。
+    # 现在的目标位全来自成交量密集带，一旦上方没有带（实测 SH600487 离 250 日高点
+    # −44%、头顶一条带都没有）就只能退回"几倍 ATR 估一个"。结构给的扩展位是独立的
+    # 第二个参照：目标 = 结构低点 + 倍数 ×（结构高点 − 结构低点）。
+    # 它**只用来把目标收紧**（取更近的那个），不会让目标变得更乐观。
+    "fib_extension": 1.618,
 }
 
 
@@ -70,6 +76,33 @@ def _params(cfg: dict) -> dict:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def fib_extension_target(row: dict, multiple: float) -> float | None:
+    """斐波那契扩展目标位：结构低点 + 倍数 ×（结构高点 − 结构低点）。
+
+    这是图上那句"目标位 = 1 浪长度 × 1.618"的客观化——**不数浪**，只用已经确认的
+    摆动点表示"前一波段"。三个前提缺一不可，缺了返回 None（宁可不给目标，不硬凑）：
+      1. 结构向上（swing_state = 1，即 HH+HL）——"1 浪"必须处在一段上升结构里；
+      2. 低点在高点之前（先低后高才是一段上涨，不是一段下跌的反抽）；
+      3. 高点必须真的高于低点。
+    """
+    low = row.get("swing_low_1")
+    high = row.get("swing_high_1")
+    if row.get("swing_state") != 1:
+        return None
+    if not low or not high:
+        return None
+    try:
+        low, high = float(low), float(high)
+    except (TypeError, ValueError):
+        return None
+    if high <= low:
+        return None
+    since_low, since_high = row.get("bars_since_swing_low"), row.get("bars_since_swing_high")
+    if since_low is None or since_high is None or float(since_low) <= float(since_high):
+        return None
+    return low + float(multiple) * (high - low)
 
 
 def structure_stop(params: dict, row: dict, close: float) -> float | None:
@@ -252,6 +285,15 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
             upside = min(room, projection)
             notes.append(f"上方无阻力带 → 目标取「到 250 日高点 {room / close * 100:.1f}%」"
                          f"与「{params['open_space_atr_multiple']:g} 倍 ATR」的较小者")
+    # 第二个独立参照：结构给的斐波那契扩展位。只收紧、不放宽——
+    # 上面那些目标要么来自筹码（成交量带），要么来自波动率（ATR），
+    # 这个来自形态结构，三个来源互相印证的时候才敢说"这个位置有空间"。
+    fib_target = fib_extension_target(row, float(params["fib_extension"]))
+    if fib_target is not None and 0 < fib_target - close < upside:
+        notes.append(f"结构扩展目标 {fib_target:.3f}"
+                     f"（结构低点 {float(row['swing_low_1']):.3f} + "
+                     f"{params['fib_extension']:g}×前一波段）比原目标更近 → 取更近的")
+        upside = fib_target - close
     win_rate = _clamp(float(params["win_rate"]), 0.0, 1.0)
     expectancy = None
     if downside > 0 and upside > 0:

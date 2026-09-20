@@ -25,8 +25,10 @@
     /* 图表用色也在主题里：canvas 读这些变量，切主题时重画一次就行 */
     --chart-grid:#eceef3; --chart-axis:#9aa3b2; --chart-line:#12a05c;
     --ma20:#f2a13b; --ma60:#3b82f6; --ma120:#8b5cf6;
-    --band-support:rgba(59,130,246,.10); --band-support-edge:rgba(59,130,246,.45);
-    --band-resistance:rgba(226,69,60,.10); --band-resistance-edge:rgba(226,69,60,.45);
+  --band-support:rgba(59,130,246,.10); --band-support-edge:rgba(59,130,246,.45);
+  --band-resistance:rgba(226,69,60,.10); --band-resistance-edge:rgba(226,69,60,.45);
+  --band-range:rgba(120,130,150,.10); --band-range-edge:rgba(120,130,150,.45);
+  --band-neckline:rgba(139,92,246,.85);
     --chart-bg:#fff;
     /* 语义色：悬停面、进度条底、涨跌底色、正常状态 */
     --hover:#f4f6fa; --track:#eef1f6; --neutral-soft:#f2f3f5;
@@ -46,8 +48,10 @@
     --shadow-pop:0 20px 48px rgba(0,0,0,.55),0 4px 12px rgba(0,0,0,.35);
     --chart-grid:#232a35; --chart-axis:#6b7684; --chart-line:#2fbf71;
     --ma20:#f0b03c; --ma60:#5b9cf8; --ma120:#a78bfa;
-    --band-support:rgba(91,156,248,.14); --band-support-edge:rgba(91,156,248,.50);
-    --band-resistance:rgba(255,95,95,.13); --band-resistance-edge:rgba(255,95,95,.50);
+  --band-support:rgba(91,156,248,.14); --band-support-edge:rgba(91,156,248,.50);
+  --band-resistance:rgba(255,95,95,.13); --band-resistance-edge:rgba(255,95,95,.50);
+  --band-range:rgba(150,160,180,.14); --band-range-edge:rgba(150,160,180,.50);
+  --band-neckline:rgba(167,139,250,.90);
     --chart-bg:#161b23;
     --hover:#1c222b; --track:#232a35; --neutral-soft:#1d232c;
     --up-soft:rgba(255,95,95,.14); --down-soft:rgba(47,191,113,.14);
@@ -431,6 +435,8 @@ canvas{display:block;width:100%}
           <span><i style="background:var(--ma120)"></i>MA120</span>
           <span><i style="background:var(--band-support-edge)"></i>支撑带</span>
           <span><i style="background:var(--band-resistance-edge)"></i>阻力带</span>
+          <span><i style="background:var(--band-range-edge)"></i>当前区间</span>
+          <span><i style="background:var(--band-neckline)"></i>颈线</span>
           <span><i style="background:var(--up);border-radius:99px;width:8px;height:8px"></i>P0</span>
           <span><i style="background:var(--warn);border-radius:99px;width:8px;height:8px"></i>P1</span>
           <span><i style="background:var(--up);clip-path:polygon(50% 0,100% 100%,0 100%);width:11px;height:8px"></i>形态·反转向上</span>
@@ -648,7 +654,9 @@ let C = {
   up:'#e2453c', down:'#12a05c', warn:'#b45309',
   ma20:'#f2a13b', ma60:'#3b82f6', ma120:'#8b5cf6',
   support:'rgba(59,130,246,.10)', supportEdge:'rgba(59,130,246,.45)',
-  resistance:'rgba(226,69,60,.10)', resistanceEdge:'rgba(226,69,60,.45)'
+  resistance:'rgba(226,69,60,.10)', resistanceEdge:'rgba(226,69,60,.45)',
+  range:'rgba(120,130,150,.10)', rangeEdge:'rgba(120,130,150,.45)',
+  neckline:'rgba(139,92,246,.85)'
 };
 
 function readChartColors(){
@@ -662,6 +670,8 @@ function readChartColors(){
     ma20: v('--ma20', C.ma20), ma60: v('--ma60', C.ma60), ma120: v('--ma120', C.ma120),
     support: v('--band-support', C.support), supportEdge: v('--band-support-edge', C.supportEdge),
     resistance: v('--band-resistance', C.resistance), resistanceEdge: v('--band-resistance-edge', C.resistanceEdge),
+    range: v('--band-range', C.range), rangeEdge: v('--band-range-edge', C.rangeEdge),
+    neckline: v('--band-neckline', C.neckline),
   };
 }
 
@@ -1188,10 +1198,22 @@ function draw(){
   if ($('tBand').checked){
     d.levels.forEach(L=>{
       const y1 = yOf(L.price_high), y2 = yOf(L.price_low);
-      const isSupport = L.level_type === 'support';
-      ctx.fillStyle = isSupport ? C.support : C.resistance;
+      if (L.level_type === 'neckline'){
+        // 颈线是个价位（零宽带），画成一条实心虚线单独一个颜色——
+        // 它是形态的多空分界，"回踩到这条线"才是要看的那一下。
+        ctx.strokeStyle = C.neckline;
+        ctx.setLineDash([7,4]); ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(padL, y1+.5); ctx.lineTo(W-padR, y1+.5); ctx.stroke();
+        ctx.setLineDash([]); ctx.lineWidth = 1;
+        return;
+      }
+      // 三种带各有各的颜色。以前是 support / 其余，于是"价格正处在里面"的
+      // 区间带被当成阻力画成红色——语义正好相反，也容易看错。
+      const kind = L.level_type === 'support' ? 'support'
+                 : (L.level_type === 'range' ? 'range' : 'resistance');
+      ctx.fillStyle = C[kind];
       ctx.fillRect(padL, y1, plotW, Math.max(1.5, y2-y1));
-      ctx.strokeStyle = isSupport ? C.supportEdge : C.resistanceEdge;
+      ctx.strokeStyle = C[kind + 'Edge'];
       ctx.setLineDash([4,3]); ctx.beginPath();
       ctx.moveTo(padL, y1+.5); ctx.lineTo(W-padR, y1+.5); ctx.stroke();
       ctx.moveTo(padL, y2+.5); ctx.lineTo(W-padR, y2+.5); ctx.stroke();
@@ -1364,10 +1386,24 @@ function renderLevels(){
   box.innerHTML = '<div class="rows">' + d.levels.map(L=>{
     const center = (L.price_low + L.price_high)/2;
     const dist = (last.close - center)/last.close*100;
-    const isSupport = L.level_type === 'support';
     const decimals = L.price_low > 100 ? 1 : 3;
+    // 颈线：叫它颈线，并在"价格回到它附近"时打一个「回踩」标——
+    // 这条线满地都是（96% 的票都有），值得看的只有价格回到它上面的那一下。
+    if (L.level_type === 'neckline'){
+      const back = Math.abs(dist) <= 1.5;
+      const label = dist >= 0 ? '回踩' : '反抽';
+      return `<div class="row">
+        <span class="lead" style="color:${C.neckline}">颈线${back ? ' · ' + label : ''}</span>
+        <span class="mid">${fmt(L.price_low, decimals)}</span>
+        <span class="end" style="color:var(--muted);font-weight:500">${dist>0?'+':''}${dist.toFixed(2)}%</span>
+      </div>`;
+    }
+    const isSupport = L.level_type === 'support';
+    const isRange = L.level_type === 'range';
+    const head = isSupport ? '支撑' : (isRange ? '当前区间' : '阻力');
+    const tone = isSupport ? 'var(--accent)' : (isRange ? 'var(--muted)' : 'var(--up)');
     return `<div class="row">
-      <span class="lead" style="color:${isSupport?'var(--accent)':'var(--up)'}">${isSupport?'支撑':'阻力'}</span>
+      <span class="lead" style="color:${tone}">${head}</span>
       <span class="mid">${fmt(L.price_low, decimals)} – ${fmt(L.price_high, decimals)}</span>
       <span class="end" style="color:var(--muted);font-weight:500">${dist>0?'+':''}${dist.toFixed(2)}%</span>
     </div>`;

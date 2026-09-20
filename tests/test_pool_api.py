@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from collector import db, server
+from collector import db, server, universe
 from collector.config import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -77,7 +77,9 @@ class PoolApiTests(unittest.TestCase):
         self._seed_screen()
         payload = self.app.pool()
         self.assertEqual(payload["min_hits"], 2)
-        self.assertEqual(payload["min_avg_amount"], 30_000_000)
+        # 拿配置里的门槛比，而不是写死一个数：门槛是用户会调的活配置，
+        # 写死的话每次调门槛都会误报成"接口坏了"
+        self.assertEqual(payload["min_avg_amount"], universe.min_avg_amount(self.cfg))
         self.assertEqual(payload["last_run"]["scanned"], 1803)
         self.assertEqual(payload["trade_date"], "2026-09-18")
         self.assertEqual(payload["window"], ["2026-09-18", "2026-09-17"])

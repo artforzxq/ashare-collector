@@ -462,6 +462,13 @@ def _graphic(bars: Sequence[dict], index: int, context: dict) -> tuple[list[str]
     flags = {"triple_top": False, "triple_bottom": False,
              "head_shoulders_top": False, "head_shoulders_bottom": False,
              "rounding_top": False, "rounding_bottom": False}
+    # 颈线：形态的多空分界线。以前它只是这里的局部变量，只用于"刚跌破/刚站上"那一下的
+    # 确认，算完就丢了——于是页面画不出来、筛选条件写不了、风险层也拿不到。
+    # 现在带出来：顶部形态的颈线在跌破之后是**压力**，底部形态的颈线在站上之后是**支撑**。
+    # 只在形态成立（三个峰/谷 + 两次够幅度的回撤）时就带出来，不强求"今天正好穿越"——
+    # 因为"回踩颈线"本来就发生在突破之后的某一天。
+    flags["neckline"] = None
+    flags["neckline_kind"] = ""
     t = THRESHOLDS
     span = int(t["peak_swing_span"])
     if index < int(t["peak_min_bars"]):
@@ -494,6 +501,12 @@ def _graphic(bars: Sequence[dict], index: int, context: dict) -> tuple[list[str]
                         and valley2 <= levels[-1] * (1 - t["peak_drop"]))
         # 确认必须是**刚发生的那一次跌破**（昨天还在颈线上方），不能是"现在处在颈线下方"——
         # 后者意味着跌下去之后的每一天都算命中，实测单这一条就让三重顶多出十几倍。
+        if neckline and retraced:
+            # 形态成立就把颈线带出来，不等"今天正好跌破"——"回踩颈线"发生在突破之后的某天。
+            # 代价是它出现得比想象中频繁，所以它只能当**配合条件**用，不能单独当信号
+            # （覆盖率实测写在 README 里）。
+            flags["neckline"] = round(neckline, 4)
+            flags["neckline_kind"] = "resistance"
         if neckline and retraced and prev_close >= neckline > close:
             # 头肩顶：中间那个峰明显更高、两肩大致同高
             shoulders = [p1, p3]
@@ -515,6 +528,9 @@ def _graphic(bars: Sequence[dict], index: int, context: dict) -> tuple[list[str]
         rebounded = bool(peak1 and peak2
                          and peak1 >= levels[0] * (1 + t["peak_drop"])
                          and peak2 >= levels[0] * (1 + t["peak_drop"]))
+        if neckline and rebounded:
+            flags["neckline"] = round(neckline, 4)
+            flags["neckline_kind"] = "support"
         if neckline and rebounded and prev_close <= neckline < close:
             shoulders = [p1, p3]
             if (p2 <= min(shoulders) * (1 - t["hs_head_margin"])
@@ -644,11 +660,13 @@ _RESULT_KEYS = (
     "rising_three_methods", "falling_three_methods",
     "triple_top", "triple_bottom", "head_shoulders_top", "head_shoulders_bottom",
     "rounding_top", "rounding_bottom", "island_top", "island_bottom",
+    "neckline", "neckline_kind",
 )
 
 # 这些键的"没有结论"必须是 None，不能是 False：False 在 Python 里等于 0，
 # 筛选条件里写 `candle.body_pct >= 0` 会被空结论悄悄判成"通过"。
-_NONE_KEYS = ("body_pct", "body_r", "upper_shadow", "lower_shadow", "close_pos", "volume_x", "trend")
+_NONE_KEYS = ("body_pct", "body_r", "upper_shadow", "lower_shadow", "close_pos", "volume_x",
+              "trend", "neckline")
 
 
 def blank() -> dict:
@@ -663,6 +681,7 @@ def blank() -> dict:
     result["reasons"] = []
     result["key_reasons"] = []
     result["pattern"] = ""
+    result["neckline_kind"] = ""
     return result
 
 

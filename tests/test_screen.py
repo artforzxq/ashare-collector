@@ -30,12 +30,30 @@ class MatchRuleTests(unittest.TestCase):
         self.assertFalse(self._match("蓄势", {**base, "state": "down"}))             # 下跌趋势不算蓄势
 
     def test_breakout_and_spike(self):
-        self.assertTrue(self._match("突破", {"breakout_confirmed": 1}))
-        self.assertFalse(self._match("突破", {"breakout_confirmed": 0}))
+        moderate = {"breakout_confirmed": 1, "vol_ratio_20": 2.0}
+        self.assertTrue(self._match("突破", moderate))
+        self.assertFalse(self._match("突破", {**moderate, "breakout_confirmed": 0}))
+        # 放量太狠不算突破：重放里"破前高 + 量比 1.5~3"的 20 日超额 +1.00%，
+        # 而量比 >3 那一格是 −1.06%，所以加了量能上限
+        self.assertFalse(self._match("突破", {**moderate, "vol_ratio_20": 6.0}))
         # 异动已按阴阳拆成两条（见 VolumeSpikeSplitTests），这里只验量能那一档
         spike = {"vol_ratio_20": 3.2, "candle": {"body_pct": 4.0}}
         self.assertTrue(self._match("放量阳线异动", spike))
         self.assertFalse(self._match("放量阳线异动", {**spike, "vol_ratio_20": 2.9}))
+
+    def test_high_position_without_a_volume_spike(self):
+        """新增条件：贴高但不放量。实测这一格是少数稳定为正的组合之一。"""
+        self.assertTrue(self._match("贴高不放量", {"range_position": 0.9, "vol_ratio_20": 1.2}))
+        self.assertFalse(self._match("贴高不放量", {"range_position": 0.9, "vol_ratio_20": 2.5}))
+        self.assertFalse(self._match("贴高不放量", {"range_position": 0.5, "vol_ratio_20": 1.2}))
+
+    def test_shallow_retrace_needs_structure_and_depth(self):
+        """新增条件：结构向上（HH+HL）+ 回撤浅。教科书说等深回撤，我们数据是反的。"""
+        self.assertTrue(self._match("浅回撤", {"swing_state": 1, "retrace": 0.1}))
+        self.assertFalse(self._match("浅回撤", {"swing_state": 1, "retrace": 0.4}))
+        self.assertFalse(self._match("浅回撤", {"swing_state": 0, "retrace": 0.1}))
+        # retrace 拿不到（不成一段上涨）时必须是"不命中"，不能悄悄放行
+        self.assertFalse(self._match("浅回撤", {"swing_state": 1}))
 
     def test_trend_and_pullback(self):
         up = {"state": "up", "trend_score": 80.0}
@@ -88,23 +106,32 @@ class ScanTests(unittest.TestCase):
         db.init_db(cls.conn, PROJECT_ROOT / "schema.sql")
 
         bars = []
-        for index in range(140):
-            price = 10.0 + (0.05 if index % 2 else -0.05)      # 长期窄幅震荡
-            bars.append({
-                "code": "SH600000", "trade_date": f"2026-{1 + index // 28:02d}-{index % 28 + 1:02d}",
-                "open": price, "high": round(price * 1.004, 3), "low": round(price * 0.996, 3),
-                "close": price, "volume": 100000, "amount": 80000000, "pct_chg": 0.1,
-                "source": "baostock",
-            })
-        last = bars[-1]["trade_date"]                          # 最后一根：放量突破
+        for code in ("SH600000", "SH600001"):
+            for index in range(140):
+                price = 10.0 + (0.05 if index % 2 else -0.05)  # 长期窄幅震荡
+                bars.append({
+                    "code": code, "trade_date": f"2026-{1 + index // 28:02d}-{index % 28 + 1:02d}",
+                    "open": price, "high": round(price * 1.004, 3), "low": round(price * 0.996, 3),
+                    "close": price, "volume": 100000, "amount": 80000000, "pct_chg": 0.1,
+                    "source": "baostock",
+                })
+        # 最后一根：SH600000 是 6 倍量的突破（太狠，新规则要排除），
+        # SH600001 是 2.5 倍量的温和突破（该命中）
         bars.append({
             "code": "SH600000", "trade_date": "2026-06-01",
             "open": 10.2, "high": 10.9, "low": 10.1, "close": 10.8,
             "volume": 600000, "amount": 480000000, "pct_chg": 7.0, "source": "baostock",
         })
+        bars.append({
+            "code": "SH600001", "trade_date": "2026-06-01",
+            "open": 10.2, "high": 10.6, "low": 10.1, "close": 10.5,
+            "volume": 250000, "amount": 200000000, "pct_chg": 5.0, "source": "baostock",
+        })
         db.upsert_rows(cls.conn, "bars_daily", bars, ["code", "trade_date"])
         db.upsert_rows(cls.conn, "instruments",
                        [{"code": "SH600000", "name": "浦发银行", "type": "stock",
+                         "exchange": "SH", "in_watchlist": 0},
+                        {"code": "SH600001", "name": "平安银行", "type": "stock",
                          "exchange": "SH", "in_watchlist": 0}], ["code"])
 
     @classmethod
@@ -115,15 +142,18 @@ class ScanTests(unittest.TestCase):
     def test_scan_finds_breakout_and_spike(self):
         result = screen.scan(self.conn, self.cfg, verbose=False)
         self.assertTrue(result["ok"])
-        self.assertEqual(result["scanned"], 1)
+        self.assertEqual(result["scanned"], 2)
         groups = result["groups"]
         self.assertGreaterEqual(len(groups["突破"]), 1)
-        # 放量突破那根是阳线 → 落在"放量阳线异动"，不会跑到阴线那一组
-        self.assertGreaterEqual(len(groups["放量阳线异动"]), 1)
-        self.assertEqual(len(groups["放量阴线异动"]), 0)
+        codes = [row["code"] for row in groups["突破"]]
+        self.assertIn("SH600001", codes)              # 2.5 倍量：温和放量突破
+        self.assertNotIn("SH600000", codes)           # 6 倍量：放太狠，不算突破
+        # 异动那两条在仓库配置里是停用的，不该出现在分组里
+        self.assertNotIn("放量阳线异动", groups)
+        self.assertNotIn("放量阴线异动", groups)
         hit = groups["突破"][0]
-        self.assertEqual(hit["code"], "SH600000")
-        self.assertEqual(hit["name"], "浦发银行")        # 名称来自代码表
+        self.assertEqual(hit["code"], "SH600001")
+        self.assertEqual(hit["name"], "平安银行")        # 名称来自代码表
 
     def test_save_then_load_round_trip(self):
         result = screen.scan(self.conn, self.cfg, verbose=False)
@@ -132,7 +162,7 @@ class ScanTests(unittest.TestCase):
         loaded = screen.load(self.conn, {})
         self.assertEqual(loaded["trade_date"], result["trade_date"])
         self.assertIn("突破", loaded["groups"])
-        self.assertEqual(loaded["groups"]["突破"][0]["code"], "SH600000")
+        self.assertEqual(loaded["groups"]["突破"][0]["code"], "SH600001")
         self.assertIsNotNone(loaded["last_run"])         # 运行留痕，页面能区分"没跑过"
 
     def test_scan_reports_empty_when_no_history(self):
@@ -372,7 +402,9 @@ class VolumeSpikeSplitTests(unittest.TestCase):
     """异动拆成阳线 / 阴线：同样是放量 3 倍，一个是资金进场，一个是派发。"""
 
     def _match(self, key: str, row: dict) -> bool:
-        item = next(c for c in screen.criteria({}) if c["key"] == key)
+        # 从 DEFAULT_CRITERIA 里取：这两条在仓库配置里是**停用**的（实测负超额），
+        # criteria() 会把停用的过滤掉，所以要从原始定义里拿
+        item = next(c for c in screen.DEFAULT_CRITERIA if c["key"] == key)
         return rules.matches(row, item["when"])
 
     def test_bullish_spike_only_matches_the_yang_bucket(self):
@@ -471,6 +503,30 @@ class ReplayTests(unittest.TestCase):
         result = screen.replay(self.conn, self.cfg, days=5, verbose=False)
         self.assertFalse(result["ok"])
         self.assertIn("20 个交易日", result["message"])
+
+    def test_replay_purges_days_that_no_longer_hit_anything(self):
+        """覆盖到但当天一条都没命中的日期，也要把旧行清掉。
+
+        踩过：只删"有命中的日期"，没命中的日子会留着上一版口径的行，
+        统计照样把它们算进去——报告里因此冒出过一个漂亮但虚假的"超额"。
+        """
+        # 先跑一遍宽松口径：每天都命中
+        screen.replay(self.conn, self.cfg, days=30, verbose=False)
+        before = db.query_one(self.conn, "SELECT COUNT(*) AS n FROM screen_results")["n"]
+        self.assertEqual(before, 30)
+        # 再把口径收紧成"只有最后一天命中"，重跑
+        self.cfg["screen"]["criteria"] = [
+            {"key": "只在最后一天", "sort": "close",
+             "when": [{"field": "close", "op": ">", "value": self.bars[-1]["close"] - 0.5}]},
+        ]
+        screen.replay(self.conn, self.cfg, days=30, verbose=False)
+        rows = db.query(self.conn, "SELECT DISTINCT trade_date FROM screen_results")
+        self.assertEqual(len(rows), 1)                    # 只剩最后一天
+        self.assertEqual(rows[0]["trade_date"], self.bars[-1]["trade_date"])
+        self.cfg["screen"]["criteria"] = [
+            {"key": "全部", "sort": "close", "when": [{"field": "close", "op": ">", "value": 0}]},
+        ]
+        screen.replay(self.conn, self.cfg, days=30, verbose=False)   # 把库还原给同类的其他用例
 
     def test_equal_weight_baseline_matches_the_only_symbol(self):
         """等权基准 = 同一批日期上"随便买一只同口径的票"的平均收益；这里只有一只票，手算得到。"""

@@ -146,13 +146,14 @@ def _structure_at(swing_lows: tuple[list[int], list[float]],
     """到第 index 根为止，**已经确认**的结构状态。
 
     返回 {swing_state, swing_low_1, swing_high_1, bars_since_swing_low,
-          dist_to_swing_low, swing_low_2, swing_high_2}。
+          bars_since_swing_high, dist_to_swing_low, swing_low_2, swing_high_2}。
     swing_state：1 = 高低点同时抬升（HH+HL，最原始的多头结构），
-                 -1 = 同时下移（LH+LL），0 = 混合，None = 摆动点还不够两个。
+                -1 = 同时下移（LH+LL），0 = 混合，None = 摆动点还不够两个。
     """
     blanks = {"swing_state": None, "swing_low_1": None, "swing_high_1": None,
               "swing_low_2": None, "swing_high_2": None,
-              "bars_since_swing_low": None, "dist_to_swing_low": None}
+              "bars_since_swing_low": None, "bars_since_swing_high": None,
+              "dist_to_swing_low": None}
     low_days, low_prices = swing_lows
     high_days, high_prices = swing_highs
     last_confirmed_low = bisect_right(low_days, index - span) - 1
@@ -165,6 +166,7 @@ def _structure_at(swing_lows: tuple[list[int], list[float]],
     output["swing_low_1"] = low_price
     output["swing_high_1"] = high_price
     output["bars_since_swing_low"] = index - low_index
+    output["bars_since_swing_high"] = index - high_index
     if last_confirmed_low >= 1 and last_confirmed_high >= 1:
         prior_low = low_prices[last_confirmed_low - 1]
         prior_high = high_prices[last_confirmed_high - 1]
@@ -174,6 +176,32 @@ def _structure_at(swing_lows: tuple[list[int], list[float]],
         falling = low_price < prior_low and high_price < prior_high
         output["swing_state"] = 1.0 if rising else (-1.0 if falling else 0.0)
     return output
+
+
+def _retrace(close: float, high: float, low: float, bars_since_low, bars_since_high,
+             min_leg: float = 0.10) -> float | None:
+    """斐波那契回撤比例：0 = 还贴着高点，1 = 退回起点。
+
+    这就是教科书那个数的定义——**对"低点→高点"这段涨幅的回撤比例**：
+        retrace = (高点 − 收盘) / (高点 − 低点)
+    注意它和"收盘处在区间的位置"是**互补**的（位置 = 1 − retrace），
+    两者数值区间还正好对称，所以特别容易混。这里一律用"回撤"口径，
+    分档标签也只写回撤，不再同时出现"位置"，免得看着是两个东西其实是一个。
+
+    拿不到合规的一段上涨就返回 None。为什么这么严：这三个前提少任何一个，
+    "回撤 61.8%" 就不是斐波那契了，而是随便一个比例的巧合。
+    """
+    if not close or not high or not low or high <= low:
+        return None
+    if bars_since_low is None or bars_since_high is None:
+        return None
+    if bars_since_low <= bars_since_high:      # 高点必须先于…… 反了：低点要更早
+        return None
+    if (high - low) / low < min_leg:           # 涨幅不够，不算"一段上涨"
+        return None
+    if close >= high or close <= low:          # 还没回撤 / 已经跌破起点
+        return None
+    return round((high - close) / (high - low), 4)
 
 
 def compute_feature_series(
@@ -275,6 +303,21 @@ def compute_feature_series(
             if structure["swing_low_1"] else None
         )
         raw["bars_since_swing_low"] = structure["bars_since_swing_low"]
+        raw["bars_since_swing_high"] = structure["bars_since_swing_high"]
+        # 斐波那契回撤：先有"摆动低点 → 之后的摆动高点"这一段上涨，再往下量回撤了多少。
+        # 三个前提缺一不可（缺了就给 None，让筛选条件判否，而不是拿个假数字凑）：
+        #   1. 低点在高点之前（先涨后回）——20 日区间的最高/最低不保证这个顺序，
+        #      一只下跌中的票"处在区间中间"是反弹了半截，不是回撤；
+        #   2. 这段上涨要有幅度（≥ fib_min_leg，默认 10%），微涨 2% 的"回撤 61.8%"没有意义；
+        #   3. 收盘要落在这段区间里（跌破起点说明结构已经破了，那是另一回事）。
+        raw["retrace"] = _retrace(
+            close,
+            structure["swing_high_1"],
+            structure["swing_low_1"],
+            structure["bars_since_swing_low"],
+            structure["bars_since_swing_high"],
+            float((params.get("fib_min_leg") or 0.10)),
+        )
 
         if index >= 20:
             prior_high = max(highs[index - 20:index])
@@ -353,6 +396,8 @@ def compute_feature_series(
                 "swing_high_1": raw["swing_high_1"],
                 "dist_to_swing_low": raw["dist_to_swing_low"],
                 "bars_since_swing_low": raw["bars_since_swing_low"],
+                "bars_since_swing_high": raw["bars_since_swing_high"],
+                "retrace": raw["retrace"],
                 "dist_to_high_250": raw["dist_to_high_250"],
                 "donchian_break": raw["donchian_break"],
                 "consolidation_days": consolidation_days,

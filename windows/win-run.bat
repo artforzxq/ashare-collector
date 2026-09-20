@@ -176,6 +176,7 @@ echo   22   replay the screen criteria over history (real 5/20-day results)
 echo   23   push today's briefing to the phone
 echo   24   turn the daily job into a scheduled task (on / off)
 echo   25   environment check: python / packages / database / config
+echo   26   bucket the market by one dimension (what actually matters)
 echo   10   create a desktop shortcut for the daily job
 echo.
 echo From a command line: win-run.bat STEP [args]   e.g.  win-run.bat daily
@@ -214,6 +215,7 @@ if /i "%STEP%"=="shadow"          goto :shadow
 if /i "%STEP%"=="screen"          goto :screen
 if /i "%STEP%"=="candidates"      goto :candidates
 if /i "%STEP%"=="replay"          goto :replay
+if /i "%STEP%"=="buckets"         goto :buckets
 if /i "%STEP%"=="pack"            goto :pack
 if /i "%STEP%"=="push"            goto :push
 if /i "%STEP%"=="doctor"          goto :doctor
@@ -376,6 +378,13 @@ echo Takes several minutes: it recomputes every symbol once, then walks back thr
 echo After it finishes you get the real 5 / 20-day performance of each pattern.
 echo.
 "%PY%" run.py replay %EXTRA%
+exit /b %ERRORLEVEL%
+
+:buckets
+echo Bucketing the whole market by one dimension (position / volume / turnover ...).
+echo Reads local bars only; about half a minute. Add --field or --cross to narrow it down.
+echo.
+"%PY%" run.py buckets %EXTRA%
 exit /b %ERRORLEVEL%
 
 :pack

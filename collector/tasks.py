@@ -16,7 +16,7 @@ from .names import display_name
 from .alerts import apply_budget, apply_cooldown, build_candidates, persist
 from .arbitrate import DecisionContext, arbitrate
 from .config import watchlist_codes
-from .levels import build_levels, nearest_band
+from .levels import build_levels, nearest_band, neckline_band
 from .registry import FactorRegistry
 from .sources import DataSourceError, build_source
 
@@ -968,6 +968,12 @@ def _compute_levels(conn, cfg: dict, trade_date: str, verbose: bool, codes: list
             continue
         latest_close = bars[-1]["close"]
         bands = build_levels(bars, latest_close, cfg)
+        # 颈线（头肩/三重的突破线）也放进 levels 表：它跟成交量密集带走同一条通路，
+        # 页面就能画出来。**只用于看图**——风险层的 support_for 按 level_type 取带，
+        # 不会把它算成止损参照，所以止损逻辑一个字没动。
+        neckline = neckline_band(bars)
+        if neckline:
+            bands = bands + [neckline]
         conn.execute("DELETE FROM levels WHERE code=? AND trade_date=?", (code, trade_date))
         db.upsert_rows(
             conn,

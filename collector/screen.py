@@ -46,12 +46,23 @@ DEFAULT_CRITERIA = (
               {"field": "close", "op": ">", "compare": "ma60", "factor": 1.02},
               {"field": "state", "op": "!=", "value": "down"}]},
     {"key": "突破", "priority": 10, "title": "放量突破区间上沿", "sort": "vol_ratio_20",
-     "when": [{"field": "breakout_confirmed", "op": "==", "value": 1}]},
-    {"key": "放量阳线异动", "priority": 50, "title": "成交额放大到 3 倍以上，且收阳",
+     "when": [{"field": "breakout_confirmed", "op": "==", "value": 1},
+              {"field": "vol_ratio_20", "op": "<=", "value": 3}]},
+    {"key": "贴高不放量", "priority": 15, "title": "贴着 20 日高点，但量能没有失控",
+     "sort": "range_position",
+     "when": [{"field": "range_position", "op": ">=", "value": 0.85},
+              {"field": "vol_ratio_20", "op": "<=", "value": 1.5}]},
+    {"key": "浅回撤", "priority": 25, "title": "结构向上（HH+HL）且回撤很浅",
+     "sort": "retrace", "desc": False,
+     "when": [{"field": "swing_state", "op": "==", "value": 1},
+              {"field": "retrace", "op": "between", "value": [0, 0.236]}]},
+    {"key": "放量阳线异动", "enabled": False, "priority": 50,
+     "title": "成交额放大到 3 倍以上，且收阳",
      "sort": "vol_ratio_20",
      "when": [{"field": "vol_ratio_20", "op": ">=", "value": 3},
               {"field": "candle.body_pct", "op": ">=", "value": 0}]},
-    {"key": "放量阴线异动", "priority": 55, "title": "成交额放大到 3 倍以上，且收阴",
+    {"key": "放量阴线异动", "enabled": False, "priority": 55,
+     "title": "成交额放大到 3 倍以上，且收阴",
      "sort": "vol_ratio_20",
      "when": [{"field": "vol_ratio_20", "op": ">=", "value": 3},
               {"field": "candle.body_pct", "op": "<", "value": 0}]},
@@ -180,10 +191,22 @@ def build_row(code: str, name: str, feature: dict, bar: dict, candle: dict) -> d
         "raw_values": feature.get("raw_values") or {},
         "range_position": feature.get("range_position"),
         "range_width_pct": feature.get("range_width_pct"),
+        "swing_state": feature.get("swing_state"),
+        "swing_low_1": feature.get("swing_low_1"),
+        "swing_high_1": feature.get("swing_high_1"),
+        "retrace": feature.get("retrace"),
         "candle": candle,
         "pattern": candles_mod.describe(candle),
         "body_pct": candle.get("body_pct"),
         "reversal_up": candle.get("reversal_up"),
+        # 颈线：形态层算出来的（头肩/三重的突破线）。以前只当局部变量用于确认，
+        # 现在带出来给筛选条件和页面用——"颈线回踩"就是指价格回到这条线上。
+        "neckline": candle.get("neckline"),
+        "neckline_kind": candle.get("neckline_kind") or "",
+        "dist_to_neckline_pct": (
+            round((feature.get("close") - candle["neckline"]) / candle["neckline"] * 100, 4)
+            if candle.get("neckline") else None
+        ),
     }
 
 
@@ -349,6 +372,11 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
     # 命中先按 (日期, 条件) 攒着，每格只留排序需要的那几个字段——全市场几百天的命中量
     # 不值得把整行都留在内存里。
     buckets: dict[tuple, list] = {}
+    # 覆盖到的每一天都要记下来——**哪怕那天一条都没命中**。
+    # 只按"有命中的日期"删，会漏掉那些没命中的日子，那里的旧行会留到下一次重放，
+    # 而统计照样把它们算进去。实测踩过：6 个没命中的交易日上留着上一版口径的行，
+    # 报告里"放量阴线异动 +2.10% 超额"就是这么冒出来的——数字还挺好看。
+    covered: set[str] = set()
     scanned = 0
     for index, code in enumerate(codes, 1):
         bars = [
@@ -377,6 +405,7 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
             trade_date = row.get("trade_date")
             if not trade_date:
                 continue
+            covered.add(trade_date)
             for item in conditions:
                 if not rules.matches(row, item["when"]):
                     continue
@@ -403,16 +432,18 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
             })
 
     written = 0
-    for trade_date in sorted(by_date):
-        payload = by_date[trade_date]
+    for trade_date in sorted(covered):
+        payload = by_date.get(trade_date) or []
         conn.execute("DELETE FROM screen_results WHERE trade_date=?", (trade_date,))
+        if not payload:
+            continue
         db.upsert_rows(conn, "screen_results", payload, ["trade_date", "criterion", "code"])
         written += len(payload)
     # 窗口之外的旧结果要清掉。这张表的含义是"按当前这套条件重放出来的历史"；
     # 混进上一次重放（可能是另一版形态口径）或更早的行，统计就会悄悄掺假——
     # 实测只差一天两行，但"看起来差不多"的错误最难发现，而这正是回放要防的事。
     stale = 0
-    dates_all = sorted(by_date)
+    dates_all = sorted(covered)
     if dates_all:
         stale = conn.execute(
             "DELETE FROM screen_results WHERE trade_date < ? OR trade_date > ?",
@@ -420,7 +451,7 @@ def replay(conn, cfg: dict, days: int = 120, min_bars: int | None = None, top: i
         ).rowcount
     conn.commit()
 
-    dates = sorted(by_date)
+    dates = sorted(covered)
     if dates:
         db.log_health(conn, dates[-1], "screen", "screen", "ok", scanned, 0.0, 0,
                       f"历史重放 {len(dates)} 个交易日，命中 {written} 条")

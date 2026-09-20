@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from . import candles
+
 
 def build_levels(
     bars: Sequence[dict],
@@ -108,6 +110,28 @@ def _classify(low: float, high: float, close: float) -> str:
     if low <= close <= high:
         return "range"
     return "support" if high < close else "resistance"
+
+
+def neckline_band(bars: Sequence[dict], index: int | None = None) -> dict | None:
+    """把形态层的颈线变成一条"零宽带"，好跟成交量密集带一起走同一条通路。
+
+    为什么用零宽带而不是新加一个字段：`levels` 表、页面画带、风险层取支撑全都
+    已经围着"带"写好了（price_low/price_high/level_type），颈线本质上就是一个点，
+    price_low == price_high 正好表达它，下游一行都不用改就能画出来、用起来。
+
+    注意它的**位置决定角色**（和成交量带同一个规则）：在收盘下方算支撑，上方算压力。
+    顶部形态的颈线（跌破之后是压力）和底部形态的颈线（站上之后是支撑）因此自动各就各位。
+    """
+    if not bars:
+        return None
+    index = len(bars) - 1 if index is None else index
+    if index < 2 or index >= len(bars):
+        return None
+    price = candles.analyze(bars, index).get("neckline")
+    if not price:
+        return None
+    return {"level_type": "neckline", "price_low": round(float(price), 4),
+            "price_high": round(float(price), 4), "weight": 0.0, "engine": "pattern"}
 
 
 def nearest_band(bands: Sequence[dict], close: float, level_type: str | None = None) -> dict | None:
