@@ -715,20 +715,32 @@ def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
 
 
 def _collect_margin(conn, sources, trade_date: str, verbose: bool) -> None:
-    """融资融券：沪深是两个交易所分别披露的，问遍所有源再各写各的（market 列区分）。"""
+    """融资融券：沪深是两个交易所分别披露的，问遍所有源再各写各的（market 列区分）。
+
+    合并规则是**先到先得**：源池按 官方 → 聚合源 的顺序排（config 里的 extra 顺序），
+    先写进去的 (交易日, 市场) 不再被后面的源覆盖。这样官方源的数字优先，
+    而备胎（金十）只补齐官方拿不到的那些——比如沪市：上交所接口在这条网络上返回 500，
+    于是沪市那一行由金十补上。
+    """
     if not sources:
         _log("      ! 没有支持融资融券的数据源", verbose)
         return
     written = 0
+    filled: set[tuple] = set()
     for source in sources:
         try:
             rows = source.margin(trade_date)
         except Exception as exc:
             _log(f"      ! 融资余额（{source.name}）不可用：{exc}", verbose)
             continue
+        rows = [row for row in rows if (row.get("trade_date"), row.get("market")) not in filled]
         if not rows:
             continue
         written += db.upsert_rows(conn, "margin", rows, ["trade_date", "market"])
+        filled.update((row.get("trade_date"), row.get("market")) for row in rows)
+        if verbose:
+            _log(f"      · 融资融券：{source.name} 给了 "
+                 f"{'、'.join(sorted(str(row.get('market')) for row in rows))}", verbose)
     if verbose and written:
         _log(f"      融资融券 {written} 行", verbose)
 

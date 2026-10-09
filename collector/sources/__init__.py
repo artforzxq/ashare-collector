@@ -13,6 +13,7 @@ SOURCE_REGISTRY: dict[str, str] = {
     "sina": "collector.sources.sina_source:SinaSource",
     "sse": "collector.sources.sse_source:SseSource",
     "szse": "collector.sources.szse_source:SzseSource",
+    "jin10": "collector.sources.jin10_source:Jin10Source",
     "adata": "collector.sources.adata_source:AdataSource",
     "baostock": "collector.sources.baostock_source:BaostockSource",
 }

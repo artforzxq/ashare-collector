@@ -6,6 +6,7 @@
 """
 
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +15,9 @@ from collector import db, tasks
 from collector.config import load_config
 from collector.sources.sina_source import SinaSource
 from collector.sources.szse_source import SzseSource
+from collector.sources import jin10_source
+from collector.sources.jin10_source import Jin10Source
+from collector.sources.base import DataSourceError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -131,6 +135,66 @@ class SinaFundFlowTests(unittest.TestCase):
         self.assertAlmostEqual(row["pct_chg"], 1.8647, places=3)      # 小数 → %
         self.assertAlmostEqual(row["main_ratio"], 15.4473, places=3)  # 小数 → %
         self.assertIsNone(row["large_net"])                            # 新浪只给两档
+
+
+class Jin10MarginTests(unittest.TestCase):
+    """金十备胎：沪市两融唯一能用的非官方来源（上交所接口在本机网络会 500）。"""
+
+    KEYS = [{"name": "融资买入额", "unit": "元"}, {"name": "融资余额", "unit": "元"},
+            {"name": "融券卖出量", "unit": "股"}, {"name": "融券余量", "unit": "股"},
+            {"name": "融券余额", "unit": "元"}, {"name": "融资融券余额", "unit": "元"}]
+
+    def _payload(self, values):
+        return json.dumps({"keys": self.KEYS, "values": values}).encode()
+
+    def _source_with(self, values, keys=None):
+        source = Jin10Source({"sources": {"min_interval_sec": 0}})
+        body = json.dumps({"keys": keys or self.KEYS, "values": values}).encode()
+        response = mock.MagicMock()
+        response.read.return_value = body
+        response.__enter__ = lambda self: response
+        response.__exit__ = lambda *args: False
+        return source, mock.patch.object(jin10_source.urllib.request, "urlopen", return_value=response)
+
+    def test_returns_both_markets_in_yuan(self):
+        # 数字照抄实测：沪市 2026-10-08 融资 1.2984 万亿、融券 189 亿
+        values = {"2026-10-08": [75710415745, 1298438300567, 70677151, 3251744595,
+                                 18936692018, 1317374992585]}
+        source, patched = self._source_with(values)
+        with patched:
+            rows = source.margin("2026-10-08")
+        self.assertEqual({row["market"] for row in rows}, {"SH", "SZ"})
+        shanghai = next(row for row in rows if row["market"] == "SH")
+        self.assertAlmostEqual(shanghai["financing_balance"], 1298438300567.0)
+        self.assertAlmostEqual(shanghai["securities_lending"], 18936692018.0)
+        self.assertEqual(shanghai["source"], "jin10")
+
+    def test_unit_change_is_caught_not_silently_written(self):
+        """上游哪天把单位从元改成亿元，必须炸出来——静默写库会让数字差 1 亿倍。"""
+        keys = [dict(item) for item in self.KEYS]
+        keys[1] = {"name": "融资余额", "unit": "亿元"}
+        source, patched = self._source_with({}, keys=keys)
+        with patched:
+            with self.assertRaises(DataSourceError) as caught:
+                source.margin("2026-10-08")
+        self.assertIn("单位", str(caught.exception))
+
+    def test_identity_break_is_caught(self):
+        """融资余额 + 融券余额 对不上融资融券余额 → 数据有问题，不写库。"""
+        values = {"2026-10-08": [1.0, 100.0, 1.0, 1.0, 5.0, 999.0]}   # 100 + 5 != 999
+        source, patched = self._source_with(values)
+        with patched:
+            with self.assertRaises(DataSourceError) as caught:
+                source.margin("2026-10-08")
+        self.assertIn("恒等式", str(caught.exception))
+
+    def test_missing_day_falls_back_to_the_previous_one(self):
+        values = {"2026-10-07": [1.0, 100.0, 1.0, 1.0, 5.0, 105.0]}
+        source, patched = self._source_with(values)
+        with patched:
+            rows = source.margin("2026-10-08")
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["data_date"], "2026-10-07")
 
 
 class FundFlowFallbackTests(unittest.TestCase):
