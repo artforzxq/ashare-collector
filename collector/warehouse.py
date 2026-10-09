@@ -110,6 +110,54 @@ def daily_sources(cfg: dict) -> list:
     return out
 
 
+def sync_target(conn, cfg, when=None) -> str:
+    """本次同步补到哪一天为止。
+
+    盘中（含午休、未开盘）：今天这根还没收盘，目标是**最后一个已收盘的交易日**；
+    收盘后：就是本地认得的最新交易日（今天可以补了）。
+
+    为什么不能用 `latest_trade_date` 一个函数包办：它优先信交易日历，
+    而日历是日终任务顺手补的——全市场同步如果只依赖它，就会遇到"日历停在两周前，
+    于是同步认为没有要补的"（实测踩过：目标是 09-22，待补 59 只，几乎什么都没干）。
+    """
+    session = market_time.describe(conn, when)
+    if session in ("交易中", "午休", "未开盘"):
+        return last_closed_trade_date(conn, when)
+    return latest_trade_date(conn, cfg)
+
+
+def last_closed_trade_date(conn, when=None) -> str:
+    """最后一个**已经收盘**的交易日。
+
+    为什么要单独一个函数：`latest_trade_date` 回答的是"本地认得的最新交易日"，
+    盘中它返回的就是**今天**——今天那根 K 线还没收盘，是一根半根的线。
+    把半根线批量写进仓库的后果很隐蔽：
+      · 晚上日终的全市场快照**不会覆盖**它（`snapshot_bars` 只覆盖 snapshot 来源的行，
+        别的来源一律当"正式数据"保护起来）；
+      · 第二天增量同步从"本地最后一根 + 1 天"开始，也不会再补今天。
+    于是 5000 多只票的当日 K 线就永久停在上午收盘的样子——四价俱全、肉眼看不出来，
+    均线、突破、关键带却全错。
+
+    fallback 顺序：交易日历里最后一个 < 今天的交易日 → 库里最后一个 < 今天的日线，
+    两者取大的（日历可能是旧的，而有的票已经补到了 10-08）。都不行就返回今天。
+    """
+    moment = when or datetime.now()
+    today = moment.strftime("%Y-%m-%d")
+    candidates: list[str] = []
+    row = db.query_one(
+        conn,
+        "SELECT MAX(trade_date) AS d FROM trade_calendar WHERE is_trading_day=1 AND trade_date<?",
+        (today,),
+    )
+    if row and row["d"]:
+        candidates.append(row["d"])
+    row = db.query_one(
+        conn, "SELECT MAX(trade_date) AS d FROM bars_daily WHERE trade_date<?", (today,))
+    if row and row["d"]:
+        candidates.append(row["d"])
+    return max(candidates) if candidates else today
+
+
 def latest_trade_date(conn, cfg, fallback: str | None = None) -> str:
     """本地认得的最新交易日：优先交易日历，其次库里已有的日线。"""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -196,13 +244,17 @@ def sync_universe(conn, cfg, verbose: bool = True) -> dict:
 
 
 def sync_history(conn, cfg, codes: list[str] | None = None, limit: int | None = None,
-                 days: int | None = None, verbose: bool = True) -> dict:
+                 days: int | None = None, verbose: bool = True, until: str | None = None) -> dict:
     """逐只补日线。已经最新的自动跳过，所以可以反复跑、随时中断。"""
     sources = daily_sources(cfg)
     if not sources:
         return {"ok": False, "message": "没有支持日线的数据源"}
     config = cfg.get("warehouse") or {}
-    target = latest_trade_date(conn, cfg)
+    # 目标日期：盘中会自动退到"最后一个已收盘的交易日"（半根日线一旦写进仓库
+    # 就没人再来修正它）。调用方也可以用 until 显式指定，取更早的那个。
+    target = sync_target(conn, cfg)
+    if until and until < target:
+        target = until
     days = days or int(config.get("history_days", DEFAULT_HISTORY_DAYS))
     limit = limit if limit is not None else int(config.get("batch_size", DEFAULT_BATCH))
 

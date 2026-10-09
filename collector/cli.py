@@ -23,6 +23,7 @@ from . import (
     doctor as doctor_mod,
     flow as flow_mod,
     intraday as intraday_mod,
+    market_time,
     newstock as newstock_mod,
     notify,
     regime as regime_mod,
@@ -591,6 +592,17 @@ def cmd_sync(args) -> int:
                 return 1
             print("（用本地已有的代码表继续）")
 
+    # 先把交易日历补到今天：同步的目标日期要读它，而它原来只有日终任务在维护。
+    # 不补的话，"只跑同步不跑日终"会以为没有要补的数据（踩过：日历停在 09-22）。
+    today = datetime.now().strftime("%Y-%m-%d")
+    print("更新交易日历 …")
+    tasks.collect_calendar(conn, cfg, today, verbose=False)
+    session = market_time.describe(conn)
+    target = warehouse_mod.sync_target(conn, cfg)
+    if session in ("交易中", "午休", "未开盘"):
+        print(f"现在是「{session}」，今天这根日线还没收盘 → 本轮只同步到 {target}")
+        print("（收盘后（15:30 之后）再跑一次，今天的才会补上；这也是 3-每日任务 干的事）")
+    print("")
     result = warehouse_mod.sync_history(conn, cfg, limit=args.limit, days=args.days)
     if not result.get("ok"):
         print(result.get("message", "同步失败"))

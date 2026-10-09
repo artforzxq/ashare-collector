@@ -414,6 +414,17 @@ def _collect_market_snapshot_bars(conn, cfg: dict, trade_date: str, verbose: boo
         _log(f"      ! 全市场快照未写入：{result.get('message')}", verbose)
 
 
+def collect_calendar(conn, cfg: dict, trade_date: str, verbose: bool = True) -> None:
+    """把交易日历补到 trade_date。公开入口——全市场同步也要用它。
+
+    为什么同步需要这个：同步的目标日期优先读交易日历，而日历原来只有日终任务在补。
+    结果"只跑同步、不跑日终"的情况下，日历停在很久以前，同步就以为没有要补的数据
+    （实测：日历停在 09-22，于是 10 月的数据一根都没补）。
+    """
+    pool = _source_pool(cfg)
+    _collect_calendar(conn, _source_for(pool, "trade_calendar"), cfg, trade_date, verbose)
+
+
 def _collect_calendar(conn, source, cfg: dict, trade_date: str, verbose: bool) -> None:
     """交易日历落库：补最近 400 天，顺手算每个交易日的上一日/下一日。"""
     if source is None:
