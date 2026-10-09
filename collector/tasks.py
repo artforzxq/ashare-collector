@@ -287,7 +287,7 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
     # ETF 份额要**问遍所有能提供它的源**：上交所管沪市、深交所管深市，
     # 一个源覆盖不了两边的票，只挑一个的话另一半永远是空的。
     _collect_etf_shares(conn, _all_sources_for(pool, "etf_shares"), cfg, trade_date, verbose)
-    _collect_margin(conn, _source_for(pool, "margin"), trade_date, verbose)
+    _collect_margin(conn, _all_sources_for(pool, "margin"), trade_date, verbose)
 
     _log("[5/7] 计算特征与状态（迟滞 + 确认 + 最短持续期）", verbose)
     state_rows = _compute_features(conn, cfg, registry, trade_date, verbose)
@@ -714,16 +714,23 @@ def _topup_etf_share_history(conn, sources: list, codes: list, trade_date: str,
     return written
 
 
-def _collect_margin(conn, source, trade_date: str, verbose: bool) -> None:
-    if source is None:
+def _collect_margin(conn, sources, trade_date: str, verbose: bool) -> None:
+    """融资融券：沪深是两个交易所分别披露的，问遍所有源再各写各的（market 列区分）。"""
+    if not sources:
         _log("      ! 没有支持融资融券的数据源", verbose)
         return
-    try:
-        rows = source.margin(trade_date)
-    except Exception as exc:
-        _log(f"      ! 融资余额不可用：{exc}", verbose)
-        return
-    db.upsert_rows(conn, "margin", rows, ["trade_date", "market"])
+    written = 0
+    for source in sources:
+        try:
+            rows = source.margin(trade_date)
+        except Exception as exc:
+            _log(f"      ! 融资余额（{source.name}）不可用：{exc}", verbose)
+            continue
+        if not rows:
+            continue
+        written += db.upsert_rows(conn, "margin", rows, ["trade_date", "market"])
+    if verbose and written:
+        _log(f"      融资融券 {written} 行", verbose)
 
 
 def backfill_margin(conn, cfg: dict, days: int = 20, verbose: bool = True) -> dict:
@@ -1199,50 +1206,79 @@ def collect_lhb(conn, cfg: dict, start: str, end: str, verbose: bool = True) -> 
     if session in ("交易中", "午休") and end >= datetime.now().strftime("%Y-%m-%d"):
         _log(f"      · 现在是「{session}」，龙虎榜要收盘后才公布，跳过", verbose)
         return {"ok": False, "rows": 0, "message": "未收盘，龙虎榜还没公布"}
-    source = _source_for(_source_pool(cfg), "lhb")
-    if source is None:
+    # 龙虎榜要问遍所有能提供的源：沪深是两个交易所分别披露的，
+    # 只挑一个（以前挑到 akshare，而它在这条线路上连不上）等于另一半市场永远是空的。
+    sources = _all_sources_for(_source_pool(cfg), "lhb")
+    if not sources:
         _log("      · 没有支持龙虎榜的数据源，跳过", verbose)
         return {"ok": False, "rows": 0, "message": "没有支持 lhb 的数据源"}
-    try:
-        rows = source.lhb(start, end)
-    except Exception as exc:
-        _log(f"      ! 龙虎榜不可用：{exc}", verbose)
-        db.log_health(conn, end, source.name, "lhb", "failed", 0, 1.0, 0, str(exc))
-        return {"ok": False, "rows": 0, "message": str(exc)}
+    merged: dict[tuple, dict] = {}
+    failures: list[str] = []
+    for source in sources:
+        try:
+            rows = source.lhb(start, end)
+        except Exception as exc:
+            failures.append(f"{source.name}：{type(exc).__name__} {str(exc)[:80]}")
+            db.log_health(conn, end, source.name, "lhb", "failed", 0, 1.0, 0, str(exc))
+            continue
+        if rows:
+            _log(f"      · 龙虎榜：{source.name} 给了 {len(rows)} 条", verbose)
+        for row in rows:
+            # 同一只票同一天可能因为多个原因上榜，按 (日期, 代码, 原因) 去重合并
+            merged[(row.get("trade_date"), row.get("code"), row.get("reason"))] = row
+    rows = list(merged.values())
+    if not rows:
+        _log(f"      ! 龙虎榜没取到：{'；'.join(failures) or '所有源都返回空'}", verbose)
+        return {"ok": False, "rows": 0, "message": "；".join(failures) or "所有源都返回空"}
     for row in rows:
         row["updated_at"] = db.now_iso()
-    written = db.upsert_rows(conn, "lhb", rows, ["trade_date", "code", "reason"]) if rows else 0
-    db.log_health(conn, end, source.name, "lhb", "ok", written, 0.0, 0, f"{start}~{end}")
+    written = db.upsert_rows(conn, "lhb", rows, ["trade_date", "code", "reason"])
+    db.log_health(conn, end, sources[0].name, "lhb", "ok", written, 0.0, 0, f"{start}~{end}")
     _log(f"      龙虎榜 {written} 条（{start} ~ {end}）", verbose)
-    return {"ok": True, "rows": written, "source": source.name}
+    return {"ok": True, "rows": written, "source": ", ".join(s.name for s in sources)}
 
 
 def collect_fund_flow(conn, cfg: dict, codes=None, verbose: bool = True) -> dict:
-    """个股资金流：主力/超大单等净流入（东财，近约 100 个交易日）。"""
-    source = _source_for(_source_pool(cfg), "fund_flow")
-    if source is None:
+    """个股资金流：主力/超大单等净流入。
+
+    **这些源是互为备胎的关系，不是互相补充**——每个源都覆盖全市场，
+    所以只要有一个给到就够。以前是"挑一个源，失败就整批失败"，
+    于是东财那条被切之后，这个能力看着"有接口"，实际一只都拿不到。
+    现在按顺序试：某只票第一个源失败就换下一个，全失败才算这只失败。
+    """
+    sources = _all_sources_for(_source_pool(cfg), "fund_flow")
+    if not sources:
         _log("      · 没有支持资金流的数据源，跳过", verbose)
         return {"ok": False, "rows": 0, "message": "没有支持 fund_flow 的数据源"}
     codes = list(codes) if codes else [item["code"] for item in watchlist_codes(cfg)]
     total = 0
     failed: list[str] = []
+    used: dict[str, int] = {}
     for code in codes:
-        try:
-            rows = source.fund_flow(code)
-        except Exception as exc:
+        rows: list[dict] = []
+        for source in sources:
+            try:
+                rows = source.fund_flow(code)
+            except Exception:
+                continue
+            if rows:
+                used[source.name] = used.get(source.name, 0) + 1
+                break
+        if not rows:
             failed.append(code)
             continue
         for row in rows:
             row["updated_at"] = db.now_iso()
-        if rows:
-            total += db.upsert_rows(conn, "fund_flow", rows, ["code", "trade_date"])
+        total += db.upsert_rows(conn, "fund_flow", rows, ["code", "trade_date"])
     if verbose:
-        # 这个源（东财 push2his）在部分网络下不可用，逐只刷错误会淹没日志——只报一次汇总
         note = f"      资金流：{len(codes) - len(failed)}/{len(codes)} 只、{total} 行写库"
+        if used:
+            note += "（" + "、".join(f"{name} {count} 只" for name, count in used.items()) + "）"
         if failed:
-            note += f"（{len(failed)} 只取不到；东财 push2his 在本机网络下不稳定）"
+            note += f"；{len(failed)} 只所有源都取不到"
         _log(note, verbose)
-    return {"ok": True, "rows": total, "failed": failed, "source": source.name}
+    return {"ok": True, "rows": total, "failed": failed,
+            "source": ", ".join(used) or "；".join(s.name for s in sources)}
 
 
 def intraday_source(cfg: dict):

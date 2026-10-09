@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 
@@ -22,6 +23,9 @@ DAILY_URL = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN
 # 全市场股票列表：node=hs_a 是全部 A 股（实测 5564 只，**含北交所**，是这里唯一能拿到北交所的源）
 LIST_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
 COUNT_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount"
+# 个股资金流：日度主力/超大单净额。东财 push2his 在这条线路上被切时靠它兜底
+FUND_FLOW_URL = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                 "MoneyFlow.ssl_qsfx_zjlrqs")
 PAGE_SIZE = 100          # 一页最多给 100 条，再大也不会多返回
 HEADERS = {
     "User-Agent": (
@@ -56,7 +60,7 @@ def _directory_rows(items) -> list[dict]:
 
 class SinaSource(BaseSource):
     name = "sina"
-    capabilities = {"daily_bars", "symbol_directory"}
+    capabilities = {"daily_bars", "symbol_directory", "fund_flow"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -75,6 +79,72 @@ class SinaSource(BaseSource):
         if wait > 0:
             time.sleep(wait)
         self._last_request = time.monotonic()
+
+    # ---------------- 个股资金流（东财被封时的独立备胎） ----------------
+
+    def fund_flow(self, code: str, days: int = 60) -> list[dict]:
+        """个股日度资金流：主力净额 + 超大单净额（新浪）。
+
+        为什么需要它：我们的资金流**原来只有东财 push2his 一个源**，而那条线路
+        在这台机器上是域名级被切的（握手后直接断）——等于这个能力"有接口、没数据"。
+        新浪这条走 `vip.stock.finance.sina.com.cn`，是完全不同的域名和风控面。
+
+        口径（实测 2026-10-09，sh600519）：
+          netamount   主力净额（元）
+          r0_net      超大单净额（元）
+          ratioamount 主力净占比（小数，×100 才和东财的"占比%"对齐）
+          trade       收盘价　changeratio 涨跌幅（小数，×100 成 %）
+
+        它**只有两档**（主力 + 超大单），没有大/中/小单——那三列留空，
+        不拿 0 冒充"没有净流入"。
+        """
+        exchange, symbol = split_code(code)
+        if not symbol:
+            return []
+        # 北交所要 bj 前缀：920xxx 写成 sh/sz 时新浪返回空数组（实测）
+        prefix = "bj" if exchange == "BJ" else exchange.lower()
+        self._throttle()
+        try:
+            response = self._requests().get(
+                FUND_FLOW_URL,
+                params={"page": 1, "num": max(1, min(int(days), 200)), "sort": "opendate",
+                        "asc": 0, "daima": prefix + symbol},
+                headers={**HEADERS, "Referer": "https://finance.sina.com.cn/"},
+                timeout=20,
+            )
+        except Exception as exc:                       # 网络类异常统一成 DataSourceError
+            raise DataSourceError(f"连不上新浪资金流：{exc}") from exc
+        if response.status_code != 200:
+            raise DataSourceError(f"新浪资金流返回 HTTP {response.status_code}")
+        text = response.text
+        if "[" not in text:
+            return []
+        try:
+            payload = json.loads(text[text.index("["):text.rindex("]") + 1])
+        except ValueError as exc:
+            raise DataSourceError(f"新浪资金流返回的不是 JSON：{exc}") from exc
+
+        rows: list[dict] = []
+        for item in payload:
+            day = str(item.get("opendate") or "")[:10]
+            if not day:
+                continue
+            ratio = _to_float(item.get("ratioamount"))
+            change = _to_float(item.get("changeratio"))
+            rows.append({
+                "code": code,
+                "trade_date": day,
+                "close": _to_float(item.get("trade")),
+                "pct_chg": round(change * 100, 4) if change is not None else None,
+                "main_net": _to_float(item.get("netamount")),
+                "main_ratio": round(ratio * 100, 4) if ratio is not None else None,
+                "super_net": _to_float(item.get("r0_net")),
+                "large_net": None,          # 新浪这条只给主力与超大单两档
+                "medium_net": None,
+                "small_net": None,
+                "source": self.name,
+            })
+        return rows
 
     def is_available(self) -> tuple[bool, str]:
         try:

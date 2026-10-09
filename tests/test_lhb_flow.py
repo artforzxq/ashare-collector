@@ -94,9 +94,9 @@ class CollectionTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_no_source_is_a_quiet_skip(self):
-        # 注意：不能指望"夹具源没有 lhb"——_source_for 会兜底到池子里的 akshare，
+        # 注意：不能指望"夹具源没有 lhb"——源池里还有 akshare / szse，
         # 那样测试就真去调网络了。这里直接把"没有数据源"这件事钉死。
-        with mock.patch.object(tasks, "_source_for", return_value=None):
+        with mock.patch.object(tasks, "_all_sources_for", return_value=[]):
             info = tasks.collect_lhb(self.conn, self.cfg, "2026-09-15", "2026-09-16", verbose=False)
         self.assertFalse(info["ok"])
         self.assertIn("数据源", info["message"])
@@ -105,7 +105,7 @@ class CollectionTests(unittest.TestCase):
         broken = mock.Mock()
         broken.name = "fake"                 # log_health 要写字符串
         broken.lhb.side_effect = RuntimeError("接口挂了")
-        with mock.patch.object(tasks, "_source_for", return_value=broken):
+        with mock.patch.object(tasks, "_all_sources_for", return_value=[broken]):
             info = tasks.collect_lhb(self.conn, self.cfg, "2026-09-15", "2026-09-16", verbose=False)
         self.assertFalse(info["ok"])
         self.assertIn("接口挂了", str(info["message"]))
@@ -118,12 +118,30 @@ class CollectionTests(unittest.TestCase):
             "name": "中兴通讯", "close": 32.37, "pct_chg": -10.04, "net_buy": 1.5e8,
             "buy_amount": 3e8, "sell_amount": 1.5e8, "turnover": 5e8, "net_ratio": 4.53,
         }]
-        with mock.patch.object(tasks, "_source_for", return_value=good):
+        with mock.patch.object(tasks, "_all_sources_for", return_value=[good]):
             info = tasks.collect_lhb(self.conn, self.cfg, "2026-09-15", "2026-09-16", verbose=False)
         self.assertTrue(info["ok"])
         row = db.query_one(self.conn, "SELECT code, net_buy, reason FROM lhb")
         self.assertEqual(row["code"], "SZ000063")
         self.assertAlmostEqual(row["net_buy"], 1.5e8)
+
+    def test_lhb_merges_all_sources(self):
+        """龙虎榜要问遍所有源：沪深是两个交易所分别披露的，只挑一个等于丢一半市场。"""
+        shanghai, shenzhen = mock.Mock(), mock.Mock()
+        shanghai.name, shenzhen.name = "shanghai", "shenzhen"
+        shanghai.lhb.return_value = [{
+            "trade_date": "2026-09-15", "code": "SH600519", "reason": "沪市原因",
+            "name": "贵州茅台", "net_buy": 1.0, "turnover": 2.0,
+        }]
+        shenzhen.lhb.return_value = [{
+            "trade_date": "2026-09-15", "code": "SZ000002", "reason": "深市原因",
+            "name": "万科A", "net_buy": 3.0, "turnover": 4.0,
+        }]
+        with mock.patch.object(tasks, "_all_sources_for", return_value=[shanghai, shenzhen]):
+            info = tasks.collect_lhb(self.conn, self.cfg, "2026-09-15", "2026-09-16", verbose=False)
+        self.assertEqual(info["rows"], 2)
+        codes = {row["code"] for row in db.query(self.conn, "SELECT code FROM lhb")}
+        self.assertEqual(codes, {"SH600519", "SZ000002"})
 
 
 if __name__ == "__main__":

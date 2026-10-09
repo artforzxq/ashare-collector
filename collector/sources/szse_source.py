@@ -28,6 +28,22 @@ from .base import BaseSource, DataSourceError
 from . import split_code
 
 REPORT_URL = "https://fund.szse.cn/api/report/ShowReport/data"
+# 两融与龙虎榜在 www 域（不是 fund 域），报表接口的写法一样，前缀不同
+WWW_REPORT_URL = "https://www.szse.cn/api/report/ShowReport/data"
+MARGIN_REFERER = "https://www.szse.cn/disclosure/margin/object/index.html"
+LHB_REFERER = "https://www.szse.cn/disclosure/supervision/dealinfo/index.html"
+# 融资融券披露是 T+1：今天查不到就往前找这么多个自然日
+MARGIN_LOOKBACK_DAYS = 10
+# 龙虎榜明细要逐只问（一次请求给买卖五席位），一天几十只；超过这个数就只写汇总
+LHB_DETAIL_LIMIT = 80
+WWW_HEADERS = {
+    "Referer": MARGIN_REFERER,
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    ),
+}
+YI = 100_000_000          # 深交所汇总表的金额单位是**亿元**（实测深市融资余额 12,358.98 亿）
 HEADERS = {
     "Referer": "https://fund.szse.cn/marketdata/fundslist/index.html",
     "User-Agent": (
@@ -83,9 +99,36 @@ def parse_nav(payload: dict) -> tuple[str | None, float | None]:
     return None, None
 
 
+def _number(value):
+    """深交所的数字带千分位，也可能带单位文字（如 '5,158,052,404 元'）。"""
+    text = str(value or "").strip().split(" ")[0].replace(",", "")
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scale(value) -> float | None:
+    """汇总表的金额单位是亿元 → 元。"""
+    number = _number(value)
+    return round(number * YI, 2) if number is not None else None
+
+
+def _amount(value) -> float | None:
+    """汇总表里的成交金额同样是亿元。"""
+    return _scale(value)
+
+
+def _clean(text) -> str:
+    """深交所的名称里带 &nbsp; 和全角空格。"""
+    import html
+
+    return re.sub(r"\s+", "", html.unescape(str(text or ""))).replace("\u3000", "")
+
+
 class SzseSource(BaseSource):
     name = "szse"
-    capabilities = {"etf_shares"}
+    capabilities = {"etf_shares", "margin", "lhb"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -119,6 +162,153 @@ class SzseSource(BaseSource):
         if isinstance(data, list) and data:
             return data[0] or {}
         return {}
+
+    def _www_get(self, params: dict, referer: str) -> list:
+        """www.szse.cn 的报表接口：返回**整段**（不取 data[0]），因为有些报表是多段。"""
+        url = WWW_REPORT_URL + "?" + urllib.parse.urlencode(params)
+        request = urllib.request.Request(url, headers={**WWW_HEADERS, "Referer": referer})
+        self._throttle()
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            raise DataSourceError(f"深交所返回 HTTP {exc.code}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise DataSourceError(f"连不上深交所：{exc}") from exc
+        except ValueError as exc:
+            raise DataSourceError(f"深交所返回的不是 JSON：{exc}") from exc
+        return data if isinstance(data, list) else []
+
+    # ---------------- 融资融券（交易所官方，沪深分开披露） ----------------
+
+    def margin(self, trade_date: str) -> list[dict]:
+        """深市融资融券**汇总**（一个交易日一行）。
+
+        用的是报表的 tab1「融资融券交易总量」，**不带 TABKEY** 时第一段就是它，
+        一个请求拿一天（实测深市 2026-09-30：融资余额 12,358.98 亿）。
+        注意 tab1 与 tab2 的单位不一样：汇总表全是**亿元**，明细表里融券余额是万元——
+        我们只取汇总表，所以统一乘 1e8。
+
+        披露是 T+1：当天问不到就往前找（最多 MARGIN_LOOKBACK_DAYS 天），
+        找到哪天就在 data_date 里记哪天——不拿旧数据冒充当天。
+        """
+        from datetime import datetime, timedelta
+
+        fetched = datetime.now().strftime("%Y-%m-%d")
+        for offset in range(MARGIN_LOOKBACK_DAYS):
+            day = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=offset)).strftime("%Y-%m-%d")
+            parts = self._www_get(
+                {"SHOWTYPE": "JSON", "CATALOGID": "1837_xxpl", "txtDate": day, "tab1PAGENO": 1},
+                MARGIN_REFERER)
+            summary = next((part for part in parts if (part.get("metadata") or {}).get("tabkey") == "tab1"), None)
+            rows = (summary or {}).get("data") or []
+            if not rows:
+                continue
+            item = rows[0]
+            return [{
+                "trade_date": trade_date,
+                "market": "SZ",
+                "data_date": day,
+                "fetched_date": fetched,
+                "financing_balance": _scale(item.get("jrrzye")),
+                "securities_lending": _scale(item.get("jrrjye")),
+                "total": _scale(item.get("jrrzrjye")),
+                # 与 akshare 那条口径保持一致：这个字段存的是**融资买入额**
+                "net_buy": _scale(item.get("jrrzmr")),
+                "source": self.name,
+            }]
+        return []
+
+    # ---------------- 龙虎榜（交易所官方，含营业部席位） ----------------
+
+    def lhb(self, start: str, end: str) -> list[dict]:
+        """深市龙虎榜：先用汇总表拿到上榜名单，再逐只问买卖席位算出净买额。
+
+        为什么不只用汇总表：汇总表只有"谁上榜、因为什么、成交多少"，
+        没有买卖金额——而龙虎榜的信息量恰恰在净买额上（机构/游资是买还是卖）。
+        席位明细接口一次给买卖各五席位，一只票一个请求。
+        超过 LHB_DETAIL_LIMIT 只时只写汇总（净买额留空），并在日志里说明。
+        """
+        from datetime import datetime, timedelta
+
+        rows: list[dict] = []
+        cursor = datetime.strptime(start, "%Y-%m-%d")
+        last = datetime.strptime(end, "%Y-%m-%d")
+        while cursor <= last:
+            day = cursor.strftime("%Y-%m-%d")
+            cursor += timedelta(days=1)
+            listed = self._lhb_day(day)
+            if not listed:
+                continue
+            detailed = 0
+            for item in listed:
+                symbol = str(item.get("zqdm") or "").strip()
+                reason = _clean(item.get("plyy")) or "上榜"
+                row = {
+                    "trade_date": day,
+                    "code": f"SZ{symbol}",
+                    "name": _clean(item.get("zqjc")),
+                    "reason": reason,
+                    "close": None,
+                    "pct_chg": None,
+                    "net_buy": None,
+                    "buy_amount": None,
+                    "sell_amount": None,
+                    "turnover": _amount(item.get("cjje")),      # 汇总表这里是**亿元**
+                    "net_ratio": None,
+                    "source": self.name,
+                }
+                if detailed < LHB_DETAIL_LIMIT:
+                    seats = self._lhb_seats(day, symbol, item.get("bz"))
+                    if seats:
+                        buy = sum(v for kind, v in seats if kind == "买")
+                        sell = sum(v for kind, v in seats if kind == "卖")
+                        row.update({"buy_amount": buy, "sell_amount": sell, "net_buy": buy - sell})
+                        detailed += 1
+                rows.append(row)
+        return rows
+
+    def _lhb_day(self, day: str) -> list[dict]:
+        """某一天的上榜名单（分页翻完）。"""
+        items: list[dict] = []
+        page = 1
+        while page <= 20:                                   # 保险丝：一天最多翻 20 页
+            parts = self._www_get(
+                {"SHOWTYPE": "JSON", "CATALOGID": "1842_xxpl", "TABKEY": "tab1",
+                 "txtStart": day, "txtEnd": day, "random": "0.9", "PAGENO": page},
+                LHB_REFERER)
+            part = (parts[0] if parts else {}) or {}
+            rows = part.get("data") or []
+            items.extend(rows)
+            meta = part.get("metadata") or {}
+            if page >= int(meta.get("pagecount") or 1) or not rows:
+                break
+            page += 1
+        return items
+
+    def _lhb_seats(self, day: str, symbol: str, link: str | None) -> list[tuple[str, float]]:
+        """一只票当天买卖席位金额。失败就当没有（不因为一只票拖垮整天的龙虎榜）。"""
+        zb = "0902"
+        if link:
+            found = re.search(r"ZBDM=(\d+)", str(link))
+            if found:
+                zb = found.group(1)
+        try:
+            parts = self._www_get(
+                {"SHOWTYPE": "JSON", "CATALOGID": "1842_detal", "TABKEY": "tab1,tab2",
+                 "DQRQ": day, "ZQDM": symbol, "ZBDM": zb},
+                LHB_REFERER)
+        except DataSourceError:
+            return []
+        pairs: list[tuple[str, float]] = []
+        for part in parts:
+            for item in (part.get("data") or []):
+                label = str(item.get("mmlb") or "")
+                if label.startswith("买"):
+                    pairs.append(("买", _number(item.get("mrje")) or 0.0))
+                elif label.startswith("卖"):
+                    pairs.append(("卖", _number(item.get("mcje")) or 0.0))
+        return pairs
 
     def etf_shares(self, codes, trade_date: str) -> list[dict]:
         """深市 ETF 的份额 + 净值。沪市不归深交所管，直接跳过。"""
