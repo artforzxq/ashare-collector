@@ -1260,3 +1260,19 @@ macOS 上用 `macos/` 里同编号的 `.command`（双击即可），Windows 用
 5. **改权重或规则后必须更新 `project.feature_version`**，否则历史信号无法解释。
 6. **所有写入按主键 upsert**，任何任务都能全量重跑而不产生重复数据（仲裁日志也已幂等）。
 7. **测试自带输入**：测试不许依赖 `config.yaml` 里的活配置（观察池是用户会改的）。
+
+## 跑测试
+
+```bash
+python run_tests.py                                   # 全量：只报失败 + 一行汇总
+python run_tests.py -v                                # 全量：逐条打印（五百多个用例，700 多行）
+python run_tests.py tests/test_risk.py                # 只跑一个文件
+python run_tests.py tests.test_risk.RiskAssessTests   # 只跑一个类
+```
+
+默认安静是刻意的：逐条输出里 99% 是 "ok"，在终端里翻不到重点，由 AI 助手执行时还会白白
+吃掉两万 token 左右的上下文；失败信息一条都不会少。全量约 3 分钟。
+
+**给 AI 助手的项目须知在 [`AGENTS.md`](AGENTS.md)**：硬约束、常用命令、
+"日线 ≠ 结论"这类容易搞混的地方、反复踩到的坑，都压缩成一份放在仓库根目录——
+新会话读那一份就够，不必把整段历史带进来。
