@@ -378,7 +378,12 @@ def cmd_analyze(args) -> int:
 def cmd_daily(args) -> int:
     cfg = _prepare(args)
     conn = _connect(cfg)
-    summary = tasks.run_daily(conn, cfg, trade_date=args.date, verbose=not args.quiet)
+    if getattr(args, "offline", False):
+        print("离线重算：只用本地日线重算特征 / 关键带 / 风险 / 提醒——不联网、不抓数、不写快照。")
+        print("（日线得先有：跑 18-全市场同步，或页面上的快照）")
+        print("")
+    summary = tasks.run_daily(conn, cfg, trade_date=args.date, verbose=not args.quiet,
+                              offline=getattr(args, "offline", False))
     print("")
     print(report_mod.daily_report(conn, cfg, summary["trade_date"]))
     conn.close()
@@ -1077,6 +1082,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     daily = sub.add_parser("daily", help="跑一次日终任务")
     daily.add_argument("--date", help="交易日 YYYY-MM-DD")
+    daily.add_argument("--offline", action="store_true",
+                       help="离线重算：只用本地日线重算特征/关键带/风险/提醒，不联网")
     daily.add_argument("--db", help="数据库路径")
     daily.add_argument("--quiet", action="store_true")
     daily.set_defaults(func=cmd_daily)

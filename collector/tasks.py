@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from . import (breadth as breadth_mod, candles as candles_mod, db, features as features_mod,
-               intraday as intraday_mod, market_time, newstock as newstock_mod,
+               flow as flow_mod, intraday as intraday_mod, market_time, newstock as newstock_mod,
                regime as regime_mod,
                review as review_mod, risk as risk_mod,
                screen as screen_mod, support as support_mod, validate, warehouse)
@@ -129,6 +129,27 @@ def _source_pool(cfg: dict) -> list:
     return pool
 
 
+def _last_local_trade_date(conn, cfg: dict) -> str:
+    """离线重算用哪一天：观察池里最后一根**完整**日线的日期。
+
+    两条讲究：
+      1. 只看观察池。全市场里可能已经有人（页面快照、手动抓数）写进了当天的**半根**日线，
+         拿它当交易日会把半根线的结论写进特征表；
+      2. 收盘前不用今天的。哪怕池子里已经有了今天这根（盘中抓的），它也是半根——
+         所以未收盘时退回"今天之前"的最后一根。
+    """
+    codes = [item["code"] for item in watchlist_codes(cfg)]
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not codes:
+        return today
+    marks = ",".join("?" for _ in codes)
+    cutoff = " AND trade_date < ?" if market_time.describe(conn) != "已收盘" else ""
+    params = tuple(codes) + ((today,) if cutoff else ())
+    row = db.query_one(
+        conn, f"SELECT MAX(trade_date) AS d FROM bars_daily WHERE code IN ({marks}){cutoff}", params)
+    return (row["d"] if row and row["d"] else None) or today
+
+
 def _source_for(pool: list, capability: str):
     """挑第一个声明支持该能力的数据源，都不支持就返回 None。
 
@@ -154,16 +175,36 @@ def _all_sources_for(pool: list, capability: str) -> list:
 # ---------- 日终任务 ----------
 
 def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int = 460,
-              verbose: bool = True, allow_non_trading: bool = False) -> dict:
+              verbose: bool = True, allow_non_trading: bool = False,
+              offline: bool = False) -> dict:
+    """日终任务：抓当日行情 → 校验 → 特征与状态 → 关键带 → 仲裁 → 提醒。
+
+    `offline=True` 是**只用本地日线重算**：不联网、不抓数、不写快照、不更新日历与份额，
+    只把特征 / 关键带 / 风险层 / 提醒这几步重跑一遍。
+
+    为什么需要这个模式：日线（`18-全市场同步` 或页面快照）和"结论"是两件事——
+    特征、关键带、提醒都是日终任务算出来的。于是会出现一种很难解释的状态：
+    **日线已经到 10-08 了，页面上却全是横线**（因为那一天的特征还没算）。
+    以前唯一的办法是联网再跑一次日终，而盘中跑会拿到半根日线；有了离线重算，
+    "同步补完日线、但还没收盘/不想再抓一遍"的时候也能把结论补齐。
+    """
     registry = FactorRegistry(cfg.get("factors", []), feature_version(cfg))
-    primary = build_source(cfg["sources"]["primary"], cfg)
-    backup = build_source(cfg["sources"]["backup"], cfg)
-    pool = _source_pool(cfg)
-    trade_date = resolve_trade_date(primary, cfg, trade_date, conn=conn)
+    if offline:
+        primary = backup = None
+        pool: list = []
+        trade_date = trade_date or _last_local_trade_date(conn, cfg)
+    else:
+        primary = build_source(cfg["sources"]["primary"], cfg)
+        backup = build_source(cfg["sources"]["backup"], cfg)
+        pool = _source_pool(cfg)
+        trade_date = resolve_trade_date(primary, cfg, trade_date, conn=conn)
     start = (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=history_days)).strftime("%Y-%m-%d")
 
     summary = {"trade_date": trade_date, "codes": {}, "breadth": None, "alerts": [], "issues": []}
-    _log(f"[1/7] 交易日 {trade_date}，主源 {primary.name}，备份源 {backup.name}", verbose)
+    if offline:
+        _log(f"[1/7] 离线重算：交易日 {trade_date}（只用本地日线，不联网）", verbose)
+    else:
+        _log(f"[1/7] 交易日 {trade_date}，主源 {primary.name}，备份源 {backup.name}", verbose)
 
     # 前置闸门：非交易日不跑日终。
     # 上一道闸门（resolve_trade_date）尽量给出正确的交易日，但**兜底出来的日期必须再验一次**——
@@ -184,7 +225,8 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
     # 盘中跑日终会拿到"半根日线"：状态机、关键带、提醒全都建立在一个没收盘的价上。
     # 数据会在收盘后重跑时被覆盖（按主键 upsert），但结论得等人重跑一次，所以这里要说清楚。
     session = market_time.describe(conn)
-    if session in ("交易中", "午休"):
+    # 只有"算的正是今天"才提醒半根线；离线重算算的是上一个已收盘的交易日，不该报这个。
+    if session in ("交易中", "午休") and trade_date >= datetime.now().strftime("%Y-%m-%d"):
         summary["issues"].append("交易时段运行：当日日线未收盘，结论是临时的")
         _log(f"      ! 现在是「{session}」，今天的日线还没收盘——"
              "跑出来的状态和关键带是临时的，收盘后请再跑一次", verbose)
@@ -217,10 +259,13 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
         ["code"],
     )
 
-    _log("[2/7] 拉取日线并做双源交叉校验", verbose)
     missing: list[str] = []
     all_conflicts: list[dict] = []
-    for item in items:
+    if offline:
+        _log("[2/7] 离线重算：跳过抓数与交叉校验，日线用库里已有的", verbose)
+    else:
+        _log("[2/7] 拉取日线并做双源交叉校验", verbose)
+    for item in ([] if offline else items):
         code, kind = item["code"], item["type"]
         started = time.time()
         primary_rows = _fetch(primary, code, start, trade_date, kind, summary)
@@ -279,15 +324,21 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
     summary["missing_grade"] = level
 
     _log("[3/7] 计算市场广度", verbose)
-    summary["breadth"] = _collect_breadth(conn, _source_for(pool, "market_snapshot"), cfg, trade_date, verbose)
-    _collect_market_snapshot_bars(conn, cfg, trade_date, verbose)
+    # 广度本来就有"用本地 K 线自己数"这条路，离线模式下直接走它（不试快照）。
+    summary["breadth"] = _collect_breadth(
+        conn, None if offline else _source_for(pool, "market_snapshot"), cfg, trade_date, verbose)
+    if not offline:
+        _collect_market_snapshot_bars(conn, cfg, trade_date, verbose)
 
-    _log("[4/7] 采集交易日历、ETF 份额与杠杆资金", verbose)
-    _collect_calendar(conn, _source_for(pool, "trade_calendar"), cfg, trade_date, verbose)
-    # ETF 份额要**问遍所有能提供它的源**：上交所管沪市、深交所管深市，
-    # 一个源覆盖不了两边的票，只挑一个的话另一半永远是空的。
-    _collect_etf_shares(conn, _all_sources_for(pool, "etf_shares"), cfg, trade_date, verbose)
-    _collect_margin(conn, _all_sources_for(pool, "margin"), trade_date, verbose)
+    if offline:
+        _log("[4/7] 离线重算：跳过交易日历 / ETF 份额 / 两融（这几样要用库里已有的）", verbose)
+    else:
+        _log("[4/7] 采集交易日历、ETF 份额与杠杆资金", verbose)
+        _collect_calendar(conn, _source_for(pool, "trade_calendar"), cfg, trade_date, verbose)
+        # ETF 份额要**问遍所有能提供它的源**：上交所管沪市、深交所管深市，
+        # 一个源覆盖不了两边的票，只挑一个的话另一半永远是空的。
+        _collect_etf_shares(conn, _all_sources_for(pool, "etf_shares"), cfg, trade_date, verbose)
+        _collect_margin(conn, _all_sources_for(pool, "margin"), trade_date, verbose)
 
     _log("[5/7] 计算特征与状态（迟滞 + 确认 + 最短持续期）", verbose)
     state_rows = _compute_features(conn, cfg, registry, trade_date, verbose)
@@ -300,13 +351,16 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
     alerts = _decide(conn, cfg, trade_date, state_rows, bands_by_code, level, summary, verbose)
     # 资金去向落一行（四把尺子 + 集中度）。放在最后：ETF 份额、融资余额、日线都已入库，
     # 这一行才是当天最终的口径；也是"宽基净申购日后面行情好不好"这类问题的唯一数据来源。
-    try:
-        recorded = flow_mod.record(conn, cfg, trade_date)
-        if recorded.get("ok"):
-            _log(f"      资金去向已落库：宽基 {recorded['row']['broad_etf_inflow']} 亿，"
-                 f"集中度 {recorded['row']['top100_pct']}%", verbose)
-    except Exception as exc:
-        _log(f"      ! 资金去向没落库：{type(exc).__name__} {exc}", verbose)
+    # 离线重算跳过它：这一行要 ETF 份额与融资余额，而那两样离线时用的是旧数据，
+    # 写出来的行会把"上周的申赎"记到今天——宁可空着，也不写一个混日期的数。
+    if not offline:
+        try:
+            recorded = flow_mod.record(conn, cfg, trade_date)
+            if recorded.get("ok"):
+                _log(f"      资金去向已落库：宽基 {recorded['row']['broad_etf_inflow']} 亿，"
+                     f"集中度 {recorded['row']['top100_pct']}%", verbose)
+        except Exception as exc:
+            _log(f"      ! 资金去向没落库：{type(exc).__name__} {exc}", verbose)
     summary["alerts"] = alerts
 
     # 顺手回填历史提醒的实际表现（复盘要用），失败不影响当日流程
@@ -315,11 +369,13 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
     except Exception as exc:
         _log(f"      ! 回填提醒表现失败：{exc}", verbose)
     # 结构化情绪：龙虎榜（当日）+ 资金流（观察池）。失败不影响当日流程。
-    try:
-        collect_lhb(conn, cfg, trade_date, trade_date, verbose)
-        collect_fund_flow(conn, cfg, verbose=verbose)
-    except Exception as exc:
-        _log(f"      ! 情绪数据采集失败：{exc}", verbose)
+    # 离线重算跳过：这两样都要联网，而它们和"特征/关键带/提醒"没有依赖关系。
+    if not offline:
+        try:
+            collect_lhb(conn, cfg, trade_date, trade_date, verbose)
+            collect_fund_flow(conn, cfg, verbose=verbose)
+        except Exception as exc:
+            _log(f"      ! 情绪数据采集失败：{exc}", verbose)
     # 筛选结果也要回填：不然只能回答"筛出来了什么"，回答不了"筛出来的后来怎么样"
     try:
         screen_mod.backfill_outcomes(conn, verbose=verbose)
@@ -327,8 +383,10 @@ def run_daily(conn, cfg: dict, trade_date: str | None = None, history_days: int 
         _log(f"      ! 回填筛选结果失败：{exc}", verbose)
     # 新股/次新：当日清单要更新，推送里那一段和页面都读它。这张表很小，算一次不到一秒。
     try:
-        # 顺手补一批真实上市日（每轮限量，免得日终被几千次请求拖住；反复跑就会补齐）
-        newstock_mod.sync_ipo_dates(conn, cfg, limit=_ipo_per_run(cfg), verbose=verbose)
+        # 顺手补一批真实上市日（每轮限量，免得日终被几千次请求拖住；反复跑就会补齐）。
+        # 这一批走 baostock、是联网的，离线重算时只刷新本地那张表。
+        if not offline:
+            newstock_mod.sync_ipo_dates(conn, cfg, limit=_ipo_per_run(cfg), verbose=verbose)
         newstock_mod.refresh(conn, cfg, verbose=verbose)
     except Exception as exc:
         _log(f"      ! 新股清单刷新失败：{exc}", verbose)

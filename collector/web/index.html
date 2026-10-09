@@ -393,7 +393,8 @@ canvas{display:block;width:100%}
           <div class="metric" data-help="stop"><span>止损</span><b id="cStop">—</b></div>
           <div class="metric" data-help="candle"><span>形态</span><b id="cCandle">—</b></div>
         </div>
-        <div class="hint" id="riskNote" hidden></div>
+      <div class="hint" id="riskNote" hidden></div>
+      <div class="hint" id="featureHint" hidden></div>
       </div>
 
       <div class="toolbar">
@@ -1123,7 +1124,6 @@ async function loadKline(){
 
 function renderHeader(){
   const d = state.data, bars = d.bars, last = bars[bars.length-1];
-  const item = state.items.find(i => i.code === d.code) || {};
   $('title').firstChild.nodeValue = d.code + ' ';
   $('subtitle').textContent = [d.name && d.name !== d.code ? d.name : '', d.type || '', last ? last.trade_date : '无数据']
       .filter(Boolean).join(' · ');
@@ -1133,7 +1133,12 @@ function renderHeader(){
   $('lastPrice').style.color = chg>0 ? C.up : (chg<0 ? C.down : 'var(--text)');
   $('chg').textContent = pct(chg);
   $('chg').style.color = chg>0 ? C.up : (chg<0 ? C.down : 'var(--muted)');
-  const st = last.state || item.state;
+  // 这一天的特征有没有算过：状态与趋势分都是日终任务写进 features_daily 的，
+  // 只要日期对不上就是"还没算"，而不是"算出来是空"。
+  // 以前这里会在特征缺失时**回退显示自选列表里的旧状态**，于是同一排数字混了两个日期
+  // （状态是两周前的，其它全是横线），看着像页面坏了——现在把这件事直接说出来。
+  const hasFeature = last.state !== null && last.state !== undefined;
+  const st = hasFeature ? last.state : null;
   $('cState').textContent = st ? STATE_NAME[st] : '—';
   $('cState').style.color = st==='up'?C.up:(st==='down'?C.down:'var(--text)');
   $('cTrend').textContent = fmt(last.trend_score, 1);
@@ -1147,6 +1152,14 @@ function renderHeader(){
   const note = $('riskNote');
   if (last.risk_note){ note.hidden = false; note.textContent = '风险层结论：' + last.risk_note; }
   else note.hidden = true;
+  const hint = $('featureHint');
+  if (!hasFeature){
+    hint.hidden = false;
+    hint.textContent = `这一天的特征还没算（${last.trade_date} 的日线在库里，但特征/关键带/提醒是日终任务算出来的）。`
+      + '双击 3-每日任务 补齐；收盘前也可以先跑 python run.py daily --offline（只用本地日线，不联网）。';
+  } else {
+    hint.hidden = true;
+  }
 }
 
 /* ---------- K 线绘制 ---------- */
