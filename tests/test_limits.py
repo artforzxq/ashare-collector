@@ -20,6 +20,30 @@ class LimitPctTests(unittest.TestCase):
         self.assertEqual(limits.limit_pct("SZ300001", "ST 创业"), 20.0)
         self.assertEqual(limits.limit_pct("SH688981", "ST 科创"), 20.0)
 
+    def test_star_and_gem_etf_also_use_twenty_percent(self):
+        """ETF 里有两类不是 10%：科创板 ETF（588xxx）、创业板 ETF（159xxx 且简称带"创业板"）。
+
+        证据：2026-07-21 科创50 指数 +10.73%，588000 +11.07%、588200 +14.32%。
+        旧口径按 10% 判，会把真行情当成脏数据丢掉。
+        """
+        self.assertEqual(limits.limit_pct("SH588000", "科创50ETF"), 20.0)
+        self.assertEqual(limits.limit_pct("SH588200", "科创芯片ETF"), 20.0)
+        self.assertEqual(limits.limit_pct("SZ159915", "创业板ETF"), 20.0)
+
+    def test_ordinary_etf_stays_at_ten_percent(self):
+        """159 号段里也有普通 ETF（159919 沪深300ETF），所以 159 必须靠简称来分。"""
+        self.assertEqual(limits.limit_pct("SZ159919", "沪深300ETF"), 10.0)
+        self.assertEqual(limits.limit_pct("SH510500", "中证500ETF"), 10.0)
+        # 不带简称时只能认 588 前缀：159 猜不出来就按普通 ETF 算，宁可保守
+        self.assertEqual(limits.limit_pct("SH588000"), 20.0)
+        self.assertEqual(limits.limit_pct("SZ159915"), 10.0)
+
+    def test_star_etf_eleven_percent_is_not_a_limit_up(self):
+        """+11% 在科创50ETF 上不是封板（20% 才是），这正是旧口径误判的那一天。"""
+        bar = {"close": 1.1107, "pre_close": 1.0}
+        self.assertFalse(limits.at_limit_up(bar, "SH588000", "科创50ETF"))
+        self.assertTrue(limits.at_limit_up({"close": 1.20, "pre_close": 1.0}, "SH588000", "科创50ETF"))
+
 
 class LimitPriceTests(unittest.TestCase):
     def test_rounds_half_up_to_cent(self):

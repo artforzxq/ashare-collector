@@ -8,6 +8,10 @@
   - 涨跌停价 = 前收盘价 ×(1 ± 幅度)，**四舍五入到分**（A 股就是这么定的，
     所以 2 元钱的股票涨停幅度实际是 10% 上下浮动 0.25%，不能拿 9.9% 一刀切）；
   - 幅度按代码前缀判：科创板 688xxx、创业板 30xxxx → 20%，北交所 → 30%，其余 10%；
+  - **ETF 里有两类不是 10%**：上交所科创板 ETF（588xxx）、深交所创业板 ETF
+    （159xxx 且简称带"创业板"）跟标的指数一致，是 20%。2026-07-21 那天
+    科创50指数涨 10.73%、588000 +11.07%、588200 +14.32%，旧口径按 10% 判，
+    把真行情当成了脏数据。
   - ST 从名称里认（库里 instruments.is_st 目前全是 0，但名称带 ST / *ST）。
     主板 ST 是 5%；创业板、科创板的 ST 仍然是 20%。
   - **上市头几天的规则不一样**，这也是最容易把新股数据误判成脏数据的地方：
@@ -29,6 +33,8 @@ LIMIT_ST = 5.0        # 主板 ST
 LIMIT_MAIN_FIRST = 44.0    # 主板新股首日（涨幅，相对发行价）
 LIMIT_MAIN_FIRST_DOWN = 36.0   # 主板新股首日跌幅上限
 NO_LIMIT_DAYS_STAR_GEM = 5     # 创业板、科创板：前 5 个交易日不设涨跌幅
+STAR_ETF_PREFIX = "588"        # 上交所科创板 ETF
+GEM_ETF_PREFIX = "159"         # 深交所创业板 ETF（还要看简称）
 
 
 def is_registration_board(code: str) -> bool:
@@ -36,6 +42,24 @@ def is_registration_board(code: str) -> bool:
     text = (code or "").strip().upper()
     digits = text[2:] if text[:2] in ("SH", "SZ", "BJ") else text
     return digits.startswith("688") or digits.startswith("30")
+
+
+def is_twenty_pct_etf(code: str, name: str | None = None) -> bool:
+    """涨跌幅 20% 的两类 ETF：科创板 ETF、创业板 ETF。
+
+    普通 ETF 是 10%，但这两类的涨跌幅跟标的指数一致，是 20%：
+      · 上交所科创板 ETF：588xxx（588000 科创50、588200 科创芯片…）
+      · 深交所创业板 ETF：159xxx 且简称里带"创业板"（159915 等）；
+        159 号段里也有普通 ETF（如 159919 沪深300ETF，仍是 10%），所以要看简称。
+    ETF 没有"新股前 5 日不设限"，也没有 ST，所以这两类直接给 20%。
+    """
+    text = (code or "").strip().upper()
+    digits = text[2:] if text[:2] in ("SH", "SZ", "BJ") else text
+    if digits.startswith(STAR_ETF_PREFIX):
+        return True
+    if digits.startswith(GEM_ETF_PREFIX) and name and "创业板" in name:
+        return True
+    return False
 
 
 def exchange(code: str) -> str:
@@ -68,6 +92,8 @@ def limit_pct(code: str, name: str | None = None, trading_days: int | None = Non
         if days == 1:
             return None                     # 北交所新股首日不设限
         return LIMIT_BJ
+    if is_twenty_pct_etf(code, name):       # 科创板 ETF / 创业板 ETF
+        return LIMIT_STAR
     if is_registration_board(code):         # 科创板 / 创业板
         if days is not None and days <= NO_LIMIT_DAYS_STAR_GEM:
             return None                     # 前 5 个交易日不设限
