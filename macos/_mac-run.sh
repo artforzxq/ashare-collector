@@ -2,8 +2,11 @@
 # ============================================================
 #  共享启动器（macOS 端）。Windows 端对应文件：win-run.bat
 #  用法：bash _mac-run.sh <步骤> [附加参数]
-#  步骤：setup init-db selftest daily report sources dashboard doctor
-#        tables sql dictionary rebuild auto install-sources shortcut push
+#  步骤：setup init-db rebuild selftest daily report sources doctor
+#        install-sources dashboard tables sql dictionary auto push shortcut
+#        web share review backtest sync shadow screen candidates replay
+#        buckets dig pack
+#  改这里的时候顺手对一遍 windows/win-run.bat 的 :dispatch，两边步骤名必须一致。
 #
 #  运行环境默认放在 ~/ashare-env，刻意不放进项目文件夹：
 #  虚拟环境里有几百兆的 mac 专用文件，同步到 Windows 上只会变成垃圾。
@@ -135,6 +138,9 @@ usage() {
   23-推送简报      把当天简报推到手机
   24-自动运行      每个工作日收盘后自动跑（开关）
   25-环境体检      Python / 依赖 / 数据库 / 配置 一次看全
+  26-分档研究      全市场按一个维度分档，看之后 20 天怎么样
+  27-单票体检      一只票在各层的说法按决策顺序摆一次
+  28-离线重算      只用本地日线重算结论（不联网，盘中也能跑）
   10-创建桌面快捷方式
 
 命令行用法：bash macos/_mac-run.sh <步骤> [参数]
@@ -142,9 +148,10 @@ usage() {
         bash macos/_mac-run.sh doctor
         bash macos/_mac-run.sh push --test
 
-可用步骤：setup init-db selftest daily report sources dashboard doctor
-          tables sql dictionary rebuild auto install-sources shortcut push
-          web share review backtest sync shadow screen candidates replay pack
+可用步骤：setup init-db rebuild selftest daily report sources doctor
+          install-sources dashboard tables sql dictionary auto push shortcut
+          web share review backtest sync shadow screen candidates replay
+          buckets dig pack
 TIP
 }
 
@@ -204,7 +211,13 @@ case "$STEP" in
   install-sources)
     ensure_python || { pause; exit 1; }
     echo "=== 安装/升级免费数据源 ==="
-    "$PY" -m pip install --quiet --upgrade adata akshare
+    # jsonpath 只发源码包，而那份包的 setup.py 会 import 自己，pip 的隔离构建里必然失败；
+    # 仓库 tools/vendor 里放了一个只改打包脚本的 wheel，直装失败时带上它重试。
+    # （Windows 端 :install_sources 是同一招，改一边记得改另一边）
+    if ! "$PY" -m pip install --quiet --upgrade adata akshare; then
+      echo "  [!] 直装失败，改用仓库自带的 jsonpath wheel 重试 …"
+      "$PY" -m pip install --quiet --upgrade "tools/vendor/jsonpath-0.82.2-py3-none-any.whl" adata akshare
+    fi
     echo
     echo "=== 探测可用性 ==="
     run_py sources
@@ -332,6 +345,7 @@ TIP
     if [ -z "${1:-}" ]; then
       printf "要体检哪只票？输入代码（600519 或 SH600519）："
       read -r code
+      [ -z "$code" ] && { echo "没输入代码，先退出。"; exit 1; }
       set -- "$code"
     fi
     run_py dig "$@"
