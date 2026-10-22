@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import db
@@ -130,6 +131,34 @@ def check_database(db_path: str | Path, schema_path: str | Path) -> dict:
                 total = float(row["total"] or 0)
                 if total > 5e12 or total < 2e11:
                     report["amount_scale"].append((row["d"], round(total / 1e12, 2)))
+        # 行业标签是板块结论的地基：覆盖率不够就闭嘴，太旧就提醒重拉。
+        if "instruments" in tables:
+            row = conn.execute(
+                """SELECT
+                     SUM(CASE WHEN type='stock' OR type IS NULL THEN 1 ELSE 0 END) AS stocks,
+                     SUM(CASE WHEN (type='stock' OR type IS NULL)
+                                   AND industry IS NOT NULL AND industry <> ''
+                              THEN 1 ELSE 0 END) AS tagged,
+                     COUNT(DISTINCT CASE WHEN (type='stock' OR type IS NULL)
+                                              AND industry IS NOT NULL AND industry <> ''
+                                         THEN industry END) AS industries,
+                     MAX(industry_updated) AS newest
+                   FROM instruments"""
+            ).fetchone()
+            stocks = int(row["stocks"] or 0)
+            tagged = int(row["tagged"] or 0)
+            newest = row["newest"]
+            age = None
+            if newest:
+                try:
+                    age = (date.today() - date.fromisoformat(newest)).days
+                except ValueError:
+                    age = None
+            report["industry"] = {
+                "stocks": stocks, "tagged": tagged, "industries": int(row["industries"] or 0),
+                "coverage": round(tagged / stocks * 100, 1) if stocks else 0.0,
+                "newest": newest, "age_days": age,
+            }
         conn.close()
     except sqlite3.DatabaseError as exc:
         report["note"] = f"库打不开：{exc}（可能损坏，或正被别的工具锁着）"
@@ -362,6 +391,19 @@ def render(result: dict) -> str:
                      f"　最新日线 {database.get('latest_bar') or '—'}")
         if database["rows"]:
             lines.append("      行数：" + "　".join(f"{k} {v:,}" for k, v in database["rows"].items()))
+        industry = database.get("industry")
+        if industry and industry.get("stocks"):
+            age = industry.get("age_days")
+            lines.append(f"      行业标签：{industry['tagged']:,}/{industry['stocks']:,}"
+                         f"（{industry['coverage']:.1f}%）、{industry['industries']} 个行业"
+                         f"；最新 {industry.get('newest') or '—'}"
+                         + (f"（{age} 天前）" if age is not None else ""))
+            if industry["coverage"] < 80:
+                lines.append("      → 覆盖不足 80%，板块/主线结论会关闭；"
+                             "跑 python run.py industries --sync")
+            elif age is not None and age > 30:
+                lines.append(f"      → 行业标签已 {age} 天没更新；"
+                             "跑 python run.py industries --sync 重拉一次")
     if database["note"]:
         lines.append(f"      → {database['note']}")
 

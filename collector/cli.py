@@ -13,7 +13,9 @@ from pathlib import Path
 from . import (
     analysis as analysis_mod,
     backtest as backtest_mod,
+    broker as broker_mod,
     breadth as breadth_mod,
+    calibration as calibration_mod,
     candidates as candidates_mod,
     dashboard as dashboard_mod,
     dig as dig_mod,
@@ -21,8 +23,12 @@ from . import (
     db,
     dictionary as dictionary_mod,
     doctor as doctor_mod,
+    evidence as evidence_mod,
     flow as flow_mod,
     intraday as intraday_mod,
+    industries as industries_mod,
+    journal as journal_mod,
+    mainline as mainline_mod,
     market_time,
     newstock as newstock_mod,
     notify,
@@ -32,11 +38,13 @@ from . import (
     report as report_mod,
     review as review_mod,
     screen as screen_mod,
+    sentiment as sentiment_mod,
     server as server_mod,
     share as share_mod,
     tasks,
     support as support_mod,
     warehouse as warehouse_mod,
+    weekly as weekly_mod,
 )
 from .config import load_config, use_fixture_sources, watchlist_codes
 from .sources import SOURCE_REGISTRY, build_source
@@ -534,8 +542,8 @@ def cmd_review(args) -> int:
         if screen_info["screen"]:
             print(f"回填：筛选结果 {screen_info['screen']} 条")
     print("")
-    print(review_mod.report(conn))
-    screen_text = screen_mod.performance_report(conn)
+    print(review_mod.report(conn, cfg=cfg))
+    screen_text = screen_mod.performance_report(conn, cfg=cfg)
     if screen_text:
         print(screen_text)
     conn.close()
@@ -997,6 +1005,218 @@ def cmd_candidates(args) -> int:
     return 0 if result.get("ok") else 1
 
 
+def cmd_journal(args) -> int:
+    """交易账本：开仓冻结假设、平仓复盘、组合在险。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    action = getattr(args, "journal_cmd", None) or "risk"
+    try:
+        if action == "open":
+            result = journal_mod.open_trade(
+                conn, cfg,
+                code=args.code,
+                name=args.name,
+                framework=args.framework,
+                theme=args.theme,
+                opened_on=args.date,
+                entry_price=args.entry,
+                stop_price=args.stop,
+                target_price=args.target,
+                shares=args.shares,
+                account_equity=args.equity,
+                risk_amount=args.risk,
+                thesis=args.thesis,
+                invalidation=args.invalidation,
+                nonconsensus=args.nonconsensus,
+                exit_plan=args.exit_plan,
+                alert_id=args.alert_id,
+            )
+            trade = result["trade"]
+            print(f"已记录 #{result['id']} {trade['code']}（{trade['framework']}）"
+                  f"入场 {trade['entry_price']:g}，失效 {trade.get('stop_price') or '—'}")
+            if trade.get("risk_pct") is not None:
+                print(f"  单笔风险 {trade['risk_pct']:.2f}%"
+                      + (f"，仓位 {trade['position_pct']:.1f}%" if trade.get("position_pct") is not None else "")
+                      + (f"，赔率 {trade['reward_risk']:.2f}:1" if trade.get("reward_risk") is not None else ""))
+            for warning in result["warnings"]:
+                print(f"  ⚠ {warning}")
+            print("")
+            print(journal_mod.report(conn, cfg))
+        elif action == "close":
+            discipline = None if args.discipline is None else args.discipline == "yes"
+            trade = journal_mod.close_trade(
+                conn, args.id, exit_price=args.exit, closed_on=args.date,
+                discipline=discipline, alpha_beta=args.alpha_beta, note=args.note, cfg=cfg,
+            )
+            pnl = f"{trade['pnl']:+.2f} 元" if trade.get("pnl") is not None else "—"
+            print(f"已平仓 #{trade['id']} {trade['code']}：出场 {trade['exit_price']:g}，盈亏 {pnl}")
+            print("")
+            print(journal_mod.report(conn, cfg))
+        elif action == "list":
+            rows = journal_mod.list_trades(conn, "closed" if args.all else "open")
+            if not rows:
+                print("没有记录。")
+            for row in rows:
+                state = row.get("closed_on") or "未平"
+                pnl = f"{row['pnl']:+.2f}" if row.get("pnl") is not None else "—"
+                exit_price = (f"{row['exit_price']:>8.3f}" if row.get("exit_price") is not None
+                              else f"{'—':>9}")
+                print(f"#{row['id']:>3} {row['code']:<10} {row['framework']:<9} {state:<10} "
+                      f"入场 {row['entry_price']:>8.3f} 出场 {exit_price} "
+                      f"盈亏 {pnl:>10}  {row['thesis']}")
+        else:
+            print(journal_mod.report(conn, cfg))
+    except journal_mod.JournalError as exc:
+        print(f"  {exc}")
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_sentiment(args) -> int:
+    """情绪阶段：影子标签（冰点/启动/发酵/高潮/退潮），不驱动仓位。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        if getattr(args, "backfill", False):
+            sentiment_mod.backfill(conn, cfg, verbose=True)
+        data = sentiment_mod.latest(conn, cfg)
+        if not data:
+            print("还没有市场广度数据。先跑 python run.py breadth 或 3-每日任务。")
+            return 0
+        print(f"{data['trade_date']}  情绪阶段：{data.get('sentiment_stage') or '未定'}")
+        if data.get("sentiment_note"):
+            print(f"  {data['sentiment_note']}")
+        premium = sentiment_mod.latest_available_premium(conn, data.get("trade_date"))
+        if premium:
+            print(f"  最近可算的次日溢价（{premium['trade_date']}）："
+                  f"连板 {premium['limit_up_next_avg']:+.2f}%（{premium['limit_up_next_count']} 只）"
+                  + (f"，首板 {premium['first_board_next_avg']:+.2f}%"
+                     if premium.get("first_board_next_avg") is not None else ""))
+        print("  这是影子标签：只回答'该更保守还是更积极'，不进风险层，不产生选股信号。")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_industries(args) -> int:
+    """行业分类：同步、导入或查看覆盖率。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        if getattr(args, "sync", False):
+            industries_mod.sync(conn, cfg, verbose=True)
+        if getattr(args, "import_path", None):
+            result = industries_mod.import_csv(conn, args.import_path)
+            print(f"已导入 {result['written']} 只（{result['source']}）")
+        print(industries_mod.report(conn))
+    except industries_mod.IndustryError as exc:
+        print(f"  {exc}")
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_weekly(args) -> int:
+    """周度环境卡：情绪 + 成交额 + ETF 净申购 + 两融 + 组合在险。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        if getattr(args, "push", False):
+            result = weekly_mod.push_if_changed(
+                conn, cfg, force=getattr(args, "force", False),
+                dry_run=getattr(args, "dry_run", False))
+            if result.get("dry_run"):
+                print(result["content"])
+                print("\n（dry-run：没有真发）")
+            elif result.get("sent"):
+                print("已推送：" + "；".join(result.get("reasons") or []))
+            else:
+                print(result.get("reason") or result.get("result", {}).get("message") or "未推送")
+        else:
+            print(weekly_mod.report(weekly_mod.build(conn, cfg)))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_mainline(args) -> int:
+    """主线识别：价格强度 + 成交占比 + 扩散度 + 持续性。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        result = mainline_mod.build(conn, cfg, trade_date=args.date, top=args.top)
+        print(mainline_mod.report(result))
+    except mainline_mod.MainlineError as exc:
+        print(f"  {exc}")
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_calibrate(args) -> int:
+    """用已回填的 P1 净胜率校 risk.win_rate；默认只打印。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        result = calibration_mod.build(conn, cfg)
+        print(calibration_mod.report(result))
+        if args.write:
+            if result["suggested"] is None:
+                print("  样本不足，拒绝写入。")
+                return 1
+            change = calibration_mod.write_win_rate(args.config, result["suggested"])
+            print(f"  已写入 {args.config}：win_rate {change['old']} → {change['new']}，"
+                  f"feature_version → {change['version']}")
+    except ValueError as exc:
+        print(f"  {exc}")
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_evidence(args) -> int:
+    """样本外检验：情绪阶段与主线四关到底有没有前瞻信息。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        sent = evidence_mod.sentiment_evidence(
+            conn, cfg, horizon=args.horizon, step=args.step)
+        line = evidence_mod.mainline_evidence(
+            conn, cfg, horizon=args.horizon, step=args.step)
+        text = evidence_mod.report(sent, line)
+        print(text)
+        if args.save:
+            path = evidence_mod.save_report(text, cfg["_project_root"])
+            print(f"\n已保存：{path}")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_broker(args) -> int:
+    """券商成交 CSV：导入 + FIFO 对账（不改交易账本）。"""
+    cfg = _prepare(args)
+    conn = _connect(cfg)
+    try:
+        if args.broker_cmd == "import":
+            result = broker_mod.import_csv(conn, args.path, broker=args.broker)
+            print(f"已导入 {result['rows']} 行，新增 {result['new']} 行"
+                  f"（重复 {result['rows'] - result['new']} 行按主键挡住）")
+        data = broker_mod.fifo(conn)
+        print(broker_mod.report(data, broker_mod.reconcile_with_journal(conn)))
+    except broker_mod.BrokerError as exc:
+        print(f"  {exc}")
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_replay(args) -> int:
     """历史重放：把筛选条件放到过去每一天跑一遍，今天就能看到 5 / 20 日的真实表现。
 
@@ -1024,7 +1244,7 @@ def cmd_replay(args) -> int:
         conn, "SELECT DISTINCT trade_date FROM screen_results ORDER BY trade_date")]
     print("  正在算全市场等权基准（同一批日期、同一口径，几十秒）…")
     baseline = screen_mod.equal_weight_baseline(conn, cfg, dates)
-    text = screen_mod.performance_report(conn, baseline=baseline)
+    text = screen_mod.performance_report(conn, baseline=baseline, cfg=cfg)
     print(text if text else "  还没有可回填的结果")
     conn.close()
     return 0
@@ -1294,6 +1514,99 @@ def build_parser() -> argparse.ArgumentParser:
     buckets.add_argument("--no-cross", action="store_true", help="只打单维度分档表")
     buckets.add_argument("--db", help="数据库路径")
     buckets.set_defaults(func=cmd_buckets)
+
+    journal = sub.add_parser("journal", help="交易账本：开仓冻结假设、平仓复盘、组合在险")
+    journal.set_defaults(func=cmd_journal, journal_cmd=None, db=None)
+    jsub = journal.add_subparsers(dest="journal_cmd")
+    jopen = jsub.add_parser("open", help="记录一笔开仓（论点、失效条件、R 必须写清）")
+    jopen.add_argument("code", help="标的代码")
+    jopen.add_argument("--framework", choices=["core", "satellite", "short"], default="short",
+                       help="账本：core 核心 / satellite 卫星 / short 短线")
+    jopen.add_argument("--entry", type=float, required=True, help="入场价")
+    jopen.add_argument("--stop", type=float, help="失效价（做多必须低于入场价）")
+    jopen.add_argument("--target", type=float, help="目标价（只用来算赔率）")
+    jopen.add_argument("--shares", type=float, help="股数/份额")
+    jopen.add_argument("--equity", type=float, help="开仓时总资产（元），用来算 R 和仓位占比")
+    jopen.add_argument("--risk", type=float, help="R：触发止损时的亏损金额（元）")
+    jopen.add_argument("--theme", help="同题材标签（按买入理由填，不按行业填）")
+    jopen.add_argument("--name", help="标的名称（可选）")
+    jopen.add_argument("--date", help="开仓日 YYYY-MM-DD（默认今天）")
+    jopen.add_argument("--thesis", required=True, help="买入论点（一句话）")
+    jopen.add_argument("--invalidation", required=True, help="失效条件：什么事实出现说明我错了")
+    jopen.add_argument("--nonconsensus", help="非共识假设 + 预期验证时点")
+    jopen.add_argument("--exit-plan", help="卖出后的钱去哪（预填）")
+    jopen.add_argument("--alert-id", type=int, help="对应哪条系统提醒")
+    jopen.add_argument("--db", help="数据库路径")
+    jopen.set_defaults(func=cmd_journal, journal_cmd="open")
+
+    jclose = jsub.add_parser("close", help="补平仓结果（开仓字段不会改）")
+    jclose.add_argument("id", type=int, help="账本 id")
+    jclose.add_argument("--exit", type=float, required=True, help="出场价")
+    jclose.add_argument("--date", help="平仓日 YYYY-MM-DD（默认今天）")
+    jclose.add_argument("--discipline", choices=["yes", "no"], help="是否按纪律执行（与盈亏独立）")
+    jclose.add_argument("--alpha-beta", choices=["alpha", "beta", "unknown"], help="赚的是选股能力还是大盘普涨")
+    jclose.add_argument("--note", help="平仓备注")
+    jclose.add_argument("--db", help="数据库路径")
+    jclose.set_defaults(func=cmd_journal, journal_cmd="close")
+
+    jlist = jsub.add_parser("list", help="列账本")
+    jlist.add_argument("--all", action="store_true", help="连已平仓一起列")
+    jlist.add_argument("--db", help="数据库路径")
+    jlist.set_defaults(func=cmd_journal, journal_cmd="list")
+
+    jrisk = jsub.add_parser("risk", help="组合在险：R 合计 + 同题材合并 + 越线告警")
+    jrisk.add_argument("--db", help="数据库路径")
+    jrisk.set_defaults(func=cmd_journal, journal_cmd="risk")
+
+    industries = sub.add_parser("industries", help="行业分类：同步 / 导入 / 查看覆盖率")
+    industries.add_argument("--sync", action="store_true", help="从 baostock 拉证监会行业分类")
+    industries.add_argument("--import", dest="import_path", metavar="CSV",
+                            help="从 CSV 导入（code,industry[,name]；可带表头）")
+    industries.add_argument("--db", help="数据库路径")
+    industries.set_defaults(func=cmd_industries)
+
+    broker = sub.add_parser("broker", help="券商成交 CSV：导入 + FIFO 对账（不改交易账本）")
+    broker.set_defaults(func=cmd_broker, broker_cmd="show")
+    bsub = broker.add_subparsers(dest="broker_cmd")
+    bimport = bsub.add_parser("import", help="导入券商成交 CSV")
+    bimport.add_argument("path", help="CSV 文件路径")
+    bimport.add_argument("--broker", help="券商名称（仅作标签）")
+    bimport.add_argument("--db", help="数据库路径")
+    bimport.set_defaults(func=cmd_broker, broker_cmd="import")
+    bshow = bsub.add_parser("show", help="未平仓、已实现盈亏、与账本差异")
+    bshow.add_argument("--db", help="数据库路径")
+    bshow.set_defaults(func=cmd_broker, broker_cmd="show")
+
+    mainline = sub.add_parser("mainline", help="主线识别：价格强度 + 成交占比 + 扩散度 + 持续性")
+    mainline.add_argument("--date", help="交易日 YYYY-MM-DD（默认最新）")
+    mainline.add_argument("--top", type=int, help="涨幅榜前几算强（默认取配置）")
+    mainline.add_argument("--db", help="数据库路径")
+    mainline.set_defaults(func=cmd_mainline)
+
+    calibrate = sub.add_parser("calibrate", help="胜率校准：P1 提醒的扣成本净胜率 → risk.win_rate")
+    calibrate.add_argument("--write", action="store_true",
+                           help="把建议写回 config.yaml（会自动升 feature_version）")
+    calibrate.add_argument("--db", help="数据库路径")
+    calibrate.set_defaults(func=cmd_calibrate)
+
+    evidence = sub.add_parser("evidence", help="影子标签证据检验：情绪阶段 / 主线四关的前瞻收益")
+    evidence.add_argument("--horizon", type=int, default=20, help="持有多少个交易日（默认 20）")
+    evidence.add_argument("--step", type=int, default=5, help="每隔几个交易日抽样（默认 5）")
+    evidence.add_argument("--save", action="store_true", help="保存到 回测/证据-<日期>.md")
+    evidence.add_argument("--db", help="数据库路径")
+    evidence.set_defaults(func=cmd_evidence)
+
+    sentiment = sub.add_parser("sentiment", help="情绪阶段（影子）：冰点/启动/发酵/高潮/退潮")
+    sentiment.add_argument("--backfill", action="store_true", help="把历史市场广度全部补一遍阶段标签")
+    sentiment.add_argument("--db", help="数据库路径")
+    sentiment.set_defaults(func=cmd_sentiment)
+
+    weekly = sub.add_parser("weekly", help="周度环境卡：情绪 + 成交额 + ETF + 两融 + 组合在险")
+    weekly.add_argument("--push", action="store_true", help="只在阶段/主线变化时推送")
+    weekly.add_argument("--force", action="store_true", help="强制推送一次")
+    weekly.add_argument("--dry-run", action="store_true", help="只打印推送内容，不真发")
+    weekly.add_argument("--db", help="数据库路径")
+    weekly.set_defaults(func=cmd_weekly)
 
     replay = sub.add_parser("replay", help="历史重放：把筛选条件在过去每一天跑一遍，立刻得到 5/20 日真实表现")
     replay.add_argument("--days", type=int, help="重放多少个交易日（默认 120）")

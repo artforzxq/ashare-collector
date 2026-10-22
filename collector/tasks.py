@@ -11,9 +11,11 @@ from . import (breadth as breadth_mod, candles as candles_mod, db, features as f
                flow as flow_mod, intraday as intraday_mod, market_time, newstock as newstock_mod,
                regime as regime_mod,
                review as review_mod, risk as risk_mod,
-               screen as screen_mod, support as support_mod, validate, warehouse)
+               screen as screen_mod, sentiment as sentiment_mod,
+               support as support_mod, validate, warehouse)
 from .names import display_name
-from .alerts import apply_budget, apply_cooldown, build_candidates, persist
+from .alerts import (apply_budget, apply_cooldown, build_candidates, if_then_text,
+                     persist, risk_snapshot)
 from .arbitrate import DecisionContext, arbitrate
 from .config import watchlist_codes
 from .levels import build_levels, nearest_band, neckline_band
@@ -429,8 +431,6 @@ def _collect_breadth(conn, source, cfg: dict, trade_date: str, verbose: bool) ->
             _log("      ! 本地也没有当日 K 线，市场广度跳过", verbose)
             db.log_health(conn, trade_date, "local", "breadth", "failed", 0, 1.0, 0, "本地无当日 K 线")
             return None
-        # 连板高度与炸板家数：纯本地算（要往前数连续涨停，所以单独走一遍）
-        record.update(breadth_mod.board_streaks(conn, [trade_date]).get(trade_date, {}))
         covered = record["up_count"] + record["down_count"] + record["flat_count"]
         db.log_health(conn, trade_date, "local", "breadth", "ok", covered, 0.0, 0, record["source"])
 
@@ -443,10 +443,21 @@ def _collect_breadth(conn, source, cfg: dict, trade_date: str, verbose: bool) ->
         db.log_health(conn, trade_date, record["source"], "breadth", "suspect", covered, 0.0, 0,
                       f"样本只有 {covered} 只，少于 {limit}，未写入")
         return None
+    # 连板/炸板/次日溢价只能从本地日线跨日算；快照那一路没有这些信息，所以两条路都要补。
+    # 次日溢价记在**表现日**这一行：2026-01-06 的 limit_up_next_avg，
+    # 说的是 2026-01-05 收盘涨停的票在 01-06 平均涨了多少。
+    record.update(breadth_mod.board_streaks(conn, [trade_date]).get(trade_date, {}))
     db.upsert_rows(conn, "market_breadth", [record], ["trade_date"])
+    # 情绪阶段：影子标签，只写 market_breadth；risk/alerts 一律不读它。
+    stage = sentiment_mod.update(conn, cfg, trade_date)
+    if stage:
+        record.update({key: stage[key] for key in
+                       ("sentiment_stage", "sentiment_score", "sentiment_note")})
     _log(f"      上涨 {record['up_count']} / 下跌 {record['down_count']}，"
          f"涨停 {record['limit_up_count']}，中位数 {record['median_pct_chg']}%"
          f"（{record['source']}，覆盖 {covered} 只）", verbose)
+    if stage:
+        _log(f"      情绪：{stage['sentiment_stage']}（{stage['sentiment_note']}）", verbose)
     return record
 
 
@@ -1033,11 +1044,28 @@ def _apply_risk(conn, cfg: dict, trade_date: str, state_rows: dict[str, dict],
             ]
             candle = candles_mod.analyze(bars, len(bars) - 1) if len(bars) >= 3 else {}
         result = risk_mod.assess(row, bands_by_code.get(code, []), cfg, candle)
+        # 关键：把风险结果回写到内存行。`_decide` 紧跟在这一步之后生成提醒，
+        # 它读的是这个 dict，不是刚写进 features_daily 的那一行。
+        # 以前只写库不回写，提醒快照就会全是空——等于没冻结。
+        row.update({
+            "position_cap": result.get("position_cap"),
+            "stop_level": result.get("stop_level"),
+            "risk_reward": result.get("risk_reward"),
+            "stop_pct": result.get("stop_pct"),
+            "expectancy": result.get("expectancy"),
+            "cost_pct": result.get("cost_pct"),
+            "cost_r": result.get("cost_r"),
+            "win_rate": result.get("win_rate"),
+        })
         conn.execute(
             """UPDATE features_daily
-                  SET position_cap=?, stop_level=?, risk_reward=?, candle_pattern=?, risk_note=?
+                  SET position_cap=?, stop_level=?, risk_reward=?, stop_pct=?,
+                      expectancy=?, cost_pct=?, cost_r=?, win_rate=?,
+                      candle_pattern=?, risk_note=?
                 WHERE code=? AND trade_date=?""",
             (result["position_cap"], result["stop_level"], result["risk_reward"],
+             result["stop_pct"], result["expectancy"], result["cost_pct"],
+             result["cost_r"], result["win_rate"],
              candles_mod.describe(candle), "；".join(result.get("notes") or []), code, trade_date),
         )
         updated += 1
@@ -1122,6 +1150,15 @@ def _decide(
         candidates = build_candidates(row, dict(prev) if prev else None, bands_by_code.get(code, []), cfg)
         if quality_flag != "ok":
             candidates.append(_data_anomaly_candidate(code, row, quality_flag, missing_grade))
+
+        # 冻结"此刻"的风险参数与失效条件：feature_daily 以后会重算，提醒本身不会。
+        snapshot = risk_snapshot(row)
+        snapshot["feature_version"] = version
+        for candidate in candidates:
+            candidate.payload.setdefault("risk", snapshot)
+            hint = if_then_text(candidate)
+            if hint:
+                candidate.payload.setdefault("if_then", hint)
 
         risk_veto = any(c.signal_type == "STOP_BREACH" for c in candidates)
         ctx = DecisionContext(

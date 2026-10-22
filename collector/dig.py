@@ -160,7 +160,10 @@ def report(data: dict, with_buckets_text: str | None = None) -> str:
     lines: list[str] = []
     lines.append(f"===== {data['code']} {data['name']} · 单票体检（数据截至 {data['trade_date']}）=====")
     lines.append(f"  类型 {info.get('type') or '—'}　板块 {info.get('board') or '—'}"
-                 f"　{'在观察池里' if data['in_pool'] else '不在观察池'}"
+                 f"　行业 {info.get('industry') or '—'}"
+                 + (f"（{info['industry_classification']}）"
+                    if info.get("industry_classification") else "")
+                 + f"　{'在观察池里' if data['in_pool'] else '不在观察池'}"
                  f"　本地日线 {data['bars']} 根"
                  f"　上市日 {info.get('listed_date') or '—'}")
     if data.get("live_feature"):

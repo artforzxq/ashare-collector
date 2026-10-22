@@ -35,10 +35,21 @@ def init_db(conn: sqlite3.Connection, schema_path: str | Path) -> None:
 # 老库升级用：schema.sql 里是 CREATE TABLE IF NOT EXISTS，已经存在的表不会再加字段，
 # 所以新增列要在这里补一次（SQLite 支持 ADD COLUMN）。
 MIGRATIONS: dict[str, dict[str, str]] = {
+    "instruments": {
+        "industry": "TEXT",
+        "industry_classification": "TEXT",
+        "industry_source": "TEXT",
+        "industry_updated": "TEXT",
+    },
     "features_daily": {
         "position_cap": "REAL",
         "stop_level": "REAL",
         "risk_reward": "REAL",
+        "stop_pct": "REAL",
+        "expectancy": "REAL",
+        "cost_pct": "REAL",
+        "cost_r": "REAL",
+        "win_rate": "REAL",
         "candle_pattern": "TEXT",
         "risk_note": "TEXT",
         "avg_amount_20d": "REAL",
@@ -66,6 +77,13 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     # 市场广度：记下参与统计的个股数，样本太少时不能当全市场广度看
     "market_breadth": {
         "coverage": "INTEGER",
+        "limit_up_next_avg": "REAL",
+        "limit_up_next_count": "INTEGER",
+        "first_board_next_avg": "REAL",
+        "first_board_next_count": "INTEGER",
+        "sentiment_stage": "TEXT",
+        "sentiment_score": "REAL",
+        "sentiment_note": "TEXT",
     },
     # AI 分析一开始只记单只标的，后来加了台账与回测两类，补一列标明对象
     "analysis_log": {
@@ -76,6 +94,15 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "bars_loaded": "INTEGER",
         "blocked_bars": "INTEGER",
         "estimated": "INTEGER DEFAULT 0",
+    },
+    # 提醒发出那一刻的风险参数必须冻结：features_daily 会按天重算，
+    # 半年后再看，库里的止损位可能已经是另一个版本算出来的。
+    "alerts": {
+        "risk_json": "TEXT",
+    },
+    "trades": {
+        "cost_amount": "REAL",
+        "pnl_net": "REAL",
     },
 }
 

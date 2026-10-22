@@ -349,6 +349,7 @@ canvas{display:block;width:100%}
       <button data-view="backtest">参数回测</button>
       <button data-view="pool">筛选池</button>
       <button data-view="newstock">新股·次新</button>
+      <button data-view="journal">交易账本</button>
     </nav>
     <button class="theme-toggle" id="themeBtn" type="button" title="切换深浅色">深色</button>
   </header>
@@ -485,6 +486,12 @@ canvas{display:block;width:100%}
         <div class="stats" id="marketStats"></div>
         <div class="dist" id="marketDist"></div>
         <div class="hint" id="marketNote"></div>
+      </div>
+
+      <div class="block-head"><h2>②b 环境与主线</h2><span class="line"></span><span class="kv">只回答"该更保守还是更积极、该看哪里"</span></div>
+      <div class="panels two">
+        <div class="card panel"><h3>情绪阶段 <span>影子标签 · 不进风险层</span></h3><div id="sentimentBody"></div></div>
+        <div class="card panel"><h3>主线识别 <span>价格 + 资金 + 扩散 + 持续性</span></h3><div id="mainlineBody"></div></div>
       </div>
 
       <div class="block-head"><h2>③ 资金去向 · 日终</h2><span class="badge today" id="flowBadge">日终</span><span class="line"></span><span id="flowMeta"></span></div>
@@ -641,6 +648,29 @@ canvas{display:block;width:100%}
       <div class="card panel"><div id="newNewBody"></div></div>
       <div class="block-head"><h2>③ 次新</h2><span class="line"></span><span class="kv" id="newRecentNote"></span></div>
       <div class="card panel"><div id="newRecentBody"></div></div>
+    </section>
+
+    <!-- ===================== 交易账本 ===================== -->
+    <section id="viewJournal" class="view" hidden>
+      <div class="block-head"><h2>① 组合在险</h2><span class="badge today">账本</span><span class="line"></span><span class="kv">开仓冻结假设 · 同题材按相加算</span></div>
+      <div class="kpis" id="journalKpis"></div>
+      <div class="card panel" id="journalBreaches"></div>
+
+      <div class="block-head"><h2>② 未平仓</h2><span class="line"></span><span class="kv" id="journalOpenNote"></span></div>
+      <div class="card panel"><div id="journalOpen"></div></div>
+
+      <div class="block-head"><h2>③ 已平仓</h2><span class="line"></span><span class="kv">扣成本后的成绩单</span></div>
+      <div class="card panel"><div id="journalClosed"></div></div>
+
+      <div class="card panel">
+        <h3>怎么记一笔 <span>账本只读；开仓/平仓走命令行</span></h3>
+        <div class="hint">
+          开仓前把三件事写死：<b>买入论点</b>、<b>失效条件</b>、<b>R（最多亏多少）</b>。
+          开仓字段写入后不可修改，平仓只补结果——否则复盘会变成"用今天的尺子解释昨天的判断"。<br>
+          <code>python run.py journal open 600000 --entry 10 --stop 9.2 --shares 1000 --equity 100000 --theme 算力 --thesis "..." --invalidation "..."</code><br>
+          <code>python run.py journal close 1 --exit 10.8 --discipline yes --alpha-beta alpha</code>
+        </div>
+      </div>
     </section>
   </main>
 </div>
@@ -903,7 +933,8 @@ function renderRecent(alerts){
   $('alertCount').textContent = alerts.length;
   if (!alerts.length) { box.innerHTML = '<span>暂无</span>'; return; }
   box.innerHTML = alerts.slice(0,4).map(a =>
-    `<div><b>${a.name && a.name !== a.code ? a.name : a.code}</b> <span class="lv lv-${a.level}">${a.level}</span> ${a.message.slice(0,16)}</div>`
+    `<div><b>${a.name && a.name !== a.code ? a.name : a.code}</b> <span class="lv lv-${a.level}">${a.level}</span> ${escapeHtml(a.message.slice(0,16))}` +
+    `${a.if_then ? `<div class="sub">${escapeHtml(a.if_then)}</div>` : ''}</div>`
   ).join('');
 }
 async function loadRecentAlerts(){
@@ -1507,6 +1538,96 @@ function afterJob(last){
   if (last.key === 'listings'){ newstockData = null; if (!$('viewNew').hidden) loadNewstock(true); }
 }
 
+let journalData = null;
+
+async function loadJournal(force = false){
+  if (journalData && !force){
+    renderJournal();
+    return;
+  }
+  $('journalKpis').innerHTML = '<div class="kpi"><span>交易账本</span><b>读取中…</b></div>';
+  try{
+    journalData = await api('/api/journal');
+  }catch(e){
+    journalData = {ok:false, message:e.message};
+  }
+  renderJournal();
+}
+
+function renderJournal(){
+  const d = journalData || {ok:false, message:'还没读取'};
+  if (!d.ok){
+    $('journalKpis').innerHTML = `<div class="kpi"><span>交易账本</span><b>读不到</b><small>${escapeHtml(d.message || '')}</small></div>`;
+    $('journalBreaches').innerHTML = '';
+    $('journalOpen').innerHTML = '';
+    $('journalClosed').innerHTML = '';
+    $('journalOpenNote').textContent = '';
+    return;
+  }
+  const risk = d.risk || {};
+  const limits = risk.limits || {};
+  const unlock = d.unlock || {};
+  const stats = d.stats || {};
+  const total = Number(risk.total_risk_pct || 0);
+  const cap = Number(limits.portfolio_risk_pct || 0);
+  const tone = cap && total > cap ? 'neg' : '';
+  $('journalKpis').innerHTML = [
+    `<div class="kpi"><span>组合在险</span><b class="${tone}">${fmt(total, 2)}%</b><small>上限 ${fmt(cap, 2)}%</small></div>`,
+    `<div class="kpi"><span>未平仓</span><b>${risk.open_count || 0}</b><small>${risk.missing_risk ? risk.missing_risk + ' 笔缺 R' : '风险额齐全'}</small></div>`,
+    `<div class="kpi"><span>额度档位</span><b>${unlock.tier || 5}%</b><small>${unlock.next_at ? '再 ' + Math.max(0, unlock.next_at - (unlock.n || 0)) + ' 笔进下一档' : '已封顶'}</small></div>`,
+    `<div class="kpi"><span>扣成本期望</span><b>${stats.expectancy == null ? '—' : fmt(stats.expectancy, 0) + ' 元'}</b><small>${stats.n || 0} 笔已平仓 · 违纪 ${stats.violations || 0}</small></div>`,
+    `<div class="kpi"><span>往返成本</span><b>${fmt(d.cost, 3)}%</b><small>佣金+印花+过户+滑点</small></div>`,
+  ].join('');
+
+  const breaches = risk.breaches || [];
+  $('journalBreaches').innerHTML = breaches.length
+    ? `<h3>越线告警 <span>先修这一项，再谈收益</span></h3>` +
+      breaches.map(item => `<div class="hint"><b class="neg">${escapeHtml(item.kind)}</b> ${escapeHtml(item.key)}：${fmt(item.value, 2)}% > 上限 ${fmt(item.limit, 2)}%</div>`).join('')
+    : `<h3>越线告警 <span>未触发</span></h3><div class="hint">组合级、单笔、单题材都在上限内。</div>`;
+
+  $('journalOpenNote').textContent = `${risk.open_count || 0} 笔 · 按风险额相加`;
+  $('journalOpen').innerHTML = journalOpenTable(d.open || []);
+  $('journalClosed').innerHTML = journalClosedTable(d.closed || []);
+}
+
+function journalOpenTable(rows){
+  if (!rows.length) return '<div class="empty-state">没有未平仓记录。命令行 python run.py journal open ...</div>';
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+    '<th>标的</th><th>框架</th><th>题材</th><th class="num">入场</th><th class="num">失效</th>' +
+    '<th class="num">R%</th><th class="num">仓位%</th><th class="num">赔率</th><th>论点</th></tr></thead><tbody>' +
+    rows.map(row => `<tr>
+      <td><span class="name">${escapeHtml(row.code)}</span><div class="sub">${escapeHtml(row.name || '')}</div></td>
+      <td class="sub">${escapeHtml(row.framework)}</td>
+      <td class="sub">${escapeHtml(row.theme || '—')}</td>
+      <td class="num">${fmt(row.entry_price, 3)}</td>
+      <td class="num">${fmt(row.stop_price, 3)}</td>
+      <td class="num">${fmt(row.risk_pct, 2)}</td>
+      <td class="num">${fmt(row.position_pct, 1)}</td>
+      <td class="num">${row.reward_risk == null ? '—' : fmt(row.reward_risk, 2) + ':1'}</td>
+      <td class="sub">${escapeHtml(row.thesis || '')}</td>
+    </tr>`).join('') + '</tbody></table></div>';
+}
+
+function journalClosedTable(rows){
+  if (!rows.length) return '<div class="empty-state">还没有已平仓记录。</div>';
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+    '<th>标的</th><th class="num">平仓日</th><th class="num">入场</th><th class="num">出场</th>' +
+    '<th class="num">净盈亏</th><th>纪律</th><th>α/β</th><th>备注</th></tr></thead><tbody>' +
+    rows.map(row => {
+      const discipline = row.discipline === 1 ? '按纪律' : (row.discipline === 0 ? '违规' : '未填');
+      return `<tr>
+        <td><span class="name">${escapeHtml(row.code)}</span><div class="sub">${escapeHtml(row.theme || '')}</div></td>
+        <td class="num sub">${escapeHtml(row.closed_on || '')}</td>
+        <td class="num">${fmt(row.entry_price, 3)}</td>
+        <td class="num">${fmt(row.exit_price, 3)}</td>
+        <td class="num">${posNeg(row.pnl_net, signed(row.pnl_net, 0) + ' 元')}</td>
+        <td class="sub">${discipline}</td>
+        <td class="sub">${escapeHtml(row.alpha_beta || '—')}</td>
+        <td class="sub">${escapeHtml(row.exit_note || '')}</td>
+      </tr>`;
+    }).join('') + '</tbody></table></div>';
+}
+
 function switchView(name){
   $('viewStock').hidden = name !== 'stock';
   $('viewMarket').hidden = name !== 'market';
@@ -1514,10 +1635,12 @@ function switchView(name){
   $('viewBacktest').hidden = name !== 'backtest';
   $('viewPool').hidden = name !== 'pool';
   $('viewNew').hidden = name !== 'newstock';
+  $('viewJournal').hidden = name !== 'journal';
   document.querySelectorAll('#viewTabs button').forEach(btn =>
     btn.classList.toggle('on', btn.dataset.view === name));
   if (name === 'market'){
     loadMarket();
+    loadMainline();
     loadSupport();
     loadScreen();
     loadScopeAnalysis('market');
@@ -1531,9 +1654,55 @@ function switchView(name){
     loadPool();
   } else if (name === 'newstock'){
     loadNewstock();
+  } else if (name === 'journal'){
+    loadJournal();
   } else {
     draw();          // 隐藏时画布宽度为 0，切回来必须重画
   }
+}
+
+let mainlineData = null;
+
+function renderSentiment(s){
+  const box = $('sentimentBody');
+  if (!s){
+    box.innerHTML = '<div class="hint">还没有情绪数据。先跑 3-每日任务 或 python run.py breadth。</div>';
+    return;
+  }
+  const stage = s.sentiment_stage || '未定';
+  const tone = stage === '退潮' || stage === '高潮' ? 'neg' : (stage === '发酵' ? 'pos' : '');
+  box.innerHTML = `<div class="kpi"><span>情绪阶段</span><b class="${tone}">${escapeHtml(stage)}</b>` +
+    `<small>最高 ${s.max_boards ?? '—'} 连板 · 炸板 ${s.broken_limit_count ?? '—'} 家</small></div>` +
+    `<div class="hint" style="margin-top:8px">${escapeHtml(s.sentiment_note || '')}</div>` +
+    '<div class="hint">它只调风险姿态，不预测下一只龙头，也不进仓位公式。</div>';
+}
+
+async function loadMainline(force = false){
+  if (mainlineData && !force){ renderMainline(mainlineData); return; }
+  $('mainlineBody').innerHTML = '<div class="hint">读取中…（要扫一遍全市场日线，约几秒）</div>';
+  try { mainlineData = await api('/api/mainline'); }
+  catch(e){ mainlineData = {ok:false, message:e.message}; }
+  renderMainline(mainlineData);
+}
+
+function renderMainline(d){
+  const box = $('mainlineBody');
+  if (!d || !d.ok){
+    box.innerHTML = `<div class="hint">${escapeHtml((d && d.message) || '读不到主线')}</div>`;
+    return;
+  }
+  const top = (d.industries || []).slice(0, 3);
+  const candidates = (d.mainlines || []).map(item => item.industry);
+  const events = (d.events || []).map(item => item.industry);
+  box.innerHTML = `<div class="hint">行业覆盖 ${d.coverage ? fmt(d.coverage.coverage, 1) : '—'}%（${d.coverage ? d.coverage.industries : '—'} 个行业）</div>` +
+    '<table class="tbl" style="margin-top:6px"><thead><tr><th>20 日涨幅前三</th><th class="num">收益</th><th class="num">占比趋势</th><th class="num">扩散</th></tr></thead><tbody>' +
+    top.map(item => `<tr><td><span class="name">${escapeHtml(item.industry)}</span><div class="sub">在榜 ${item.top_weeks || 0} 周</div></td>` +
+      `<td class="num">${posNeg(item.ret20, signed(item.ret20, 2) + '%')}</td>` +
+      `<td class="num">${item.share_trend_pp == null ? '—' : signed(item.share_trend_pp, 3) + 'pp'}</td>` +
+      `<td class="num">${fmt(item.diffusion, 0)}%</td></tr>`).join('') + '</tbody></table>' +
+    `<div class="hint" style="margin-top:8px"><b>${candidates.length ? '主线候选：' + candidates.map(escapeHtml).join('、') : '主线候选：无'}</b>` +
+    `${events.length ? '　事件驱动：' + events.slice(0, 3).map(escapeHtml).join('、') : ''}</div>` +
+    '<div class="hint">四关全过才算主线；没有主线时观察比动手便宜。</div>';
 }
 
 async function loadMarket(){
@@ -1546,13 +1715,14 @@ async function loadMarket(){
 function renderMarket(){
   const m = marketData || {};
   renderFlow(m.flow);
+  renderSentiment(m.sentiment);
   $('marketDate').textContent = m.trade_date ? `数据 ${m.trade_date}` : '';
   // 侧栏常驻一行"大盘"：看个股时也该知道今天整体是涨是跌
   const line = $('marketLine');
   if (line){
     if (m.sample && m.breadth){
       const b = m.breadth;
-      const med = b.median_pct_chg;
+      const med = b.median_pct;
       line.innerHTML = `<div>大盘 <b>${m.trade_date || '—'}</b></div>` +
         `<div><span style="color:var(--up)">涨 ${b.up}</span> / ` +
         `<span style="color:var(--down)">跌 ${b.down}</span> · 中位数 ` +
@@ -2305,12 +2475,12 @@ function renderPool(){
   $('poolOutcomeNote').textContent = rows.length ? `${rows.length} 个形态` : '';
   $('poolOutcomes').innerHTML = rows.length
     ? `<table class="tbl"><thead><tr>
-         <th>形态</th><th class="num">命中样本</th><th class="num">5 日均值</th><th class="num">5 日胜率</th>
-         <th class="num">20 日均值</th><th class="num">20 日胜率</th>
+         <th>形态</th><th class="num">命中样本</th><th class="num">5 日净</th><th class="num">5 日净胜率</th>
+         <th class="num">20 日毛</th><th class="num">20 日净</th><th class="num">20 日净胜率</th>
          <th class="num">按日超额</th><th class="num">t</th><th class="num">校正 p</th>
        </tr></thead><tbody>` + rows.map(row => {
-        const win5 = row.done5 ? (row.win5 / row.done5 * 100) : null;
-        const win20 = row.done20 ? (row.win20 / row.done20 * 100) : null;
+        const win5 = row.done5 ? (row.win5_net / row.done5 * 100) : null;
+        const win20 = row.done20 ? (row.win20_net / row.done20 * 100) : null;
         const st = byKey[row.criterion] || {};
         const edge = (st.excess === null || st.excess === undefined) ? null : st.excess;
         const verdict = (st.t === null || st.t === undefined)
@@ -2319,11 +2489,12 @@ function renderPool(){
              ? `<span class="tag ${edge > 0 ? 'pos' : 'neg'}">${edge > 0 ? '显著为正' : '显著为负'}</span>`
              : '<span class="sub">不显著</span>');
         return `<tr>
-          <td><span class="name">${row.criterion}</span></td>
+          <td><span class="name">${row.criterion}</span>${st.sample_warning ? `<div class="sub">${escapeHtml(st.sample_warning)}</div>` : ''}</td>
           <td class="num">${row.n}<div class="sub">回填 ${row.done20 || 0} · ${st.days || 0} 天</div></td>
-          <td class="num">${posNeg(row.avg5, signed(row.avg5, 2) + '%')}</td>
+          <td class="num">${posNeg(row.avg5_net, signed(row.avg5_net, 2) + '%')}</td>
           <td class="num sub">${win5 === null ? '—' : win5.toFixed(1) + '%'}</td>
           <td class="num">${posNeg(row.avg20, signed(row.avg20, 2) + '%')}</td>
+          <td class="num">${posNeg(row.avg20_net, signed(row.avg20_net, 2) + '%')}</td>
           <td class="num sub">${win20 === null ? '—' : win20.toFixed(1) + '%'}</td>
           <td class="num">${edge === null ? '—' : posNeg(edge, signed(edge, 2) + '%')}<div class="sub">${verdict}</div></td>
           <td class="num">${st.t === null || st.t === undefined ? '—' : signed(st.t, 2)}</td>
@@ -2332,7 +2503,8 @@ function renderPool(){
       }).join('') + '</tbody></table>'
     : '<div class="empty-state"><b>还没有回填表现</b>跑一次 16-信号复盘 或 22-历史重放，才知道这些形态后面到底涨没涨</div>';
   $('poolOutcomeHint').innerHTML =
-    `前六列是<b>绝对</b>收益（没减基准）。最后三列才是形态自己的信息量：`
+    `净收益/净胜率已扣 <b>${fmt(d.cost, 3)}%</b> 往返成本（佣金+印花+过户+滑点）；毛收益只回答价格怎么走。`
+    + `前六列是<b>绝对</b>收益（没减基准）。最后三列才是形态自己的信息量：`
     + `按日超额 = 该形态当日命中标的的平均收益 − 当日${ps.baseline === 'market' ? '全市场等权' : '沪深300'}基准，`
     + `<b>先按交易日取均值再算 t</b>——同一天几十只票一起涨跌，按样本算误差棒会把噪声当成结论。`
     + (ps.tests

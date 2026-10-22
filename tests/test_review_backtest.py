@@ -266,10 +266,13 @@ class CostTests(unittest.TestCase):
         self.assertAlmostEqual(plain["excess5"], net["excess5"], places=6)
 
     def test_cost_is_read_from_config(self):
-        cfg = {"backtest": {"cost": {"commission_bps": 2.5, "stamp_bps": 5.0, "transfer_bps": 0.1}}}
-        self.assertAlmostEqual(backtest.cost_pct(cfg), 0.102, places=4)
-        self.assertAlmostEqual(backtest.cost_pct({}), 0.102, places=4)     # 缺配置用默认值
-        self.assertAlmostEqual(backtest.cost_pct({"backtest": {"cost": {"stamp_bps": 0}}}), 0.052, places=4)
+        cfg = {"backtest": {"cost": {"commission_bps": 2.5, "stamp_bps": 5.0,
+                                     "transfer_bps": 0.1, "slippage_bps": 20.0}}}
+        # 显性 0.102% + 滑点 0.2% = 0.302%，与笔记的实战口径一致
+        self.assertAlmostEqual(backtest.cost_pct(cfg), 0.302, places=4)
+        self.assertAlmostEqual(backtest.cost_pct({}), 0.302, places=4)     # 缺配置用默认值
+        # 只改印花税为 0：0.05 + 0 + 0.002 + 0.2 = 0.252
+        self.assertAlmostEqual(backtest.cost_pct({"backtest": {"cost": {"stamp_bps": 0}}}), 0.252, places=4)
 
 
 class PlateauTests(unittest.TestCase):

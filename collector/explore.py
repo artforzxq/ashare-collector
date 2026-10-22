@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from . import db
+from . import costs, db
 
 DEFAULT_DAYS = 250
 DEFAULT_HORIZON = 20
@@ -131,8 +131,13 @@ def load_panel(conn, days: int = DEFAULT_DAYS, horizon: int = DEFAULT_HORIZON, v
     return frame
 
 
-def bucket_table(frame, field: str, horizon_column: str = "fwd"):
-    """某一维度的分档表：样本数、平均、中位、超额、胜率。"""
+def bucket_table(frame, field: str, horizon_column: str = "fwd", cost: float = 0.0):
+    """某一维度的分档表：样本数、平均、中位、超额、胜率。
+
+    平均/中位/胜率用**扣成本后的净收益**；超额仍然用毛收益算——
+    同一天所有样本扣同一笔成本，超额里它会抵消。只扣一半（比如只扣信号不扣基准）
+    才会把"摩擦差"伪装成"信息量"。
+    """
     pd, _ = _pandas()
     if field not in FIELDS:
         raise ExploreError(f"没有这个维度：{field}（可选 {'、'.join(FIELDS)}）")
@@ -142,13 +147,14 @@ def bucket_table(frame, field: str, horizon_column: str = "fwd"):
         raise ExploreError(f"{field}：没有可用样本")
     daily = data.groupby("trade_date")[horizon_column].mean()
     data["excess"] = data[horizon_column] - data["trade_date"].map(daily)
+    data["net"] = data[horizon_column] - cost
     group = pd.cut(data[spec["column"]], bins=spec["bins"], labels=spec["labels"], right=False)
     table = data.groupby(group, observed=False).agg(
         样本=(horizon_column, "size"),
-        平均=(horizon_column, "mean"),
-        中位=(horizon_column, "median"),
+        平均=("net", "mean"),
+        中位=("net", "median"),
         超额=("excess", "mean"),
-        胜率=(horizon_column, lambda s: (s > 0).mean() * 100),
+        胜率=("net", lambda s: (s > 0).mean() * 100),
     )
     return table, len(data)
 
@@ -173,10 +179,13 @@ def cross_table(frame, row_field: str, col_field: str, horizon_column: str = "fw
 
 
 def report(frame, fields: list[str] | None = None, crosses: list[tuple[str, str]] | None = None,
-           horizon: int = DEFAULT_HORIZON, with_cross: bool = True) -> str:
-    lines: list[str] = ["", f"分档研究（持有 {horizon} 个交易日；超额 = 该档平均 − 同一天全样本等权）"]
+           horizon: int = DEFAULT_HORIZON, with_cross: bool = True,
+           cost: float = 0.0) -> str:
+    lines: list[str] = ["", f"分档研究（持有 {horizon} 个交易日；"
+                             f"平均/中位/胜率扣 {cost:.3f}% 往返成本；"
+                             "超额 = 毛收益 − 同一天全样本等权）"]
     for field in (fields or list(FIELDS)):
-        table, total = bucket_table(frame, field)
+        table, total = bucket_table(frame, field, cost=cost)
         lines.append("")
         lines.append(f"【{field}】{FIELDS[field]['title']}（{total:,} 个样本）")
         lines.append(f"  {'档':<16}{'样本':>9}{'平均':>9}{'中位':>9}{'超额':>9}{'胜率':>8}")
@@ -215,5 +224,6 @@ def run(conn, cfg: dict, days: int = DEFAULT_DAYS, horizon: int = DEFAULT_HORIZO
     if verbose:
         print(f"读取全市场日线（回看 {days} 个交易日，持有 {horizon} 日）…", flush=True)
     frame = load_panel(conn, days=days, horizon=horizon, verbose=verbose)
+    cost = costs.round_trip_pct(cfg)
     return {"frame": frame, "text": report(frame, fields=fields, crosses=crosses,
-                                           horizon=horizon, with_cross=with_cross)}
+                                           horizon=horizon, with_cross=with_cross, cost=cost)}

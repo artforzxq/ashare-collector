@@ -141,6 +141,21 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["level"], "P1")
         self.assertEqual(payload["factors"][0]["name"], "均线斜率")
 
+    def test_market_api_always_answers_with_sentiment_slot(self):
+        """即使还没跑广度，market 也必须 200；sentiment 为 None 是"没算"，不是 500。"""
+        status, _, body = server.dispatch(self.app, "GET", "/api/market")
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertIn("sentiment", data)
+        self.assertIn("breadth", data)
+
+    def test_mainline_api_without_industry_is_a_readable_failure(self):
+        status, _, body = server.dispatch(self.app, "GET", "/api/mainline")
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertFalse(data["ok"])
+        self.assertIn("行业", data["message"])
+
     def test_unknown_route_returns_404(self):
         status, _, body = server.dispatch(self.app, "GET", "/api/nope")
         self.assertEqual(status, 404)

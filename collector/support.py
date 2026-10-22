@@ -224,6 +224,8 @@ def record(conn, cfg: dict | None, result: dict, verbose: bool = False) -> int:
         "message": (f"宽基 ETF 疑似托底：{len(hits)} 只同时份额净流入且放量，"
                     f"合计 {amount_yi:.1f} 亿元（{top['code']} 最大）"),
         "payload_json": detail,
+        # 市场级信号没有单票仓位/止损参数；显式写空对象，和"忘了冻结"区分开。
+        "risk_json": db.dump_json({"source": "support", "note": "市场级信号，无单票止损"}),
         "feature_version": "support-v1",
         "arbitrated_by": "R6_PASS",
     }], ["code", "trade_date", "signal_type", "level"])

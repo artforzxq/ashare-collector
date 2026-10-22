@@ -32,6 +32,36 @@ class Candidate:
     payload: dict = field(default_factory=dict)
 
 
+def risk_snapshot(feature_row: dict) -> dict:
+    """提醒发出那一刻的风险参数快照。
+
+    为什么必须冻结：`features_daily` 的仓位/止损是每天按当时的规则重算的，
+    半年后回看一条提醒，库里的止损位可能已经是另一个版本算出来的。
+    没有快照，复盘就会变成"用今天的尺子解释昨天的判断"——这正是笔记里
+    反复强调的后见之明偏差。
+    """
+    keys = ("position_cap", "stop_level", "stop_pct", "risk_reward",
+            "expectancy", "cost_pct", "cost_r", "win_rate")
+    snap = {key: feature_row.get(key) for key in keys}
+    snap["state"] = feature_row.get("state")
+    snap["feature_version"] = feature_row.get("feature_version")
+    return snap
+
+
+def if_then_text(candidate: Candidate) -> str | None:
+    """把规则写成"若…则…"。只复述已有判定，不新增任何建议。
+
+    笔记里的 if-then 之所以有效，是因为它把"当场做决定"换成了
+    "情境出现时照着念"。这里只做同一件事：止损位、状态失效条件都是
+    风险层已经算出来的，不是新规则。
+    """
+    risk = candidate.payload.get("risk") or {}
+    stop = risk.get("stop_level")
+    if candidate.signal_type in BUY_SIGNALS and stop:
+        return f"若收盘跌破 {float(stop):.3f}，则本轮判断失效；没有仓位时只观察。"
+    return None
+
+
 def build_candidates(feature_row: dict, prev_row: dict | None, bands: Sequence[dict], cfg: dict) -> list[Candidate]:
     """机会/风险层产出候选提醒。只描述事实，不做期望。"""
     code = feature_row["code"]
@@ -296,6 +326,7 @@ def persist(
                 "price": candidate.price,
                 "message": candidate.message,
                 "payload_json": db.dump_json(candidate.payload),
+                "risk_json": db.dump_json(candidate.payload.get("risk") or {}),
                 "feature_version": feature_version,
                 "arbitrated_by": candidate.payload.get("arbitrated_by"),
                 "suppressed_by": candidate.payload.get("suppressed_by"),

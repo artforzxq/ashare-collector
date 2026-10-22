@@ -21,6 +21,18 @@ A 股个人交易提醒系统（Python + SQLite，没有 web 框架，只硬依�
 7. **只接免费免账号的源**。东财 `push2his` 在本机网络**被切**（`datacenter` 是通的，
    别把"东财整体不可用"当成结论）。
 8. 结论要写进代码注释/文档，**带上实测数字**——这个项目的风格是"每条规则都有证据"。
+9. **成本只有一处口径**（`collector/costs.py`）：佣金 + 印花 + 过户 + 滑点，默认 0.302%
+   往返。回测、复盘、分档、风险层都用它；风险层算期望值必须扣成本，不许再出现
+   "回测扣了、提醒复盘没扣、风险层干脆没扣"的三套口径。
+10. **提醒的风险参数必须冻结**：`alerts.risk_json` 存发出那一刻的仓位/止损/盈亏比/期望/成本。
+    `features_daily` 会按天重算，拿它回看半年前的提醒等于用今天的尺子解释昨天的判断。
+11. **规则数量封顶、新增必须换出**：主干规则（形态/筛选条件/风险开关）新增一条，
+    必须降级或删除一条同类的。项目有因子权重预算，但规则本身也要有预算，否则一样会膨胀。
+12. **行业结论必须过覆盖率门限**：`instruments.industry` 覆盖 < 80% 时不画板块结论、
+    不说"哪个行业强"。分类口径写进 `industry_classification`，选定后中途不换；
+    概念板块会重复计算，成交占比只能用行业口径。
+13. **合成标签先过证据检验再给权限**：情绪阶段、主线候选默认只做影子；
+    `run.py evidence` 没给出稳定、样本足够的正向证据前，不进 risk / alerts / 仓位公式。
 
 ## 日线 ≠ 结论（最容易搞混的一件事）
 
@@ -35,6 +47,28 @@ A 股个人交易提醒系统（Python + SQLite，没有 web 框架，只硬依�
 
 `sync` 与 `daily --offline` 都已经自动避开"今天那根未收盘的线"。
 
+## 账本 ≠ 提醒
+
+`alerts` 记录**系统当时说了什么**；`trades` 记录**我实际做了什么、当时怎么想的**。
+两者分开，复盘才能回答"我有没有照做"，而不是只回答"系统对不对"。
+
+- 开仓字段（论点、失效条件、入场价、止损价、R）写入后**不可修改**，平仓只补结果；
+- 组合在险按未平仓头寸的 R **相加**，同题材不享受分散（3 只同题材 ≈ 1 只的 3 倍敞口）；
+- "是否按纪律"与盈亏**分开记**：赚钱但违规也要记违规，否则下个月会用"我赚了"给破例背书。
+
+## 数字分三类
+
+引用任何阈值前先认清它是哪一类：**带出处的实证**（可查、可证伪，注意样本与口径）、
+**实践归纳的经验值**（描述通常长什么样，不是定律）、**示意数字**（只建立量级感，不要引用）。
+三类混着用，结论会看起来比实际精确。形态结论的样本少于 `screen.min_samples_for_claim`
+时，页面和报告会明确标"只能当方向看"。
+
+## 情绪阶段是油门，不是方向盘
+
+`market_breadth.sentiment_stage` 只是**影子标签**，不读进 `risk`、不生成 `alerts`。
+它回答"现在该更保守还是更积极"，不回答"下一只龙头是谁"。要给它权限，
+先过和因子一样的准入流程：影子运行 → 样本外验证 → 转正。
+
 ## 常用命令
 
 | 想干什么 | 命令 |
@@ -47,6 +81,14 @@ A 股个人交易提醒系统（Python + SQLite，没有 web 框架，只硬依�
 | 历史重放（立刻拿到 5/20 日表现） | `python run.py replay --days 240` |
 | 分档研究（某个维度有没有用） | `python run.py buckets`，可加 `--field 位置` |
 | 单票体检 | `python run.py dig 600519` |
+| 交易账本（开仓冻结假设 / 平仓复盘 / 组合在险） | `python run.py journal open ...` · `journal list` · `journal close <id> --exit ...` · `journal risk` |
+| 券商成交对账（CSV + FIFO，不改账本） | `python run.py broker import 成交.csv` · `broker show` |
+| 行业分类（免费源 / CSV 导入 / 覆盖率） | `python run.py industries --sync` · `industries --import data/industry.csv` |
+| 主线识别（价格+资金+扩散+持续性，不出信号） | `python run.py mainline` |
+| 胜率校准（P1 净胜率 → risk.win_rate） | `python run.py calibrate`（`--write` 才改配置） |
+| 影子标签证据检验（情绪/主线前瞻收益） | `python run.py evidence --save` |
+| 情绪阶段（影子，不驱动仓位） | `python run.py sentiment`（`--backfill` 补历史） |
+| 周度环境卡 / 变化推送 | `python run.py weekly` · `weekly --push`（没变化不推） |
 | 风险层分布 | `python run.py riskstats` |
 | 龙虎榜+资金流 / 两融 / 资金去向 | `python run.py flows` / `margin` / `flow` |
 | 离线自检（夹具源跑通全链路） | `python run.py selftest` |

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from collector import breadth, db
+from collector import breadth, db, tasks
 from collector.config import load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -166,6 +166,35 @@ class BoardStreakTests(unittest.TestCase):
         out = breadth.board_streaks(self.conn, ["2026-01-09"])
         self.assertEqual(out["2026-01-09"]["max_boards"], 1)   # 断过，重新数
 
+    def test_next_day_premium_for_limit_up_and_first_board(self):
+        """昨日涨停股今日怎么走：接力意愿的最直接读数。"""
+        # 两只都是老票：没有上市日时，首根日线会被当成 IPO 首日（44% 才叫涨停）。
+        db.upsert_rows(self.conn, "instruments", [
+            {"code": "SH600000", "name": "老票A", "type": "stock", "listed_date": "2020-01-01"},
+            {"code": "SZ000001", "name": "老票B", "type": "stock", "listed_date": "2020-01-01"},
+        ], ["code"])
+        rows = [
+            # A：首板后 +3%，然后退出连板
+            self._bar("SH600000", "2026-01-05", 11.0, 10.0),
+            self._bar("SH600000", "2026-01-06", 11.33, 11.0),
+            # B：首板后继续封板 +10%，再下一天 +4%
+            self._bar("SZ000001", "2026-01-05", 11.0, 10.0),
+            self._bar("SZ000001", "2026-01-06", 12.10, 11.0),
+            self._bar("SZ000001", "2026-01-07", 12.584, 12.10),
+        ]
+        db.upsert_rows(self.conn, "bars_daily", rows, ["code", "trade_date"])
+        out = breadth.board_streaks(self.conn, ["2026-01-06", "2026-01-07"])
+        day2 = out["2026-01-06"]
+        self.assertEqual(day2["limit_up_next_count"], 2)
+        self.assertAlmostEqual(day2["limit_up_next_avg"], 6.5, places=2)
+        self.assertEqual(day2["first_board_next_count"], 2)
+        self.assertAlmostEqual(day2["first_board_next_avg"], 6.5, places=2)
+        day3 = out["2026-01-07"]
+        self.assertEqual(day3["limit_up_next_count"], 1)       # 只有 B 昨天在板上
+        self.assertAlmostEqual(day3["limit_up_next_avg"], 4.0, places=2)
+        self.assertEqual(day3["first_board_next_count"], 0)    # B 昨天已经是二板
+        self.assertIsNone(day3["first_board_next_avg"])
+
 
 class LocalBreadthTests(unittest.TestCase):
     def setUp(self):
@@ -229,6 +258,49 @@ class LocalBreadthTests(unittest.TestCase):
         self.assertEqual(info["skipped"], 1)
         row = db.query_one(self.conn, "SELECT source FROM market_breadth")
         self.assertEqual(row["source"], "akshare")       # 快照覆盖更全，不覆盖它
+
+
+class DailyBreadthNextPremiumTests(unittest.TestCase):
+    """日终写入新一天时，要算出"昨日涨停股今天表现"，记在表现日这一行。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = {"_db_path": str(root / "t.db"), "breadth": {"min_coverage": 0}}
+        self.conn = db.connect(self.cfg["_db_path"])
+        db.init_db(self.conn, PROJECT_ROOT / "schema.sql")
+        db.upsert_rows(self.conn, "instruments", [
+            {"code": "SH600000", "name": "老票A", "type": "stock", "listed_date": "2020-01-01"},
+            {"code": "SZ000001", "name": "老票B", "type": "stock", "listed_date": "2020-01-01"},
+        ], ["code"])
+        bars = []
+        for code, day2_close in (("SH600000", 11.33), ("SZ000001", 10.78)):
+            bars.extend([
+                {"code": code, "trade_date": "2026-01-05", "close": 11.0, "pre_close": 10.0,
+                 "high": 11.0, "low": 10.0, "pct_chg": 10.0, "amount": 1e5},
+                {"code": code, "trade_date": "2026-01-06", "close": day2_close,
+                 "pre_close": 11.0, "high": day2_close, "low": day2_close,
+                 "pct_chg": round((day2_close / 11.0 - 1) * 100, 4), "amount": 1e5},
+            ])
+        db.upsert_rows(self.conn, "bars_daily", bars, ["code", "trade_date"])
+        db.upsert_rows(self.conn, "market_breadth", [{
+            "trade_date": "2026-01-05", "coverage": 2, "up_count": 2, "down_count": 0,
+            "flat_count": 0, "source": "local",
+        }], ["trade_date"])
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_next_day_premium_is_written_on_the_measurement_day(self):
+        tasks._collect_breadth(self.conn, None, self.cfg, "2026-01-06", verbose=False)
+        today = db.query_one(
+            self.conn,
+            """SELECT limit_up_next_avg, limit_up_next_count
+                 FROM market_breadth WHERE trade_date='2026-01-06'""",
+        )
+        self.assertEqual(today["limit_up_next_count"], 2)
+        self.assertAlmostEqual(today["limit_up_next_avg"], 0.5, places=2)   # (+3 −2) / 2
 
 
 if __name__ == "__main__":

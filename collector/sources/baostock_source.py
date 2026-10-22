@@ -23,7 +23,8 @@ SOCKET_TIMEOUT = 30
 
 class BaostockSource(BaseSource):
     name = "baostock"
-    capabilities = {"daily_bars", "trade_calendar", "symbol_directory", "stock_basic"}
+    capabilities = {"daily_bars", "trade_calendar", "symbol_directory", "stock_basic",
+                    "industry"}
 
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -127,6 +128,46 @@ class BaostockSource(BaseSource):
     def _bs_code(code: str) -> str:
         exchange, symbol = split_code(code)
         return f"{exchange.lower()}.{symbol}"
+
+    def industry_directory(self) -> list[dict]:
+        """全市场个股行业分类（证监会口径）。
+
+        为什么用 baostock：免费、免账号、一次请求覆盖全市场，而且分类口径稳定。
+        东财的行业接口属于 push2 那一组，在本机网络上不稳；行业映射一旦今天有、
+        明天没有，"板块成交占比趋势"就会出现假断层。
+
+        返回字段：code（带交易所前缀）、name、industry、industry_classification、
+        industry_updated、industry_source。
+        """
+        bs = self._login()
+        try:
+            result = bs.query_stock_industry()
+            records: list[dict] = []
+            while result.error_code == "0" and result.next():
+                records.append(dict(zip(result.fields, result.get_row_data())))
+            if result.error_code != "0":
+                raise DataSourceError(f"baostock 行业分类查询失败：{result.error_msg}")
+        except Exception:
+            self.logout()
+            raise
+        out = []
+        for row in records:
+            raw = row.get("code") or row.get("code_name")
+            if not raw or "." not in str(raw):
+                continue
+            code = exchange_of(str(raw)) + normalize_symbol(str(raw))
+            industry = (row.get("industry") or "").strip()
+            if not industry:
+                continue
+            out.append({
+                "code": code,
+                "name": row.get("code_name") or code,
+                "industry": industry,
+                "industry_classification": row.get("industryClassification") or "证监会",
+                "industry_updated": row.get("updateDate") or datetime.now().strftime("%Y-%m-%d"),
+                "industry_source": "baostock",
+            })
+        return out
 
     def stock_basic(self, code: str) -> dict:
         """单只标的的基础信息：上市日（ipoDate）、退市日、类型、状态。

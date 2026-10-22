@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS instruments (
   is_active     INTEGER DEFAULT 1,  -- 是否仍在交易：0 表示已退市或长期停牌
   listed_date   TEXT,               -- 上市日期 YYYY-MM-DD
   delisted_date TEXT,               -- 退市日期，未退市为 NULL
+  industry      TEXT,               -- 行业分类（baostock 证监会分类或手工导入；口径固定后不换）
+  industry_classification TEXT,     -- 分类体系：证监会 / 申万 / 中信 / manual
+  industry_source TEXT,             -- 这份行业标签从哪来
+  industry_updated TEXT,            -- 行业标签更新日期
   in_watchlist  INTEGER DEFAULT 0,  -- 是否在观察池：1 是
   role          TEXT,               -- 角色：基准 / 观察 / 持仓
   updated_at    TEXT                -- 本行最后更新时间
@@ -124,6 +128,13 @@ CREATE TABLE IF NOT EXISTS market_breadth (
   limit_down_count   INTEGER,          -- 跌停家数（按涨幅 ≤ -9.8% 近似）
   broken_limit_count INTEGER,          -- 炸板家数（需连板数据，第二阶段补）
   max_boards         INTEGER,          -- 最高连板高度（需连板数据，第二阶段补）
+  limit_up_next_avg  REAL,             -- 昨日涨停股今日平均涨跌幅（%）：接力愿不愿意掏钱
+  limit_up_next_count INTEGER,         -- 参与"连板次日溢价"统计的股票数
+  first_board_next_avg REAL,           -- 昨日首板股今日平均涨跌幅（%）：最底层的赚钱效应
+  first_board_next_count INTEGER,      -- 参与"首板次日表现"统计的股票数
+  sentiment_stage    TEXT,             -- 情绪阶段：冰点/启动/发酵/高潮/退潮/未定（影子标签）
+  sentiment_score    REAL,             -- 情绪温度 0–1：只用于描述，不驱动仓位
+  sentiment_note     TEXT,             -- 这一阶段是怎么判出来的（可核对）
   up_ratio           REAL,             -- 上涨占比 = 上涨 /（上涨 + 下跌）
   median_pct_chg     REAL,             -- 全市场涨跌幅中位数，单位：%
   total_amount       REAL,             -- 全市场成交额，单位：元
@@ -205,6 +216,11 @@ CREATE TABLE IF NOT EXISTS features_daily (
   position_cap       REAL,          -- 风险层出口：仓位上限 0–1
   stop_level         REAL,          -- 风险层出口：止损位（结构位优先，其次 N 倍 ATR）
   risk_reward        REAL,          -- 盈亏比：到最近阻力带的空间 ÷ 到止损的空间
+  stop_pct           REAL,          -- 止损距现价的距离（%）：成本折算成 R 时要用它
+  expectancy         REAL,          -- 扣成本后的期望值（单位 R）：≤0 时不建仓
+  cost_pct           REAL,          -- 这次判断用的往返成本（%）：口径见 collector/costs.py
+  cost_r             REAL,          -- 往返成本折算成 R = cost_pct ÷ stop_pct
+  win_rate           REAL,          -- 期望值里用的胜率：必须来自回测，不许拍脑袋
   candle_pattern     TEXT,          -- K 线形态摘要：放量长阳 / 阳包阴 / 长下影 等
   risk_note          TEXT,          -- 风险层结论是怎么来的：基准仓位 / 缩放 / 止损依据
   feature_version    TEXT,          -- 规则版本号；权重或规则改动必须升版本
@@ -235,6 +251,7 @@ CREATE TABLE IF NOT EXISTS alerts (
   price           REAL,          -- 触发时价格
   message         TEXT,          -- 人话描述
   payload_json    TEXT,          -- 附加信息（带区间、量能等），JSON 字符串
+  risk_json       TEXT,          -- 发出那一刻的风险快照（仓位/止损/盈亏比/期望/成本）
   feature_version TEXT,          -- 生成该提醒所用的规则版本
   arbitrated_by   TEXT,          -- 最终由哪条仲裁规则放行（如 R6_PASS）
   suppressed_by   TEXT,          -- 曾被哪条规则压制或降级
@@ -441,3 +458,83 @@ CREATE TABLE IF NOT EXISTS data_dictionary (
   note        TEXT,          -- 补充说明或用法提示
   PRIMARY KEY (table_name, column_name)
 );
+
+-- ---------- 交易账本 ----------
+-- 开仓那几列是**冻结字段**：写入后只能新增平仓信息，不能回改。
+-- 理由和后见之明偏差有关——半年后回看时，人会不自觉地把当时的判断"修"成更合理的样子。
+-- 没有冻结，复盘就只是自我辩护；冻结之后，同一套手法才可能被真正检验。
+CREATE TABLE IF NOT EXISTS trades (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  code          TEXT NOT NULL,       -- 标的代码
+  name          TEXT,                -- 当时的名字（后面改名也不影响记录）
+  framework     TEXT NOT NULL,       -- core 核心 / satellite 卫星 / short 短线
+  theme         TEXT,                -- 同题材合并用的标签（按买入理由填，不按行业填）
+  opened_on     TEXT NOT NULL,       -- 开仓日 YYYY-MM-DD
+  entry_price   REAL NOT NULL,       -- 入场价
+  stop_price    REAL,                -- 失效价/止损价（做多必须低于入场价）
+  target_price  REAL,                -- 目标价：只用于算赔率，不用来"到价就卖"
+  shares        REAL,                -- 股数/份额
+  risk_amount   REAL,                -- R：触发止损时的亏损金额（元）
+  account_equity REAL,               -- 开仓时的总资产（元）
+  risk_pct      REAL,                -- R ÷ 总资产 × 100
+  reward_risk   REAL,                -- 赔率 =（目标−入场）÷（入场−止损）
+  position_pct  REAL,                -- 仓位占比 = 市值 ÷ 总资产 × 100
+  thesis        TEXT NOT NULL,       -- 买入论点（一句话）
+  invalidation  TEXT NOT NULL,       -- 失效条件：什么事实出现说明我错了
+  nonconsensus  TEXT,                -- 非共识假设 + 预期何时被验证
+  exit_plan     TEXT,                -- 卖出的钱去哪（预填）
+  alert_id      INTEGER,             -- 对应哪条系统提醒（可为空）
+  created_at    TEXT NOT NULL,
+  -- 以下为平仓后填写；开仓时全部为 NULL
+  closed_on     TEXT,
+  exit_price    REAL,
+  pnl           REAL,
+  cost_amount   REAL,                -- 这笔往返成本（元）：按开仓名义金额与佣金下限算
+  pnl_net       REAL,                -- 扣成本后的盈亏（元）：额度和熔断都用这一列
+  discipline    INTEGER,             -- 1 按纪律执行 / 0 违背纪律（与盈亏独立）
+  alpha_beta    TEXT,                -- alpha 选股能力 / beta 大盘普涨 / unknown
+  exit_note     TEXT,
+  updated_at    TEXT,
+  UNIQUE (code, opened_on, framework)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_open ON trades (closed_on, framework);
+
+-- 行业分类的时点快照：instruments.industry 只保留"现在"，
+-- 这张表保留"每次同步时是什么"。从第一次同步开始，历史回看才是精确的；
+-- 在此之前只能用当前分类近似，报告里必须标注。
+CREATE TABLE IF NOT EXISTS industry_history (
+  snapshot_date TEXT NOT NULL,       -- 同步日
+  code          TEXT NOT NULL,       -- 标的代码
+  industry      TEXT NOT NULL,       -- 当时所属行业
+  industry_classification TEXT,      -- 分类体系
+  source        TEXT,                -- baostock / csv
+  created_at    TEXT,
+  PRIMARY KEY (snapshot_date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_industry_history_code ON industry_history (code, snapshot_date);
+
+-- 券商成交明细：通用 CSV 导入，不绑定某一家券商。
+-- 同一笔成交重复导入会被主键挡掉；FIFO 配对只读这张表，不改 journal/trades。
+CREATE TABLE IF NOT EXISTS broker_executions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  broker        TEXT,
+  trade_date    TEXT NOT NULL,
+  code          TEXT NOT NULL,
+  name          TEXT,
+  side          TEXT NOT NULL,       -- buy / sell
+  price         REAL NOT NULL,
+  quantity      REAL NOT NULL,
+  amount        REAL,                -- 成交金额（不含费用）
+  commission    REAL DEFAULT 0,
+  stamp_tax     REAL DEFAULT 0,
+  transfer_fee  REAL DEFAULT 0,
+  other_fee     REAL DEFAULT 0,
+  fee_total     REAL DEFAULT 0,
+  raw_json      TEXT,
+  created_at    TEXT,
+  UNIQUE (trade_date, code, side, price, quantity)
+);
+
+CREATE INDEX IF NOT EXISTS idx_broker_exec_code ON broker_executions (code, trade_date);

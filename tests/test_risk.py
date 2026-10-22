@@ -77,6 +77,28 @@ class RiskAssessTests(unittest.TestCase):
         roomy = risk.assess(self.row, self.bands, {"risk": {"base_cap": {"up": 1.0}}})
         self.assertLess(tight["position_cap"], roomy["position_cap"])
 
+    def test_cost_turns_a_marginal_trade_into_zero(self):
+        """毛期望刚过 0 的交易，扣掉 0.302% 往返成本后必须判"不做"。
+
+        止损 94.525（跌 5.475），阻力中值 105.75（涨 5.75）→ 盈亏比约 1.05。
+        胜率 50%：毛期望 +0.026R；成本 0.302% ÷ 5.475% ≈ 0.055R → 净期望为负。
+        以前零成本口径会放行这笔交易——这正是"边际信号靠没算摩擦活着"。
+        """
+        bands = [self.bands[0],
+                 {"level_type": "resistance", "price_low": 105.5, "price_high": 106.0, "weight": 1.0}]
+        result = risk.assess(self.row, bands, {"risk": {"win_rate": 0.5}})
+        self.assertEqual(result["position_cap"], 0)
+        self.assertLess(result["expectancy"], 0)
+        self.assertGreater(result["cost_r"], 0)
+        self.assertAlmostEqual(result["cost_pct"], 0.302, places=3)
+        self.assertIn("成本", result["reason"])
+
+    def test_risk_output_exposes_cost_and_win_rate(self):
+        result = risk.assess(self.row, self.bands, self.cfg)
+        for key in ("cost_pct", "cost_r", "win_rate", "expectancy"):
+            self.assertIn(key, result)
+        self.assertEqual(result["win_rate"], 0.5)
+
     def test_describe_is_readable(self):
         text = risk.describe(risk.assess(self.row, self.bands, self.cfg))
         self.assertIn("仓位上限", text)
@@ -113,7 +135,10 @@ class RiskAssessTests(unittest.TestCase):
         于是"越强的票越做不了"，等于把最强的标的系统性排除在外。
         """
         bands = [b for b in self.bands if b["level_type"] == "support"]
-        result = risk.assess({**self.row, "dist_to_high_250": -5.4}, bands, self.cfg)
+        # 这个位置盈亏比约 1.10：50% 胜率毛期望 +0.05R，扣 0.055R 成本后会翻负——
+        # 所以用实测净胜率 51%（贴高不放量那一档）来验证"接近高点不被系统性否决"。
+        result = risk.assess({**self.row, "dist_to_high_250": -5.4}, bands,
+                             {"risk": {"win_rate": 0.51}})
         self.assertGreater(result["position_cap"], 0)
         self.assertGreater(result["risk_reward"], 1.0)
         self.assertTrue(any("上方真空" in note for note in result["notes"]))

@@ -17,7 +17,8 @@ from __future__ import annotations
 import statistics
 import time
 
-from . import candles as candles_mod, db, features as features_mod, review, rules, stats as stats_mod, universe
+from . import (candles as candles_mod, costs, db, features as features_mod, review,
+               rules, stats as stats_mod, universe)
 from .names import display_name
 from .registry import FactorRegistry
 
@@ -584,8 +585,13 @@ def backfill_outcomes(conn, verbose: bool = False) -> dict:
     return {"screen": updated}
 
 
-def outcome_stats(conn) -> list[dict]:
-    """每种形态筛出来的票，后来 5/20 个交易日表现如何。"""
+def outcome_stats(conn, cost: float = 0.0) -> list[dict]:
+    """每种形态筛出来的票，后来 5/20 个交易日表现如何。
+
+    毛/净两列并排：毛收益是"价格后来怎么走"，净收益是"扣掉往返成本后能不能赚"。
+    超额列仍然用毛收益算——同一批日期上信号和基准扣同一笔，成本会抵消；
+    但胜率必须用净收益，否则一个 +0.1% 的"涨"会被记成赢。
+    """
     return [
         dict(row)
         for row in db.query(
@@ -595,14 +601,19 @@ def outcome_stats(conn) -> list[dict]:
                    COUNT(*)                                                 AS n,
                    SUM(CASE WHEN outcome_5d IS NOT NULL THEN 1 ELSE 0 END)  AS done5,
                    SUM(CASE WHEN outcome_5d > 0 THEN 1 ELSE 0 END)          AS win5,
+                   SUM(CASE WHEN outcome_5d - ? > 0 THEN 1 ELSE 0 END)      AS win5_net,
                    ROUND(AVG(outcome_5d), 2)                                AS avg5,
+                   ROUND(AVG(outcome_5d - ?), 2)                            AS avg5_net,
                    SUM(CASE WHEN outcome_20d IS NOT NULL THEN 1 ELSE 0 END) AS done20,
                    SUM(CASE WHEN outcome_20d > 0 THEN 1 ELSE 0 END)         AS win20,
-                   ROUND(AVG(outcome_20d), 2)                               AS avg20
+                   SUM(CASE WHEN outcome_20d - ? > 0 THEN 1 ELSE 0 END)     AS win20_net,
+                   ROUND(AVG(outcome_20d), 2)                               AS avg20,
+                   ROUND(AVG(outcome_20d - ?), 2)                           AS avg20_net
             FROM screen_results
             GROUP BY criterion
             ORDER BY n DESC
             """,
+            (cost, cost, cost, cost),
         )
     ]
 
@@ -703,6 +714,7 @@ def pattern_stats(conn, cfg: dict | None = None, horizon: int = 20,
         )
 
     tests = sum(1 for days in by_pattern.values() if days)
+    min_for_claim = int(((cfg or {}).get("screen") or {}).get("min_samples_for_claim", 30))
     items = []
     # 基准缺失、或者某个形态还没有回填结果时，也要把形态列出来（days=0），
     # 否则页面上会变成"什么都没有"，看不出是"没数据"还是"没算"。
@@ -721,6 +733,10 @@ def pattern_stats(conn, cfg: dict | None = None, horizon: int = 20,
                 "t": stats["t"],
                 "p": p_value,
                 "p_adj": stats_mod.sidak_adjust(p_value, tests),
+                "sample_warning": (
+                    f"样本 {samples.get(criterion, 0)} 条，少于 {min_for_claim}，只能当方向看"
+                    if 0 < samples.get(criterion, 0) < min_for_claim else None
+                ),
             }
         )
     items.sort(key=lambda item: (item["excess"] is None, -(item["excess"] or 0)))
@@ -734,26 +750,32 @@ def pattern_stats(conn, cfg: dict | None = None, horizon: int = 20,
     }
 
 
-def performance_report(conn, min_sample: int = 20, baseline: dict | None = None) -> str:
+def performance_report(conn, min_sample: int = 20, baseline: dict | None = None,
+                       cfg: dict | None = None) -> str:
     """给人看的"筛出来的票后来怎么样"。没有样本就明说，不硬凑结论。
 
     给了 baseline（全市场等权，见 equal_weight_baseline）就多一列"相对全市场"——
     那一列才是形态自己的信息量：跑输沪深300 可能只是这批票整体不如大盘。
     """
-    stats = outcome_stats(conn)
+    cost = costs.round_trip_pct(cfg) if cfg is not None else 0.0
+    stats = outcome_stats(conn, cost)
     if not stats:
         return ""
     all_dates = [row["trade_date"] for row in db.query(conn, "SELECT DISTINCT trade_date FROM screen_results")]
     base20 = _benchmark_returns(conn, all_dates, 20)
     lines = ["", "筛选结果回填（筛出来的票后来怎么样了）"]
-    lines.append(f"{'形态':<10}{'条数':>5}{'5日胜率':>9}{'5日均值':>9}{'20日胜率':>9}"
-                 f"{'20日均值':>9}{'vs沪深300':>10}"
+    if cfg is not None:
+        lines.append(costs.describe(cfg))
+    lines.append(f"{'形态':<10}{'条数':>5}{'5日胜率':>9}{'5日净':>9}{'20日胜率':>9}"
+                 f"{'20日毛':>9}{'20日净':>9}{'净胜率':>8}{'vs沪深300':>10}"
                  + (f"{'vs全市场':>10}" if baseline and baseline.get("mean") is not None else ""))
     for row in stats:
         win5 = f"{row['win5'] / row['done5'] * 100:.0f}%" if row["done5"] else "—"
         win20 = f"{row['win20'] / row['done20'] * 100:.0f}%" if row["done20"] else "—"
-        avg5 = f"{row['avg5']:+.2f}%" if row["avg5"] is not None else "—"
+        win20_net = f"{row['win20_net'] / row['done20'] * 100:.0f}%" if row["done20"] else "—"
+        avg5 = f"{row['avg5_net']:+.2f}%" if row["avg5_net"] is not None else "—"
         avg20 = f"{row['avg20']:+.2f}%" if row["avg20"] is not None else "—"
+        avg20_net = f"{row['avg20_net']:+.2f}%" if row["avg20_net"] is not None else "—"
         # 参照取"这个形态自己那几天的基准均值"，而不是全表最新一天——形态之间的日期不一样
         own_dates = [item["trade_date"] for item in db.query(
             conn, "SELECT DISTINCT trade_date FROM screen_results WHERE criterion=?", (row["criterion"],))]
@@ -763,8 +785,9 @@ def performance_report(conn, min_sample: int = 20, baseline: dict | None = None)
         vs_market = ""
         if baseline and baseline.get("mean") is not None and row["avg20"] is not None:
             vs_market = f"{row['avg20'] - baseline['mean']:+.2f}%"
-        lines.append(f"{row['criterion']:<10}{row['n']:>5}{win5:>9}{avg5:>9}{win20:>9}{avg20:>9}"
-                     f"{excess:>10}" + (f"{vs_market:>10}" if baseline and baseline.get("mean") is not None else ""))
+        lines.append(f"{row['criterion']:<10}{row['n']:>5}{win5:>9}{avg5:>9}{win20:>9}"
+                     f"{avg20:>9}{avg20_net:>9}{win20_net:>8}{excess:>10}"
+                     + (f"{vs_market:>10}" if baseline and baseline.get("mean") is not None else ""))
     if base20:
         lines.append("")
         if baseline and baseline.get("mean") is not None:
@@ -783,7 +806,7 @@ def performance_report(conn, min_sample: int = 20, baseline: dict | None = None)
     thin = [row for row in stats if row["done20"] and row["done20"] < min_sample]
     if thin:
         lines.append(f"（另有 {len(thin)} 个形态的 20 日样本不足 {min_sample} 条，只能当方向看）")
-    lines.extend(_pattern_stats_lines(conn, cfg=None, baseline=baseline))
+    lines.extend(_pattern_stats_lines(conn, cfg=cfg, baseline=baseline))
     return "\n".join(lines)
 
 
@@ -812,6 +835,8 @@ def _pattern_stats_lines(conn, cfg: dict | None = None,
         edge = f"±{item['ci95']:.2f}" if item["ci95"] is not None else "—"
         verdict = ("显著为负" if item["excess"] < 0 else "显著为正") if (
             item["p_adj"] is not None and item["p_adj"] < 0.05) else "不显著"
+        if item.get("sample_warning"):
+            verdict += f"（{item['sample_warning']}）"
         lines.append(f"{item['criterion']:<10}{item['days']:>7}{item['excess']:>+9.2f}%"
                      f"{edge:>16}{item['t']:>8.2f}{item['p_adj']:>9.3f}  {verdict}")
     lines.append("说明：按日超额 = 该形态当日命中标的的平均收益 − 当日基准，先按日取均值再求 t；"

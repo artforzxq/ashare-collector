@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from . import costs
 from .levels import nearest_band, support_for
 
 DEFAULTS = {
@@ -27,8 +28,17 @@ DEFAULTS = {
     "stop_buffer_pct": 0.5,  # 止损放在支撑带下沿再往下留多少
     "atr_stop_multiple": 2.0,
     # 期望值口径：只看盈亏比是不够的——0.8 的盈亏比配 70% 胜率是赚的，
-    # 3.0 的配 20% 胜率是亏的。所以这里用 期望(R) = 胜率×盈亏比 − (1−胜率)
-    # 决定缩放到多少；期望 ≤ 0 直接不建仓。胜率由回测测出来（报告里会给建议值）。
+    # 3.0 的配 20% 胜率是亏的。所以这里用
+    #   期望(R) = 胜率×盈亏比 − (1−胜率) − 往返成本÷止损宽度
+    # 决定缩放到多少；期望 ≤ 0 直接不建仓。
+    #
+    # 成本这一项是 2026-10 补的：以前这里算的是零摩擦期望，盈亏比 2:1、胜率 50%
+    # 刚好是 0，系统判"不做"——那条线本来就卡在打平点上。
+    # 加上 0.302% 往返成本后，同一笔交易在 8% 止损下要再付 0.038R，
+    # 边际信号会成片翻负。这不是收紧阈值，是把一直存在的摩擦补进公式。
+    #
+    # 胜率仍由 config 给出，但必须是**回测测出来的净胜率**，不能永远停在 0.5。
+    # `run.py review` 会同时打毛/净两列，校准后把数字写回这里并升 feature_version。
     "win_rate": 0.5,
     "target_expectancy": 0.5,   # 期望达到多少给满缩放（单位：R）
     # 上方没有阻力带、且离 250 日高点还远时的兜底倍数：风控不能在"数据缺失"时放行。
@@ -177,7 +187,8 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
     state = row.get("state") or "range"
     notes: list[str] = []
     blank = {"position_cap": 0.0, "stop_level": None, "stop_pct": None,
-             "risk_reward": None, "expectancy": None, "reason": "", "notes": notes}
+             "risk_reward": None, "expectancy": None, "cost_pct": None,
+             "cost_r": None, "win_rate": None, "reason": "", "notes": notes}
 
     if (row.get("quality_flag") or row.get("data_quality_flag") or "ok") != "ok":
         return {**blank, "reason": "数据不可信，0 仓"}
@@ -295,24 +306,32 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
                      f"{params['fib_extension']:g}×前一波段）比原目标更近 → 取更近的")
         upside = fib_target - close
     win_rate = _clamp(float(params["win_rate"]), 0.0, 1.0)
+    # 成本按往返一次算，再折算成 R。止损越窄，成本占 R 的比例越高——
+    # 这正是"窄止损高频"在结构上最差的原因（成本 ≈ 0.1R vs 0.03R）。
+    cost_pct = costs.round_trip_pct(cfg)
+    cost_r = costs.cost_in_r(cfg, risk_pct)
     expectancy = None
     if downside > 0 and upside > 0:
         reward_risk = round(upside / downside, 2)
-        expectancy = round(win_rate * reward_risk - (1 - win_rate), 4)
+        expectancy = round(win_rate * reward_risk - (1 - win_rate) - (cost_r or 0.0), 4)
         if expectancy <= 0:
             notes.append(
-                f"盈亏比 {reward_risk:.2f} 配 {win_rate:.0%} 胜率 → 期望 {expectancy:+.2f}R，不做")
+                f"盈亏比 {reward_risk:.2f} 配 {win_rate:.0%} 胜率，"
+                f"扣成本 {cost_r or 0:.3f}R → 期望 {expectancy:+.2f}R，不做")
             return {**blank, "stop_level": round(stop, 4),
                     "stop_pct": round((stop / close - 1) * 100, 2),
                     "risk_reward": reward_risk,
                     "expectancy": expectancy,
+                    "cost_pct": cost_pct,
+                    "cost_r": cost_r,
+                    "win_rate": win_rate,
                     "reason": f"止损放{stop_reason}；盈亏比 {reward_risk:.2f} × 胜率 {win_rate:.0%} "
-                              f"→ 期望 {expectancy:+.2f}R，0 仓"}
+                              f"扣成本 {cost_r or 0:.3f}R → 期望 {expectancy:+.2f}R，0 仓"}
         scale = _clamp(expectancy / float(params["target_expectancy"]),
                        float(params["cap_floor"]), 1.0)
         cap *= scale
         notes.append(f"盈亏比 {reward_risk:.2f} × 胜率 {win_rate:.0%} → "
-                     f"期望 {expectancy:+.2f}R → 缩放 {scale:.2f}")
+                     f"扣成本 {cost_r or 0:.3f}R 后期望 {expectancy:+.2f}R → 缩放 {scale:.2f}")
     elif upside <= 0:
         notes.append("上方紧贴阻力带，空间不足")
 
@@ -327,6 +346,9 @@ def assess(row: dict, bands: list[dict], cfg: dict | None = None, candle: dict |
         "stop_pct": round((stop / close - 1) * 100, 2),
         "risk_reward": reward_risk,
         "expectancy": expectancy,
+        "cost_pct": cost_pct,
+        "cost_r": cost_r,
+        "win_rate": win_rate,
         "reason": f"{state}趋势，止损放{stop_reason}"
                   + ("（反转确认，试探仓）" if state == "down" else "")
                   + (f"；换手放量 {float(row.get('turnover_ratio')):.1f} 倍 → 仓位上限 ×{discount:g}"
@@ -342,6 +364,10 @@ def describe(result: dict) -> str:
     text = f"仓位上限 {result['position_cap']:.0%}，止损 {result['stop_level']:.3f}（{result['stop_pct']:+.2f}%）"
     if result.get("risk_reward"):
         text += f"，盈亏比 {result['risk_reward']:.2f}"
+    if result.get("expectancy") is not None:
+        text += f"，净期望 {result['expectancy']:+.2f}R"
+        if result.get("cost_r") is not None:
+            text += f"（成本 {result['cost_r']:.3f}R）"
     # 打折的原因要跟着走：只看到"仓位变小了"却不知道为啥，等于把结论藏起来
     for note in result.get("notes") or []:
         if "换手放量" in note:

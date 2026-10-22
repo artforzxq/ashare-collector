@@ -6,7 +6,8 @@
   3. 除了看绝对收益，还算**基准**——同一批标的里"随便哪天买入"的平均收益。
      信号跑不赢基准，就说明它没有信息量，涨只是因为这批标的那段时间本来就在涨；
   4. **可成交性**：次日一字涨停买不进、到期日跌停卖不掉，都不算你的收益（见 collector/limits.py）；
-  5. **扣成本**：往返佣金 + 印花税 + 过户费，信号和基准扣同一笔，否则比的是谁的摩擦小。
+  5. **扣成本**：往返佣金 + 印花税 + 过户费 + 滑点，信号和基准扣同一笔，
+     否则比的是谁的摩擦小。口径只在 collector/costs.py 维护（默认 0.302%）。
 
 样本口径（`backtest.universe`）：
   - `market`：本地有足够历史、且近 60 日均成交额过门槛的标的，随机抽样（固定种子，
@@ -26,7 +27,7 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 
-from . import db, features as features_mod, limits, universe
+from . import costs, db, features as features_mod, limits, universe
 from .config import watchlist_codes
 from .registry import FactorRegistry
 
@@ -50,12 +51,13 @@ def backtest_cfg(cfg: dict | None) -> dict:
 
 
 def cost_pct(cfg: dict | None) -> float:
-    """往返成本，换算成百分比。默认 佣金万 2.5×2 + 印花税万 5 + 过户费 0.1×2 = 0.102%。"""
-    cost = backtest_cfg(cfg).get("cost") or {}
-    commission = float(cost.get("commission_bps", 2.5)) * 2
-    stamp = float(cost.get("stamp_bps", 5.0))
-    transfer = float(cost.get("transfer_bps", 0.1)) * 2
-    return (commission + stamp + transfer) / 100.0
+    """往返成本，换算成百分比。
+
+    口径只在 `collector/costs.py` 维护：默认 佣金万 2.5×2 + 印花税万 5 +
+    过户费 0.1×2 + 滑点 20 基点 = **0.302%**。以前这里只算显性费用（0.102%），
+    与笔记的实战口径（0.3% 起）不一致，会把每个信号的期望值系统性高估 0.2 个百分点。
+    """
+    return costs.round_trip_pct(cfg)
 
 
 def _names(conn, codes) -> dict[str, str]:

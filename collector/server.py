@@ -20,8 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import (candles as candles_mod, db, flow as flow_mod, market_time, notify, tasks,
-               warehouse as warehouse_mod)
+from . import (candles as candles_mod, costs, db, flow as flow_mod, market_time, notify,
+               tasks, warehouse as warehouse_mod)
 from . import jobs as jobs_mod
 from .config import watchlist_codes
 from .names import display_name
@@ -178,6 +178,7 @@ def _freshness_payload(cfg: dict) -> dict:
 class App:
     QUOTE_TTL = 20.0        # 报价缓存秒数：防止多个标签页把免费源刷爆
     POOL_TTL = 20.0         # 筛选池缓存秒数：它要现算风险层，切标签页不该重算
+    MAINLINE_TTL = 300.0    # 主线要扫全市场日线，5 分钟内重复打开直接用缓存
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -186,6 +187,7 @@ class App:
         self._quote_cache: dict = {}
         self._pool_cache: tuple[float, dict] | None = None
         self._newstock_cache: tuple[float, dict] | None = None
+        self._mainline_cache: tuple[float, dict] | None = None
 
     def quotes(self, codes: list | None = None) -> dict:
         """批量实时报价。只给盯盘用：不落库、不参与任何结论、失败也不影响别的。
@@ -359,6 +361,53 @@ class App:
         finally:
             conn.close()
 
+    def journal(self) -> dict:
+        """交易账本只读视图：未平仓记录 + 组合在险。
+
+        和 /api/factors 一样，读不出来就返回一句人话，绝不白屏。
+        写入只走 CLI（`run.py journal open/close`）——账本要的是"开仓前冻结"，
+        页面上随手改一笔，正好破坏这个前提。
+        """
+        from . import journal as journal_mod
+
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            risk = journal_mod.portfolio_risk(conn, self.cfg)
+            return {
+                "ok": True,
+                "open": journal_mod.list_trades(conn, "open"),
+                "closed": journal_mod.list_trades(conn, "closed")[:20],
+                "risk": risk,
+                "stats": journal_mod.closed_stats(conn),
+                "unlock": journal_mod.unlock(conn),
+                "guardrails": journal_mod.guardrails(conn),
+                "cost": costs.round_trip_pct(self.cfg),
+            }
+        except Exception as exc:            # 页面永远不该白屏
+            message = f"账本读不出来：{type(exc).__name__} {exc}"
+            if "no such table" in str(exc):
+                message += "；先跑 python run.py init-db 升级数据库"
+            return {"ok": False, "message": message}
+        finally:
+            conn.close()
+
+    def mainline(self) -> dict:
+        """主线识别（只读、缓存 5 分钟）。没有行业覆盖就返回一句人话。"""
+        from . import mainline as mainline_mod
+
+        now = time.time()
+        if self._mainline_cache and now - self._mainline_cache[0] < self.MAINLINE_TTL:
+            return self._mainline_cache[1]
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            payload = mainline_mod.build(conn, self.cfg)
+        except Exception as exc:            # 页面永远不该白屏
+            payload = {"ok": False, "message": f"主线读不出来：{type(exc).__name__} {exc}"}
+        finally:
+            conn.close()
+        self._mainline_cache = (now, payload)
+        return payload
+
     # ---- 页面上的任务按钮 ----
 
     def support(self) -> dict:
@@ -438,7 +487,8 @@ class App:
                 if run else None
             )
             payload["min_avg_amount"] = universe_mod.min_avg_amount(self.cfg)
-            payload["outcomes"] = screen_mod.outcome_stats(conn)
+            payload["cost"] = costs.round_trip_pct(self.cfg)
+            payload["outcomes"] = screen_mod.outcome_stats(conn, costs.round_trip_pct(self.cfg))
             # 按交易日聚合 + 多重检验校正：8 个形态里最好的那个，t 值本身就被挑过一遍
             payload["pattern_stats"] = screen_mod.pattern_stats(conn, self.cfg)
             self._pool_cache = (now, payload)
@@ -797,16 +847,24 @@ class App:
             marks = ",".join("?" for _ in codes)
             rows = db.query(
                 conn,
-                f"""SELECT a.trade_date, a.code, a.level, a.signal_type, a.message,
+                f"""SELECT a.trade_date, a.code, a.level, a.signal_type, a.message, a.payload_json,
                            COALESCE(i.name, a.code) AS name
                     FROM alerts a LEFT JOIN instruments i ON i.code = a.code
                     WHERE a.code IN ({marks}) ORDER BY a.trade_date DESC, a.level, a.code LIMIT ?""",
                 (*codes, limit),
             )
-            return [
-                {**dict(row), "name": display_name(row["code"], row["name"]) or row["code"]}
-                for row in rows
-            ]
+            items = []
+            for row in rows:
+                item = dict(row)
+                payload = item.pop("payload_json", None)
+                try:
+                    parsed = json.loads(payload or "{}") if payload else {}
+                    item["if_then"] = parsed.get("if_then") if isinstance(parsed, dict) else None
+                except (TypeError, ValueError):
+                    item["if_then"] = None
+                item["name"] = display_name(item["code"], item["name"]) or item["code"]
+                items.append(item)
+            return items
         finally:
             conn.close()
 
@@ -983,7 +1041,7 @@ def _health_payload(cfg: dict) -> dict:
         "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
                    "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
                    "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis", "/api/pool",
-                   "/api/newstock", "/api/support"],
+                   "/api/newstock", "/api/support", "/api/journal", "/api/mainline"],
     }
 
 
@@ -995,6 +1053,8 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
     """
     conn = db.connect(cfg["_db_path"])
     try:
+        from . import sentiment as sentiment_mod
+
         if trade_date is None:
             row = db.query_one(conn, "SELECT MAX(trade_date) AS d FROM bars_daily")
             trade_date = row["d"] if row else None
@@ -1044,6 +1104,8 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
             "distribution": distribution,
             "gainers": [brief(item) for item in ranked[:10]],
             "losers": [brief(item) for item in ranked[-10:][::-1]],
+            # 情绪阶段是影子标签：页面显示它，但它不参与下面的 breadth / risk 计算。
+            "sentiment": sentiment_mod.latest(conn, cfg),
             # 资金去向：钱在宽基 / 行业主题 ETF / 成交额 / 融资余额之间怎么走。
             # 和"涨跌家数"放在同一页是对的——它们回答的是同一个问题：
             # 今天这波涨跌背后，钱是进来还是出去、往哪个方向挪。
@@ -1083,6 +1145,10 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
                 return _payload_bytes(_screen_payload(app.cfg))
             if path == "/api/factors":
                 return _payload_bytes(app.factors())
+            if path == "/api/journal":
+                return _payload_bytes(app.journal())
+            if path == "/api/mainline":
+                return _payload_bytes(app.mainline())
             if path == "/api/backtest":
                 return _payload_bytes(app.backtest())
             if path == "/api/analysis":

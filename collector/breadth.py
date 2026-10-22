@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import statistics
 
-from . import db, limits, market_time
+from . import db, limits, market_time, sentiment
 
 # 少于这么多只票就不该叫"市场广度"，宁可空着也别给个数。
 # 全市场个股约 5500 只；本地仓库历史日期都能到 5500+，只有当天刚开盘才会很小。
@@ -228,25 +228,47 @@ def board_streaks(conn, dates: list[str] | None = None, lookback: int = 30,
             # 前收和涨跌幅都没有就判不了涨跌停（at_limit_* 两者都要一个）
             streak = 0
             continue
+        # 今天的"连板次日溢价"用的是**昨天收盘封板、今天怎么走**：
+        # 所以要在更新今天的 streak 之前把昨天的值留住。
+        prev_streak = streak
+        today_pct = _pct(bar)
         # 上市阶段：新股头几天不设涨跌幅，那天谈不上"封板"。
         # 用已经建好的日历下标直接减，别每根 K 线都查一次数据库——全市场是百万级的行数。
         listed = listed_cache.get(code)
         days_since = None
         if listed and listed in order and day in order:
             days_since = order[day] - order[listed] + 1
+        key = day
+        slot = None
+        if not wanted or key in wanted:
+            slot = out.setdefault(key, {
+                "max_boards": 0, "broken_limit_count": 0, "streak_up_count": 0,
+                "limit_up_next_sum": 0.0, "limit_up_next_count": 0,
+                "first_board_next_sum": 0.0, "first_board_next_count": 0,
+            })
+            if prev_streak > 0 and today_pct is not None:
+                slot["limit_up_next_sum"] += today_pct
+                slot["limit_up_next_count"] += 1
+                if prev_streak == 1:
+                    slot["first_board_next_sum"] += today_pct
+                    slot["first_board_next_count"] += 1
         if limits.at_limit_up(bar, code, trading_days=days_since):
             streak += 1
         else:
             streak = 0
-        key = day
-        if wanted and key not in wanted:
+        if slot is None:
             continue
-        slot = out.setdefault(key, {"max_boards": 0, "broken_limit_count": 0, "streak_up_count": 0})
         if streak:
             slot["streak_up_count"] += 1
             slot["max_boards"] = max(slot["max_boards"], streak)
         if limits.at_limit_price_hit(bar, code, trading_days=days_since) and streak == 0:
             slot["broken_limit_count"] += 1
+    for slot in out.values():
+        for prefix in ("limit_up_next", "first_board_next"):
+            count = slot.pop(f"{prefix}_count", 0)
+            total = slot.pop(f"{prefix}_sum", 0.0)
+            slot[f"{prefix}_avg"] = round(total / count, 3) if count else None
+            slot[f"{prefix}_count"] = count
     if verbose and out:
         print(f"  连板/炸板：{len(out)} 个交易日，最高 {max(v['max_boards'] for v in out.values())} 连板")
     return out
@@ -279,8 +301,14 @@ def backfill(conn, days: int | None = None, verbose: bool = False,
             slot = streaks.get(trade_date)
             if slot:
                 conn.execute(
-                    "UPDATE market_breadth SET broken_limit_count=?, max_boards=? WHERE trade_date=?",
-                    (slot["broken_limit_count"], slot["max_boards"], trade_date),
+                    """UPDATE market_breadth SET broken_limit_count=?, max_boards=?,
+                           limit_up_next_avg=?, limit_up_next_count=?,
+                           first_board_next_avg=?, first_board_next_count=?
+                       WHERE trade_date=?""",
+                    (slot["broken_limit_count"], slot["max_boards"],
+                     slot.get("limit_up_next_avg"), slot.get("limit_up_next_count"),
+                     slot.get("first_board_next_avg"), slot.get("first_board_next_count"),
+                     trade_date),
                 )
                 conn.commit()
             skipped += 1
@@ -299,4 +327,6 @@ def backfill(conn, days: int | None = None, verbose: bool = False,
         if thin:
             print(f"            另有 {thin} 个交易日样本不足 {min_coverage} 只，没写"
                   "（当天还没补全市场数据）")
+    # 广度补齐之后统一算情绪阶段——它依赖连板/炸板等跨日数据。
+    sentiment.backfill(conn, None, dates, verbose=verbose)
     return {"ok": True, "written": written, "skipped": skipped, "thin": thin, "dates": len(dates)}
