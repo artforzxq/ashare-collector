@@ -244,6 +244,13 @@ bash macos/24-自动运行.command off      # 关掉
 ## 看盘页面
 
 双击 `windows\14-看盘页面.bat`（mac 上是 `macos/14-看盘页面.command`），浏览器打开 <http://127.0.0.1:8765>。
+
+新版 Vue 前端在 `frontend/`，构建后由同一个 Python 服务提供 `/v2/`；旧页面继续保留在 `/`：
+
+```bash
+cd frontend && npm.cmd run build
+cd .. && python run.py web --no-open
+```
 **只监听本机**，关掉那个终端窗口就停止服务。
 
 七个视图（顶部栏切换）：**自选标的 / 市场与扫描 / 因子台账 / 参数回测 / 筛选池 / 新股·次新 / 交易账本**。

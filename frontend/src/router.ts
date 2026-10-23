@@ -1,14 +1,14 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-import BacktestView from './views/BacktestView.vue'
-import FactorsView from './views/FactorsView.vue'
-import JournalView from './views/JournalView.vue'
-import InstrumentView from './views/InstrumentView.vue'
-import MarketView from './views/MarketView.vue'
-import NewStocksView from './views/NewStocksView.vue'
-import OverviewView from './views/OverviewView.vue'
-import ScreenView from './views/ScreenView.vue'
-import SystemView from './views/SystemView.vue'
+const BacktestView = () => import('./views/BacktestView.vue')
+const FactorsView = () => import('./views/FactorsView.vue')
+const InstrumentView = () => import('./views/InstrumentView.vue')
+const JournalView = () => import('./views/JournalView.vue')
+const MarketView = () => import('./views/MarketView.vue')
+const NewStocksView = () => import('./views/NewStocksView.vue')
+const OverviewView = () => import('./views/OverviewView.vue')
+const ScreenView = () => import('./views/ScreenView.vue')
+const SystemView = () => import('./views/SystemView.vue')
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },

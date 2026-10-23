@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from collector import db, server, tasks
 from collector.config import load_config, use_fixture_sources
@@ -121,6 +122,32 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", ctype)
         self.assertIn(b"<canvas", body)
+
+    def test_vue_build_and_spa_routes_are_served(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            assets = build_dir / "assets"
+            assets.mkdir()
+            (build_dir / "index.html").write_text(
+                '<!doctype html><div id="app">vue-v2</div>', encoding="utf-8"
+            )
+            (assets / "app.js").write_text("console.log('v2')", encoding="utf-8")
+
+            with patch.object(server, "V2_DIR", build_dir):
+                status, ctype, body = server.dispatch(self.app, "GET", "/v2/")
+                self.assertEqual(status, 200)
+                self.assertIn("text/html", ctype)
+                self.assertIn(b"vue-v2", body)
+
+                status, ctype, body = server.dispatch(self.app, "GET", "/v2/assets/app.js")
+                self.assertEqual(status, 200)
+                self.assertIn("javascript", ctype)
+                self.assertIn(b"console.log", body)
+
+                status, ctype, body = server.dispatch(self.app, "GET", "/v2/instrument")
+                self.assertEqual(status, 200)
+                self.assertIn("text/html", ctype)
+                self.assertIn(b"vue-v2", body)
 
     def test_watchlist_api(self):
         status, _, body = server.dispatch(self.app, "GET", "/api/watchlist")

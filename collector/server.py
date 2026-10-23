@@ -18,7 +18,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (candles as candles_mod, costs, db, flow as flow_mod, market_time, notify,
                tasks, warehouse as warehouse_mod)
@@ -29,6 +29,7 @@ from .sources import build_source
 from .sources.base import classify_symbol, exchange_of
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+V2_DIR = WEB_DIR / "v2"
 # 筛选池要现算风险层（池外的票没有日终结果），一次接近 1 秒；切标签页时没必要重算。
 # 20 秒的缓存 + 任务启动时作废，足够让手动刷新拿到新数据。
 POOL_CACHE_SECONDS = 20
@@ -1119,6 +1120,46 @@ def _payload_bytes(payload, status: int = 200) -> tuple[int, str, bytes]:
     return status, JSON_TYPE, json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
 
+STATIC_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".ico": "image/x-icon",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".woff2": "font/woff2",
+}
+
+
+def _v2_static(path: str) -> tuple[int, str, bytes]:
+    """Serve the built Vue app while keeping every unknown SPA route on index.html.
+
+    Only files below collector/web/v2 are eligible. A resolved-path check prevents
+    encoded traversal such as /v2/%2e%2e/index.html from escaping the build directory.
+    """
+    index = V2_DIR / "index.html"
+    if not index.exists():
+        return _payload_bytes(
+            {"error": "Vue 前端还没构建；先在 frontend 目录运行 npm.cmd run build"},
+            404,
+        )
+    relative = unquote(path.removeprefix("/v2")).lstrip("/")
+    candidate = (V2_DIR / relative).resolve() if relative else index.resolve()
+    try:
+        candidate.relative_to(V2_DIR.resolve())
+    except ValueError:
+        return _payload_bytes({"error": "非法静态资源路径"}, 404)
+    if candidate.is_file():
+        content_type = STATIC_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
+        return 200, content_type, candidate.read_bytes()
+    if "." not in Path(relative).name:
+        return 200, "text/html; charset=utf-8", index.read_bytes()
+    return _payload_bytes({"error": "静态资源不存在"}, 404)
+
+
 def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[int, str, bytes]:
     """把一次请求变成一次取数。返回 (状态码, Content-Type, 响应体)。"""
     parsed = urlparse(raw_path)
@@ -1128,6 +1169,8 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
         if method == "GET":
             if path in ("/", "/index.html"):
                 return 200, "text/html; charset=utf-8", INDEX_FILE.read_bytes()
+            if path == "/v2" or path.startswith("/v2/"):
+                return _v2_static(path)
             if path == "/api/watchlist":
                 return _payload_bytes({"items": app.watchlist(), "coverage": _coverage(app.cfg)})
             if path == "/api/kline":
