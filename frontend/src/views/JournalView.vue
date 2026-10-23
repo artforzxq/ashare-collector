@@ -19,10 +19,27 @@ type OpenTrade = {
   position_pct?: number | null
 }
 
+type ClosedTrade = {
+  id: number
+  code: string
+  name?: string | null
+  theme?: string | null
+  entry_price: number
+  exit_price?: number | null
+  pnl?: number | null
+  pnl_net?: number | null
+  closed_on?: string | null
+  discipline?: number | null
+  alpha_beta?: string | null
+  exit_note?: string | null
+}
+
 type JournalPayload = {
   ok?: boolean
   message?: string
   open?: OpenTrade[]
+  closed?: ClosedTrade[]
+  cost?: number
   risk?: {
     open_count?: number
     total_risk_pct?: number
@@ -40,9 +57,21 @@ type JournalPayload = {
   }
   stats?: {
     closed?: number
+    n?: number
     win_rate?: number | null
     expectancy?: number | null
     violations?: number
+  }
+  unlock?: {
+    tier?: number
+    n?: number
+    next_at?: number | null
+    healthy?: boolean
+  }
+  guardrails?: {
+    flags?: string[]
+    month_pct?: number | null
+    consecutive_losses?: number
   }
 }
 
@@ -55,6 +84,9 @@ const risk = computed(() => journal.value?.risk || {})
 const limits = computed(() => risk.value.limits || {})
 const breaches = computed(() => risk.value.breaches || [])
 const stats = computed(() => journal.value?.stats || {})
+const closed = computed(() => journal.value?.closed || [])
+const unlock = computed(() => journal.value?.unlock || {})
+const guardrails = computed(() => journal.value?.guardrails || {})
 
 async function loadJournal() {
   loading.value = true
@@ -73,6 +105,10 @@ async function loadJournal() {
 
 function frameworkLabel(value: string) {
   return { core: '核心', satellite: '卫星', short: '短线' }[value] || value
+}
+
+function disciplineLabel(value?: number | null) {
+  return value === 1 ? '按纪律' : value === 0 ? '违规' : '未填'
 }
 
 onMounted(loadJournal)
@@ -120,6 +156,11 @@ onMounted(loadJournal)
         :value="stats.violations || 0"
         detail="与盈亏分开统计"
         :tone="(stats.violations || 0) > 0 ? 'warning' : 'positive'"
+      />
+      <MetricCard
+        label="额度档位"
+        :value="`${unlock.tier || 5}%`"
+        :detail="unlock.next_at ? `再 ${Math.max(0, unlock.next_at - (unlock.n || 0))} 笔进下一档` : '已封顶'"
       />
     </div>
 
@@ -176,6 +217,59 @@ onMounted(loadJournal)
           {{ breach.limit.toFixed(2) }}%
         </p>
       </div>
+    </section>
+
+    <section v-if="(guardrails.flags || []).length" class="surface-card">
+      <div class="section-heading">
+        <div>
+          <span class="section-kicker">GUARDRAILS</span>
+          <h3>熔断与冷却</h3>
+        </div>
+        <StatusPill tone="warning">{{ guardrails.flags?.length }} 项</StatusPill>
+      </div>
+      <p v-for="flag in guardrails.flags || []" :key="flag" class="inline-note is-warning">{{ flag }}</p>
+    </section>
+
+    <section class="surface-card">
+      <div class="section-heading">
+        <div>
+          <span class="section-kicker">CLOSED TRADES</span>
+          <h3>已平仓</h3>
+        </div>
+        <StatusPill>{{ closed.length }} 条展示</StatusPill>
+      </div>
+      <div v-if="!closed.length" class="empty-state compact">还没有已平仓记录。</div>
+      <div v-else class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>标的</th>
+              <th class="num">平仓日</th>
+              <th class="num">入场</th>
+              <th class="num">出场</th>
+              <th class="num">净盈亏</th>
+              <th>纪律</th>
+              <th>归因</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="trade in closed" :key="trade.id">
+              <td><strong>{{ trade.name || trade.code }}</strong><small class="cell-subtitle num">{{ trade.code }} · {{ trade.theme || '—' }}</small></td>
+              <td class="num">{{ trade.closed_on || '—' }}</td>
+              <td class="num">{{ trade.entry_price.toFixed(3) }}</td>
+              <td class="num">{{ trade.exit_price?.toFixed(3) || '—' }}</td>
+              <td class="num" :class="{ positive: (trade.pnl_net || 0) > 0, negative: (trade.pnl_net || 0) < 0 }">
+                {{ trade.pnl_net == null ? '—' : `${trade.pnl_net > 0 ? '+' : ''}${trade.pnl_net.toFixed(0)} 元` }}
+              </td>
+              <td>{{ disciplineLabel(trade.discipline) }}</td>
+              <td>{{ trade.alpha_beta || '—' }}</td>
+              <td>{{ trade.exit_note || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="footnote">往返成本 {{ journal?.cost == null ? '—' : `${journal.cost.toFixed(3)}%` }}；纪律执行与盈亏分开统计。</p>
     </section>
   </div>
 </template>

@@ -5,9 +5,10 @@ import FactorsView from './views/FactorsView.vue'
 import JournalView from './views/JournalView.vue'
 import InstrumentView from './views/InstrumentView.vue'
 import MarketView from './views/MarketView.vue'
+import NewStocksView from './views/NewStocksView.vue'
 import OverviewView from './views/OverviewView.vue'
-import PlaceholderView from './views/PlaceholderView.vue'
 import ScreenView from './views/ScreenView.vue'
+import SystemView from './views/SystemView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },
@@ -74,7 +75,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/new-stocks',
     name: 'new-stocks',
-    component: PlaceholderView,
+    component: NewStocksView,
     meta: {
       title: '新股与次新',
       eyebrow: 'RESEARCH',
@@ -94,7 +95,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/system',
     name: 'system',
-    component: PlaceholderView,
+    component: SystemView,
     meta: {
       title: '系统与数据',
       eyebrow: 'SYSTEM',
