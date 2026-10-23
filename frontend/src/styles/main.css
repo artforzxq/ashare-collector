@@ -930,6 +930,379 @@ a {
   font-size: 12px;
 }
 
+.instrument-hero {
+  overflow: hidden;
+}
+
+.instrument-title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.instrument-title h3 {
+  margin: 3px 0 0;
+  font-size: 24px;
+  font-weight: 620;
+  letter-spacing: -0.035em;
+}
+
+.instrument-title small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.instrument-price {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.instrument-price > strong {
+  font-size: 30px;
+  font-weight: 620;
+  letter-spacing: -0.05em;
+}
+
+.instrument-price > span:not(.status-pill) {
+  font-size: 13px;
+}
+
+.positive {
+  color: var(--positive) !important;
+}
+
+.negative {
+  color: var(--negative) !important;
+}
+
+.tone-up {
+  color: var(--positive);
+}
+
+.tone-down {
+  color: var(--negative);
+}
+
+.instrument-metrics {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  margin-top: 17px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.instrument-metric {
+  display: flex;
+  min-width: 0;
+  min-height: 64px;
+  padding: 10px 12px;
+  border-right: 1px solid var(--line);
+  flex-direction: column;
+  justify-content: center;
+}
+
+.instrument-metric:last-child {
+  border-right: 0;
+}
+
+.instrument-metric span {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.instrument-metric strong {
+  margin-top: 3px;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-note {
+  margin: 11px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.inline-note.is-warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.chart-card {
+  padding-bottom: 8px;
+}
+
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.segmented-control,
+.range-switch {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.segmented-control button,
+.range-switch button {
+  min-height: 31px;
+  padding: 5px 11px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.segmented-control button:last-child,
+.range-switch button:last-child {
+  border-right: 0;
+}
+
+.segmented-control button.active,
+.range-switch button.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.chart-toolbar > .secondary-button {
+  margin-left: auto;
+}
+
+.chart-options {
+  display: flex;
+  gap: 14px;
+  padding: 4px 2px 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.chart-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chart-options input {
+  accent-color: var(--accent);
+}
+
+.echart-host {
+  width: 100%;
+}
+
+.instrument-panels {
+  display: grid;
+  grid-template-columns: 1.15fr 0.9fr 1fr;
+  gap: 14px;
+}
+
+.empty-state.compact {
+  min-height: 88px;
+}
+
+.factor-list,
+.level-list,
+.alert-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.factor-row,
+.level-row {
+  display: grid;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  border-top: 1px solid var(--line);
+}
+
+.factor-row {
+  grid-template-columns: minmax(0, 1fr) 42px 57px 52px;
+}
+
+.factor-main,
+.level-row > small {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.factor-main strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.factor-main small,
+.level-row > small {
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+.factor-score,
+.factor-contribution {
+  text-align: right;
+  font-size: 10px;
+}
+
+.factor-weight {
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+.level-row {
+  grid-template-columns: 62px minmax(0, 1fr) 52px;
+}
+
+.level-row > small {
+  grid-column: 2 / -1;
+  overflow: hidden;
+  margin-top: -6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.level-kind,
+.alert-level {
+  display: inline-flex;
+  width: fit-content;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 8.5px;
+}
+
+.level-kind.is-support {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.level-kind.is-resistance,
+.alert-level.is-p0 {
+  background: var(--positive-soft);
+  color: var(--positive);
+}
+
+.alert-level.is-p1 {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.level-row strong {
+  font-size: 10.5px;
+}
+
+.level-distance {
+  color: var(--muted);
+  font-size: 9px;
+  text-align: right;
+}
+
+.alert-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.alert-row strong {
+  display: block;
+  font-size: 10.5px;
+}
+
+.alert-row p {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.alert-row small {
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+.analysis-answer {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.analysis-answer p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.analysis-answer footer {
+  margin-top: 10px;
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+@media (max-width: 1100px) {
+  .instrument-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .instrument-metric:nth-child(4) {
+    border-right: 0;
+  }
+
+  .instrument-panels {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .instrument-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .instrument-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .instrument-metric:nth-child(even) {
+    border-right: 0;
+  }
+
+  .chart-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .chart-toolbar > .secondary-button {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .chart-options {
+    flex-wrap: wrap;
+  }
+}
+
 .text-link {
   display: inline-flex;
   align-items: center;
