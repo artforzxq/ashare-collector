@@ -1143,7 +1143,8 @@ def _v2_static(path: str) -> tuple[int, str, bytes]:
     index = V2_DIR / "index.html"
     if not index.exists():
         return _payload_bytes(
-            {"error": "Vue 前端还没构建；先在 frontend 目录运行 npm.cmd run build"},
+            {"error": "Vue 前端还没构建；先在 frontend 目录运行 npm run build"
+                      "（Windows 用 npm.cmd run build）"},
             404,
         )
     relative = unquote(path.removeprefix("/v2")).lstrip("/")

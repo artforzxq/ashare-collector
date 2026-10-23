@@ -74,7 +74,7 @@ onMounted(loadOverview)
     <PageHeader
       eyebrow="TODAY"
       title="先看状态，再看机会"
-      description="新版前端的基础骨架已经接通现有 JSON API。页面边界按决策任务组织，不再把所有工具挤进同一张长页。"
+      description="新版前端九个视图均已接通现有 JSON API。页面按决策任务组织，数据只读，写入仍走 CLI 与后端任务。"
     >
       <template #actions>
         <button class="secondary-button" type="button" :disabled="loading" @click="loadOverview">
@@ -99,9 +99,9 @@ onMounted(loadOverview)
       />
       <MetricCard label="最新日线" :value="latestDate" detail="所有观察标的中的最新日期" />
       <MetricCard
-        label="迁移阶段"
-        value="骨架"
-        detail="壳层、导航、主题与 API 客户端"
+        label="前端迁移"
+        value="完成"
+        detail="9 个视图已接通 · 旧版 / 继续保留"
         tone="positive"
       />
     </div>
@@ -145,8 +145,8 @@ onMounted(loadOverview)
       <section class="surface-card">
         <div class="section-heading">
           <div>
-            <span class="section-kicker">BUILD PLAN</span>
-            <h3>迁移顺序</h3>
+            <span class="section-kicker">SURFACE</span>
+            <h3>工作台覆盖</h3>
           </div>
           <Database :size="18" />
         </div>
@@ -158,18 +158,25 @@ onMounted(loadOverview)
               <p>Vue、TypeScript、路由、主题、API 客户端</p>
             </div>
           </li>
-          <li>
+          <li class="is-done">
             <span>02</span>
             <div>
               <strong>核心看盘</strong>
-              <p>单票详情、K 线、分时与市场总览</p>
+              <p>总览、单票、K 线、分时、市场与资金</p>
             </div>
           </li>
-          <li>
+          <li class="is-done">
             <span>03</span>
             <div>
               <strong>研究与账本</strong>
-              <p>筛选、因子、回测、交易记录</p>
+              <p>筛选、因子、回测、新股、交易账本</p>
+            </div>
+          </li>
+          <li class="is-done">
+            <span>04</span>
+            <div>
+              <strong>系统与数据</strong>
+              <p>健康、任务、路由与规则版本</p>
             </div>
           </li>
         </ol>
@@ -178,9 +185,9 @@ onMounted(loadOverview)
       <RouterLink class="action-card" to="/journal">
         <span class="action-icon"><Eye :size="20" /></span>
         <span>
-          <small>首个可用业务页</small>
+          <small>决策记录</small>
           <strong>查看交易账本</strong>
-          <p>已经接通真实接口，演示新壳层下的数据加载、错误与空状态。</p>
+          <p>读取未平仓、组合在险与纪律统计；开仓和平仓仍由 CLI 负责。</p>
         </span>
         <ArrowRight :size="18" />
       </RouterLink>

@@ -245,15 +245,25 @@ bash macos/24-自动运行.command off      # 关掉
 
 双击 `windows\14-看盘页面.bat`（mac 上是 `macos/14-看盘页面.command`），浏览器打开 <http://127.0.0.1:8765>。
 
-新版 Vue 前端在 `frontend/`，构建后由同一个 Python 服务提供 `/v2/`；旧页面继续保留在 `/`：
+新版 Vue 前端在 `frontend/`，构建后由同一个 Python 服务提供 `/v2/`；旧页面继续保留在 `/`。
+**构建产物不入库**（`collector/web/v2/` 在 `.gitignore` 里），所以克隆后访问 `/v2/` 会先拿到
+404 和一句提示——按下面跑一次就好：
 
 ```bash
-cd frontend && npm.cmd run build
-cd .. && python run.py web --no-open
+cd frontend
+npm install          # 只有首次、或 package.json 变了才需要
+npm run build        # 输出到 collector/web/v2/
+cd .. && python run.py web
 ```
+
+Windows 上把 `npm` 换成 `npm.cmd`（PowerShell / cmd 里直接 `npm` 通常也能用）。
+`npm install` 那一步不能省——`node_modules/` 同样不入库。
+**只跑 Python 部分不需要 Node**，`/` 上的旧页面一直可用。
 **只监听本机**，关掉那个终端窗口就停止服务。
 
-七个视图（顶部栏切换）：**自选标的 / 市场与扫描 / 因子台账 / 参数回测 / 筛选池 / 新股·次新 / 交易账本**。
+旧页面七个视图（顶部栏切换）：**自选标的 / 市场与扫描 / 因子台账 / 参数回测 / 筛选池 / 新股·次新 / 交易账本**。
+新版 `/v2/` 按 4 组共 9 个视图：**总览 / 单票工作台 / 市场总览 / 筛选池 / 因子台账 / 参数回测 /
+新股与次新 / 交易账本 / 系统与数据**。
 
 页面顶部常驻一条**数据状态条**，回答"我现在看到的数字有多新"：
 `日线 2026-09-17 ✅当日 · 特征 ✅ · 广度 ⚠差一天 · 分时 11:05 ⏱盘中 · 时段 交易中 · 上次日终 11:18`。
@@ -269,8 +279,9 @@ cd .. && python run.py web --no-open
 - 参数回测：① 参数网格（按 20 日净超额排序，当前配置高亮，带邻域表现）→ ② 怎么读这张表
 - 筛选池：① 口径（标的池门槛、回看窗口、上次扫描）→ ② 候选进池 → ③ 池内现状 → ④ 形态表现
 
-后两个视图是只读的：因子台账直接读库里的 `factor_registry` + `factor_contributions`，
-回测视图读 `回测/回测结果-*.json`（跑过 CLI 或页面上的「跑一次回测」就会有）。
+**因子台账和参数回测是只读的**：因子台账直接读库里的 `factor_registry` +
+`factor_contributions`，回测视图读 `回测/回测结果-*.json`
+（跑过 CLI 或页面上的「跑一次回测」就会有）。
 
 ### 筛选池这一页在回答什么
 

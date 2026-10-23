@@ -1,12 +1,36 @@
 # AGENTS.md — 动手前先读这一份
 
-A 股个人交易提醒系统（Python + SQLite，没有 web 框架，只硬依赖 PyYAML）。
+A 股个人交易提醒系统（Python + SQLite，**后端**没有 web 框架，只硬依赖 PyYAML）。
+
+> **前端另有一层构建**（2026-10-23 起）：`frontend/` 是 Vue 3 + TypeScript + Vite 工程，
+> 构建产物输出到 `collector/web/v2/`，由同一个 Python 服务挂在 `/v2/`。见下面「前端」一节。
+> 只跑 Python 部分**不需要** Node，`/` 上的旧单页页面一直可用。
+
 这份文件是**给 AI 助手的项目须知**：只写"不知道就会踩坑"的东西。
 完整的设计理由与实测证据在 `README.md`（很长，但每条结论都附了数据）；
 数据源的取舍在 `docs/数据源对照-a-stock-data.md`。
 
 > 先跑 `python run.py doctor` —— 它能回答"环境/依赖/数据库/配置/数据源现在什么状态"，
 > 比翻文档快。
+
+## 前端（`frontend/`）
+
+两个页面并存，**改前端前先确认改的是哪一个**：
+
+| 路径 | 文件 | 状态 |
+| --- | --- | --- |
+| `/` | `collector/web/index.html`（单文件，约 2900 行） | 旧版，仍在服务，迁移完成前不动 |
+| `/v2/` | `frontend/src/**` → 构建到 `collector/web/v2/` | 新版 Vue，9 个视图 |
+
+- **构建产物不入库**：`collector/web/v2/` 在 `.gitignore` 里。克隆后访问 `/v2/` 会拿到 404
+  和一句"先在 frontend 目录运行 npm run build"——**这是预期行为，不是 bug**。
+- 构建：`cd frontend && npm install && npm run build`。
+  `npm install` 只在首次（或 `package.json` / `package-lock.json` 变化后）需要。
+- **`npm.cmd` 只是 Windows 写法**，macOS/Linux 用 `npm`。文档和注释里别只写一种。
+- 前端只消费 `collector/server.py` 的 JSON 接口，**不许在浏览器里重算状态**
+  （硬约束第 2 条同样适用于前端）；涨红跌绿的配色在明暗两套主题下都要成立。
+- 前端自带 Vitest：`cd frontend && npm test`。改 `frontend/src` 至少跑一次；
+  只改 Python 时不用跑。
 
 ## 硬约束（改代码前必须遵守）
 
@@ -97,9 +121,12 @@ AI 通过 `journal open/close` 录入并回报编号与风险告警；周末导�
 | 风险层分布 | `python run.py riskstats` |
 | 龙虎榜+资金流 / 两融 / 资金去向 | `python run.py flows` / `margin` / `flow` |
 | 离线自检（夹具源跑通全链路） | `python run.py selftest` |
+| 看盘页面（旧版在 `/`，新版在 `/v2/`） | `python run.py web`（`--no-open` 不弹浏览器） |
+| 构建新版前端（首次要先 `npm install`） | `cd frontend && npm install && npm run build` |
 
 启动器：`windows\*.bat`（mac 上是 `macos\*.command`，同编号）。编号 20–28 是最近加的，
-含义见 README 的"启动文件清单"。
+含义见 README 的"启动文件清单"。**启动器只有编号成对的两套，没有"构建前端"的入口**——
+前端构建目前只能手敲上面那条命令。
 
 ## 测试
 
@@ -115,6 +142,15 @@ python run_tests.py tests.test_risk.RiskAssessTests   # 只跑一个类
 
 改完代码至少跑一次全量；只改文档/启动器时，跑受影响的文件即可
 （启动器改动看 `tests/test_open_target.py`）。
+
+前端是**另一套**测试，用 Vitest，不归 `run_tests.py` 管：
+
+```bash
+cd frontend && npm test        # 14 个 *.test.ts，jsdom 环境
+```
+
+改 `frontend/src/**` 跑这个；只改 Python 不用跑。两套都要跑的情况（改了接口契约）
+= `python run_tests.py` + `cd frontend && npm test`。
 
 ## 反复踩到的坑（详见 README「踩过的坑」）
 

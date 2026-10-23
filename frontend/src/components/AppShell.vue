@@ -217,7 +217,7 @@ function stateLabel(value?: string | null) {
 
       <footer class="sidebar-footer">
         <a href="/" class="legacy-link">打开旧版页面</a>
-        <span>新版骨架 · 数据只读</span>
+        <span>新版前端 · 数据只读</span>
       </footer>
     </aside>
 

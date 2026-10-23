@@ -1,5 +1,8 @@
 # Web Vue Full Migration Implementation Plan
 
+> 命令里的 `npm` 适用于 macOS / Linux；Windows 的 cmd / PowerShell 用 `npm.cmd`。
+> Task 1–8 已全部实现并由提交记录验证，复选框已补齐。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the single-file legacy dashboard with a complete Vue 3 frontend while preserving every existing data view, action and API contract.
@@ -39,11 +42,11 @@
 - Produces: `useAppStore()` with watchlist, selected code, search, add/remove and core refresh
 - Produces: `chartOptionForCandles(payload, flags)`, `chartOptionForIntraday(payload)`
 
-- [ ] **Step 1: Write failing format and chart option tests.**
-- [ ] **Step 2: Run `npm.cmd test` and verify missing modules fail.**
-- [ ] **Step 3: Implement shared services, store and ECharts wrapper.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit the shared foundation.**
+- [x] **Step 1: Write failing format and chart option tests.**
+- [x] **Step 2: Run `npm test` and verify missing modules fail.**
+- [x] **Step 3: Implement shared services, store and ECharts wrapper.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit the shared foundation.**
 
 ### Task 2: Global Shell and Watchlist
 
@@ -58,11 +61,11 @@
 - Produces: searchable watchlist, add/remove actions, freshness strip, selected-code navigation
 - Produces: responsive grouped navigation for all seven legacy work areas
 
-- [ ] **Step 1: Add a failing navigation/domain test for every migrated route.**
-- [ ] **Step 2: Run the focused test and verify it fails.**
-- [ ] **Step 3: Implement the shell and watchlist interactions.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit the shell.**
+- [x] **Step 1: Add a failing navigation/domain test for every migrated route.**
+- [x] **Step 2: Run the focused test and verify it fails.**
+- [x] **Step 3: Implement the shell and watchlist interactions.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit the shell.**
 
 ### Task 3: Instrument Workbench
 
@@ -80,11 +83,11 @@
 - Consumes: `/api/kline`, `/api/intraday`, `/api/quotes`, `/api/alerts`, `/api/meta`, `/api/analysis`
 - Produces: day/intraday chart switch, range and overlay controls, factor/level/alert panels, AI analysis action
 
-- [ ] **Step 1: Write a failing component test that selects a code and renders daily metrics.**
-- [ ] **Step 2: Run it and verify the missing component failure.**
-- [ ] **Step 3: Implement the instrument view and subcomponents.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit the instrument workbench.**
+- [x] **Step 1: Write a failing component test that selects a code and renders daily metrics.**
+- [x] **Step 2: Run it and verify the missing component failure.**
+- [x] **Step 3: Implement the instrument view and subcomponents.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit the instrument workbench.**
 
 ### Task 4: Market Dashboard
 
@@ -102,11 +105,11 @@
 - Consumes: `/api/market`, `/api/mainline`, `/api/support`
 - Produces: breadth statistics, distribution, sentiment stage, mainline candidates, gains/losses, flow chart, support panel
 
-- [ ] **Step 1: Write a failing market render test with a representative payload.**
-- [ ] **Step 2: Run it and verify the missing view failure.**
-- [ ] **Step 3: Implement the market dashboard.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit the market dashboard.**
+- [x] **Step 1: Write a failing market render test with a representative payload.**
+- [x] **Step 2: Run it and verify the missing view failure.**
+- [x] **Step 3: Implement the market dashboard.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit the market dashboard.**
 
 ### Task 5: Screening Pool
 
@@ -122,11 +125,11 @@
 - Consumes: `/api/pool`
 - Produces: candidate ranking, watchlist membership, outcome table and sample warnings
 
-- [ ] **Step 1: Write a failing test for candidate and outcome display.**
-- [ ] **Step 2: Run it and verify failure.**
-- [ ] **Step 3: Implement the screening pool.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit the screening pool.**
+- [x] **Step 1: Write a failing test for candidate and outcome display.**
+- [x] **Step 2: Run it and verify failure.**
+- [x] **Step 3: Implement the screening pool.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit the screening pool.**
 
 ### Task 6: Factors and Backtest
 
@@ -142,11 +145,11 @@
 - Consumes: `/api/factors`, `/api/backtest`, `/api/analysis`
 - Produces: factor KPIs/table/shadow progress, backtest KPIs/table/turnover groups, analysis actions
 
-- [ ] **Step 1: Write failing tests for factor and backtest summaries.**
-- [ ] **Step 2: Run focused tests and verify failure.**
-- [ ] **Step 3: Implement both research views.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit factors and backtest.**
+- [x] **Step 1: Write failing tests for factor and backtest summaries.**
+- [x] **Step 2: Run focused tests and verify failure.**
+- [x] **Step 3: Implement both research views.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit factors and backtest.**
 
 ### Task 7: New Stocks, Journal Completion and System Jobs
 
@@ -163,11 +166,11 @@
 - Consumes: `/api/newstock`, `/api/journal`, `/api/jobs`, `/api/health`
 - Produces: new/recent listings, closed-journal table, unlock/guardrails, runnable jobs and live log
 
-- [ ] **Step 1: Write failing tests for new-stock and journal completion.**
-- [ ] **Step 2: Run focused tests and verify failure.**
-- [ ] **Step 3: Implement the three pages and job runner.**
-- [ ] **Step 4: Run tests and build.**
-- [ ] **Step 5: Commit these views.**
+- [x] **Step 1: Write failing tests for new-stock and journal completion.**
+- [x] **Step 2: Run focused tests and verify failure.**
+- [x] **Step 3: Implement the three pages and job runner.**
+- [x] **Step 4: Run tests and build.**
+- [x] **Step 5: Commit these views.**
 
 ### Task 8: Static Integration and Full Verification
 
@@ -181,8 +184,8 @@
 - Produces: Python serves built `/v2` assets and SPA fallback
 - Produces: legacy `/` remains available
 
-- [ ] **Step 1: Write a failing server test for `/v2/` and a built asset route.**
-- [ ] **Step 2: Run the focused Python test and verify failure.**
-- [ ] **Step 3: Implement static file serving and SPA fallback.**
-- [ ] **Step 4: Run frontend tests, frontend build, and affected Python tests.**
-- [ ] **Step 5: Commit static integration.**
+- [x] **Step 1: Write a failing server test for `/v2/` and a built asset route.**
+- [x] **Step 2: Run the focused Python test and verify failure.**
+- [x] **Step 3: Implement static file serving and SPA fallback.**
+- [x] **Step 4: Run frontend tests, frontend build, and affected Python tests.**
+- [x] **Step 5: Commit static integration.**

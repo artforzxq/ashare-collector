@@ -22,6 +22,7 @@ data/README.txt
 # 推送 token 与推送状态：本地秘密 / 运行状态，不进版本库
 data/*.token
 data/last-push.txt
+data/weekly-state.json
 
 # 运行日志
 logs/
@@ -37,6 +38,7 @@ venv/
 # ---- 编辑器与系统 ----
 .vscode/*.local.json
 .idea/
+.workbuddy-ai/
 .DS_Store
 Thumbs.db
 desktop.ini
