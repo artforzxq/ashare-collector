@@ -5,6 +5,7 @@ import InstrumentView from './views/InstrumentView.vue'
 import MarketView from './views/MarketView.vue'
 import OverviewView from './views/OverviewView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
+import ScreenView from './views/ScreenView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },
@@ -41,7 +42,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/screen',
     name: 'screen',
-    component: PlaceholderView,
+    component: ScreenView,
     meta: {
       title: '筛选池',
       eyebrow: 'RESEARCH',

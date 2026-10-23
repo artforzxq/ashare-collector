@@ -1602,6 +1602,44 @@ a {
   }
 }
 
+.table-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 600;
+  text-align: left;
+}
+
+.table-link:hover {
+  color: var(--accent);
+}
+
+.inline-button {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.inline-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.inline-button.is-danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.warning-text {
+  color: var(--warning) !important;
+}
+
 .text-link {
   display: inline-flex;
   align-items: center;
