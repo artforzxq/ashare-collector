@@ -38,6 +38,7 @@ TABLE_DOCS: dict[str, str] = {
     "trades": "交易账本：开仓假设冻结、平仓只补结果、组合在险按合并口径算",
     "industry_history": "行业分类时点快照：从第一次同步起，历史回看才精确",
     "broker_executions": "券商成交明细：通用 CSV 导入，FIFO 对账用，不改交易账本",
+    "job_runs": "任务执行台账：页面任务的每次触发、状态、耗时与结果（服务重启后仍保留）",
 }
 
 # 字段说明：(中文名/含义, 补充提示)
@@ -458,6 +459,20 @@ FIELD_DOCS: dict[str, dict[str, tuple[str, str]]] = {
         "other_fee": ("其他费用", "元"),
         "fee_total": ("费用合计", "元"),
         "raw_json": ("原始行", "保留券商导出内容，便于核对"),
+        "created_at": ("写入时间", ""),
+    },
+    "job_runs": {
+        "id": ("自增主键", ""),
+        "job_key": ("任务键", "daily / screen / sync ..."),
+        "title": ("任务名", "触发时的显示名"),
+        "trigger": ("触发方式", "manual / schedule"),
+        "scheduled_for": ("计划时间", "手动任务为空"),
+        "status": ("状态", "running / done / failed / interrupted"),
+        "started_at": ("开始时间", "完整日期时间"),
+        "finished_at": ("结束时间", "完整日期时间"),
+        "result": ("结果摘要", ""),
+        "error": ("错误", ""),
+        "log_tail": ("日志尾部", "最近 20 行"),
         "created_at": ("写入时间", ""),
     },
 }

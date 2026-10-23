@@ -4,6 +4,7 @@
 空库都要给出一句人话，页面才不至于白屏。
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -154,6 +155,14 @@ class RouteTests(unittest.TestCase):
         routes = str(body)
         self.assertIn("/api/freshness", routes)
         self.assertIn("/api/quotes", routes)
+        payload = json.loads(body)
+        summary = payload["route_summary"]
+        self.assertEqual(summary["paths"], len(payload["routes"]))
+        self.assertEqual(summary["endpoints"], summary["online"])
+        self.assertEqual(summary["by_method"]["GET"] + summary["by_method"]["POST"],
+                         summary["endpoints"])
+        self.assertEqual(sum(slot["paths"] for slot in summary["by_group"]),
+                         summary["paths"])
 
 
 if __name__ == "__main__":

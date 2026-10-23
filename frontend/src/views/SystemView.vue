@@ -14,6 +14,15 @@ type HealthPayload = {
   code_mtime: string
   stale: boolean
   routes: string[]
+  route_details?: Array<{ path: string; methods: string[]; group: string; online: boolean }>
+  route_summary?: {
+    paths: number
+    endpoints: number
+    online: number
+    by_method: Record<string, number>
+    by_group: Array<{ group: string; paths: number; endpoints: number }>
+  }
+  page_routes?: Array<{ path: string; label: string; online: boolean }>
 }
 
 type MetaPayload = {
@@ -26,6 +35,18 @@ const health = ref<HealthPayload | null>(null)
 const meta = ref<MetaPayload | null>(null)
 const loading = ref(false)
 const error = ref('')
+const routeSummary = computed(() => health.value?.route_summary)
+const routeGroups = computed(() => {
+  const groups = new Map<string, Array<{ method: string; path: string; online: boolean }>>()
+  for (const route of health.value?.route_details || []) {
+    const list = groups.get(route.group) || []
+    for (const method of route.methods) {
+      list.push({ method, path: route.path, online: route.online })
+    }
+    groups.set(route.group, list)
+  }
+  return [...groups.entries()].map(([group, routes]) => ({ group, routes }))
+})
 
 const statusItems = computed(() => [
   {
@@ -46,8 +67,10 @@ const statusItems = computed(() => [
   },
   {
     label: 'API 路由',
-    value: health.value?.routes?.length || 0,
-    detail: '当前服务已注册',
+    value: routeSummary.value ? `${routeSummary.value.online}/${routeSummary.value.endpoints}` : '—',
+    detail: routeSummary.value
+      ? `${routeSummary.value.paths} 个路径 · GET ${routeSummary.value.by_method.GET || 0} · POST ${routeSummary.value.by_method.POST || 0}`
+      : '当前服务已注册',
   },
 ])
 
@@ -131,10 +154,48 @@ onMounted(loadSystem)
           <span class="section-kicker">API SURFACE</span>
           <h3>已注册路由</h3>
         </div>
-        <StatusPill>{{ health?.routes?.length || 0 }}</StatusPill>
+        <StatusPill :tone="routeSummary && routeSummary.online === routeSummary.endpoints ? 'positive' : 'warning'">
+          {{ routeSummary ? `${routeSummary.online}/${routeSummary.endpoints} 在线` : '—' }}
+        </StatusPill>
       </div>
-      <div class="api-routes">
-        <code v-for="route in health?.routes || []" :key="route">{{ route }}</code>
+
+      <div v-if="routeSummary" class="route-summary-grid">
+        <div><span>方法端点</span><strong class="num">{{ routeSummary.endpoints }}</strong></div>
+        <div><span>在线端点</span><strong class="num">{{ routeSummary.online }}</strong></div>
+        <div><span>GET</span><strong class="num">{{ routeSummary.by_method.GET || 0 }}</strong></div>
+        <div><span>POST</span><strong class="num">{{ routeSummary.by_method.POST || 0 }}</strong></div>
+        <div><span>URL 路径</span><strong class="num">{{ routeSummary.paths }}</strong></div>
+      </div>
+
+      <div v-if="routeGroups.length" class="route-groups">
+        <section v-for="group in routeGroups" :key="group.group" class="route-group">
+          <header>
+            <strong>{{ group.group }}</strong>
+            <span>
+              {{ routeSummary?.by_group.find((item) => item.group === group.group)?.paths || 0 }} 路径 /
+              {{ group.routes.length }} 端点
+            </span>
+          </header>
+          <div v-for="route in group.routes" :key="`${route.method}-${route.path}`" class="route-line">
+            <span class="route-method">{{ route.method }}</span>
+            <code>{{ route.path }}</code>
+            <span class="online-dot" :class="{ offline: !route.online }">
+              {{ route.online ? '在线' : '离线' }}
+            </span>
+          </div>
+        </section>
+      </div>
+
+      <div class="page-entry-list">
+        <strong>页面入口</strong>
+        <div v-for="page in health?.page_routes || []" :key="page.path" class="route-line">
+          <span class="route-method">PAGE</span>
+          <code>{{ page.path }}</code>
+          <span>{{ page.label }}</span>
+          <span class="online-dot" :class="{ offline: !page.online }">
+            {{ page.online ? '在线' : '未构建' }}
+          </span>
+        </div>
       </div>
     </section>
   </div>

@@ -184,7 +184,8 @@ class App:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.jobs = jobs_mod.JobManager()
+        root = Path(cfg.get("_project_root") or ".")
+        self.jobs = jobs_mod.JobManager(cfg.get("_db_path"), root / "schema.sql")
         self._quote_cache: dict = {}
         self._pool_cache: tuple[float, dict] | None = None
         self._newstock_cache: tuple[float, dict] | None = None
@@ -460,7 +461,9 @@ class App:
         self._newstock_cache = (now, payload)
         return payload
 
-    def pool(self, force: bool = False) -> dict:
+    def pool(self, force: bool = False, kind: str = "all", market_sort: bool = False,
+             liquid_only: bool = False, min_hits: int | None = None,
+             only_actionable: bool = False) -> dict:
         """筛选池：三段拼起来，回答"我现在该看什么"。
 
         ① 口径：回看几个筛选日、至少命中几次、成交额门槛、上次扫描扫了多少只；
@@ -473,7 +476,10 @@ class App:
 
         now = time.time()
         if not force and self._pool_cache and now - self._pool_cache[0] < self.POOL_TTL:
-            return self._pool_cache[1]
+            return candidates_mod.apply_view(
+                self._pool_cache[1], kind=kind, market_sort=market_sort,
+                liquid_only=liquid_only, min_hits=min_hits,
+                only_actionable=only_actionable)
 
         conn = db.connect(self.cfg["_db_path"])
         try:
@@ -492,15 +498,50 @@ class App:
             payload["outcomes"] = screen_mod.outcome_stats(conn, costs.round_trip_pct(self.cfg))
             # 按交易日聚合 + 多重检验校正：8 个形态里最好的那个，t 值本身就被挑过一遍
             payload["pattern_stats"] = screen_mod.pattern_stats(conn, self.cfg)
+            market = db.query_one(
+                conn,
+                """SELECT trade_date, up_ratio, limit_up_count, limit_down_count,
+                          broken_limit_count, max_boards, total_amount,
+                          sentiment_stage, sentiment_note
+                     FROM market_breadth WHERE trade_date<=?
+                    ORDER BY trade_date DESC LIMIT 1""",
+                (payload["trade_date"],),
+            )
+            payload["market"] = (
+                {**dict(market), "exact": market["trade_date"] == payload["trade_date"]}
+                if market else None
+            )
             self._pool_cache = (now, payload)
-            return payload
+            return candidates_mod.apply_view(
+                payload, kind=kind, market_sort=market_sort,
+                liquid_only=liquid_only, min_hits=min_hits,
+                only_actionable=only_actionable)
         except Exception as exc:            # 页面永远不该白屏
             return {"ok": False, "message": f"筛选池读不出来：{type(exc).__name__} {exc}"}
         finally:
             conn.close()
 
     def job_state(self) -> dict:
-        return self.jobs.state()
+        from . import job_plan as job_plan_mod
+
+        state = self.jobs.state()
+        conn = db.connect(self.cfg["_db_path"])
+        try:
+            plan = job_plan_mod.build(conn, self.cfg)
+        except Exception as exc:
+            plan = {"jobs": [], "schedule": [], "summary": {},
+                    "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            conn.close()
+        state.update({
+            "plan": plan.get("jobs", []),
+            "schedule": plan.get("schedule", []),
+            "summary": plan.get("summary", {}),
+            "reference_day": plan.get("reference_day"),
+            "server_now": plan.get("now"),
+            "plan_error": plan.get("error"),
+        })
+        return state
 
     def run_job(self, key: str, code: str = "", scope: str = "") -> dict:
         """页面按钮统一走这里：同一时刻只允许一个任务。
@@ -1023,6 +1064,30 @@ def _meta_payload(cfg: dict) -> dict:
     }
 
 
+API_ROUTE_SPECS = (
+    {"path": "/api/watchlist", "methods": ("GET", "POST"), "group": "自选与提醒"},
+    {"path": "/api/kline", "methods": ("GET",), "group": "自选与提醒"},
+    {"path": "/api/intraday", "methods": ("GET",), "group": "自选与提醒"},
+    {"path": "/api/quotes", "methods": ("GET",), "group": "自选与提醒"},
+    {"path": "/api/freshness", "methods": ("GET",), "group": "自选与提醒"},
+    {"path": "/api/alerts", "methods": ("GET",), "group": "自选与提醒"},
+    {"path": "/api/search", "methods": ("GET",), "group": "自选与提醒"},
+    {"path": "/api/market", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/screen", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/pool", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/support", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/mainline", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/newstock", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/factors", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/backtest", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/analysis", "methods": ("GET",), "group": "市场与研究"},
+    {"path": "/api/journal", "methods": ("GET",), "group": "系统与任务"},
+    {"path": "/api/jobs", "methods": ("GET", "POST"), "group": "系统与任务"},
+    {"path": "/api/meta", "methods": ("GET",), "group": "系统与任务"},
+    {"path": "/api/health", "methods": ("GET",), "group": "系统与任务"},
+)
+
+
 def _health_payload(cfg: dict) -> dict:
     """页面用来自检"服务是不是旧进程"。
 
@@ -1035,14 +1100,38 @@ def _health_payload(cfg: dict) -> dict:
         (path.stat().st_mtime for path in modules.rglob("*.py")),
         default=0,
     )
+    details = [
+        {"path": spec["path"], "methods": list(spec["methods"]),
+         "group": spec["group"], "online": True}
+        for spec in API_ROUTE_SPECS
+    ]
+    by_method: dict[str, int] = {}
+    by_group: dict[str, dict] = {}
+    for item in details:
+        slot = by_group.setdefault(item["group"], {"group": item["group"], "paths": 0, "endpoints": 0})
+        slot["paths"] += 1
+        slot["endpoints"] += len(item["methods"])
+        for method in item["methods"]:
+            by_method[method] = by_method.get(method, 0) + 1
+    endpoints = sum(len(item["methods"]) for item in details)
+    page_routes = [
+        {"path": "/", "label": "旧版单页", "online": INDEX_FILE.exists()},
+        {"path": "/v2/", "label": "Vue 新版", "online": (V2_DIR / "index.html").exists()},
+    ]
     return {
         "process_started_at": PROCESS_STARTED_AT,
         "code_mtime": datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S"),
         "stale": newest > PROCESS_STARTED_TS,
-        "routes": ["/api/watchlist", "/api/kline", "/api/intraday", "/api/quotes", "/api/freshness",
-                   "/api/meta", "/api/market", "/api/screen", "/api/alerts", "/api/search",
-                   "/api/jobs", "/api/factors", "/api/backtest", "/api/analysis", "/api/pool",
-                   "/api/newstock", "/api/support", "/api/journal", "/api/mainline"],
+        "routes": [item["path"] for item in details],
+        "route_details": details,
+        "route_summary": {
+            "paths": len(details),
+            "endpoints": endpoints,
+            "online": endpoints,
+            "by_method": by_method,
+            "by_group": list(by_group.values()),
+        },
+        "page_routes": page_routes,
     }
 
 
@@ -1054,6 +1143,7 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
     """
     conn = db.connect(cfg["_db_path"])
     try:
+        from . import amounts as amounts_mod
         from . import sentiment as sentiment_mod
 
         if trade_date is None:
@@ -1081,14 +1171,25 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
         pcts = sorted(row["pct_chg"] for row in rows)
         sample = len(pcts)
         median = pcts[sample // 2] if sample else None
-        buckets = [("跌超 7%", -100, -7), ("跌 3~7%", -7, -3), ("跌 0~3%", -3, 0),
-                   ("涨 0~3%", 0, 3), ("涨 3~7%", 3, 7), ("涨超 7%", 7, 100)]
         distribution = [
-            {"label": label, "count": sum(1 for value in pcts if low <= value < high)}
-            for label, low, high in buckets
+            {"label": "跌超 7%", "count": sum(1 for value in pcts if value < -7),
+             "direction": "down"},
+            {"label": "跌 3~7%", "count": sum(1 for value in pcts if -7 <= value < -3),
+             "direction": "down"},
+            {"label": "跌 0~3%", "count": sum(1 for value in pcts if -3 <= value < 0),
+             "direction": "down"},
+            {"label": "平盘", "count": sum(1 for value in pcts if value == 0),
+             "direction": "flat"},
+            {"label": "涨 0~3%", "count": sum(1 for value in pcts if 0 < value < 3),
+             "direction": "up"},
+            {"label": "涨 3~7%", "count": sum(1 for value in pcts if 3 <= value < 7),
+             "direction": "up"},
+            {"label": "涨超 7%", "count": sum(1 for value in pcts if value >= 7),
+             "direction": "up"},
         ]
         ranked = sorted(rows, key=lambda item: item["pct_chg"], reverse=True)
         brief = lambda item: {key: item[key] for key in ("code", "name", "close", "pct_chg")}
+        total_amount = round(sum(row["amount"] or 0 for row in rows), 0)
         return {
             "trade_date": trade_date,
             "sample": sample,
@@ -1100,8 +1201,10 @@ def _market_payload(cfg: dict, trade_date: str | None = None) -> dict:
                 "limit_up": sum(1 for value in pcts if value >= 9.8),
                 "limit_down": sum(1 for value in pcts if value <= -9.8),
                 "median_pct": round(median, 2) if median is not None else None,
-                "total_amount": round(sum(row["amount"] or 0 for row in rows), 0),
+                "total_amount": total_amount,
             },
+            "amount_stats": amounts_mod.compute(
+                conn, cfg, trade_date, total_amount, sample),
             "distribution": distribution,
             "gainers": [brief(item) for item in ranked[:10]],
             "losers": [brief(item) for item in ranked[-10:][::-1]],
@@ -1198,7 +1301,17 @@ def dispatch(app: App, method: str, raw_path: str, body: bytes = b"") -> tuple[i
             if path == "/api/analysis":
                 return _payload_bytes(app.analysis(query.get("code", ""), query.get("scope", "")))
             if path == "/api/pool":
-                return _payload_bytes(app.pool())
+                try:
+                    min_hits = int(query.get("min_hits", "") or 0) or None
+                except ValueError:
+                    min_hits = None
+                return _payload_bytes(app.pool(
+                    kind=query.get("kind", "all"),
+                    market_sort=query.get("sort", "evidence") == "market",
+                    liquid_only=query.get("liquid") in ("1", "true"),
+                    min_hits=min_hits,
+                    only_actionable=query.get("actionable") in ("1", "true"),
+                ))
             if path == "/api/newstock":
                 return _payload_bytes(app.newstock())
             if path == "/api/support":

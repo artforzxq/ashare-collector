@@ -105,6 +105,42 @@ class CandidateBuildTests(unittest.TestCase):
         self.assertIsNotNone(item["cap"])
         self.assertIsNotNone(item["state"])
         self.assertIsNotNone(item["risk_reward"])
+        self.assertTrue(item["why"])
+
+    def test_kind_counts_and_view_filters(self):
+        payload = dict(self.result)
+        payload["candidates"] = [
+            {"code": "A", "kind": "stock", "hits": 3, "liquid": True, "cap": 0.1,
+             "risk_computed": True, "days": 3, "criteria": ["x"], "avg_amount_60d": 1e8},
+            {"code": "B", "kind": "broad_etf", "hits": 2, "liquid": True, "cap": 0.2,
+             "risk_computed": True, "days": 2, "criteria": ["x"], "avg_amount_60d": 1e8},
+            {"code": "C", "kind": "sector_etf", "hits": 5, "liquid": False, "cap": None,
+             "risk_computed": False, "days": 5, "criteria": ["x"], "avg_amount_60d": 1e8},
+            {"code": "D", "kind": "index", "hits": 2, "liquid": True, "cap": None,
+             "risk_computed": False, "days": 2, "criteria": ["x"], "avg_amount_60d": 1e8},
+        ]
+        view = candidates.apply_view(payload, kind="etf", liquid_only=True, min_hits=2)
+        self.assertEqual(view["kind_counts"]["all"], 4)
+        self.assertEqual(view["kind_counts"]["stock"], 1)
+        self.assertEqual(view["kind_counts"]["etf"], 2)
+        self.assertEqual([item["code"] for item in view["candidates"]], ["B"])
+        actionable = candidates.apply_view(payload, only_actionable=True)
+        self.assertEqual({item["code"] for item in actionable["candidates"]}, {"A", "B"})
+
+    def test_market_sort_is_explicit(self):
+        payload = {
+            "candidates": [
+                {"code": "A", "kind": "stock", "hits": 5, "liquid": True, "cap": 0.1,
+                 "days": 5, "criteria": ["x"], "avg_amount_60d": 1e8},
+                {"code": "B", "kind": "broad_etf", "hits": 2, "liquid": True, "cap": 0.1,
+                 "days": 2, "criteria": ["x"], "avg_amount_60d": 1e8},
+            ],
+            "asset_mix": {"weights": {"stock": 0.3, "broad_etf": 0.6}},
+        }
+        evidence = candidates.apply_view(payload)
+        market = candidates.apply_view(payload, market_sort=True)
+        self.assertEqual(evidence["candidates"][0]["code"], "A")
+        self.assertEqual(market["candidates"][0]["code"], "B")
 
     def test_report_has_a_copy_paste_line(self):
         text = candidates.report(self.result, cfg=self.cfg)

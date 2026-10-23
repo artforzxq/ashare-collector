@@ -174,6 +174,7 @@ class ServerTests(unittest.TestCase):
         data = json.loads(body)
         self.assertEqual(status, 200)
         self.assertIn("sentiment", data)
+        self.assertIn("amount_stats", data)
         self.assertIn("breadth", data)
 
     def test_mainline_api_without_industry_is_a_readable_failure(self):

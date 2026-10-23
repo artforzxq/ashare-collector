@@ -538,3 +538,22 @@ CREATE TABLE IF NOT EXISTS broker_executions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_broker_exec_code ON broker_executions (code, trade_date);
+
+-- 页面任务中心的执行台账：每次手动/计划触发都留一行。
+-- job_manager 只允许同时跑一个任务；这张表负责“跑过什么、什么时候、成没成”。
+CREATE TABLE IF NOT EXISTS job_runs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_key       TEXT NOT NULL,       -- daily / screen / sync ...
+  title         TEXT,
+  trigger       TEXT,                -- manual / schedule
+  scheduled_for TEXT,                -- 计划应执行时间（手动任务为空）
+  status        TEXT NOT NULL,       -- running / done / failed / interrupted
+  started_at    TEXT,
+  finished_at   TEXT,
+  result        TEXT,
+  error         TEXT,
+  log_tail      TEXT,
+  created_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_runs_key_time ON job_runs (job_key, started_at);

@@ -187,6 +187,65 @@ def _cheap_sort_key(item: dict) -> tuple:
     )
 
 
+KIND_FILTERS = {
+    "all": lambda kind: True,
+    "stock": lambda kind: kind == "stock",
+    "etf": lambda kind: kind in ("broad_etf", "sector_etf"),
+    "broad_etf": lambda kind: kind == "broad_etf",
+    "sector_etf": lambda kind: kind == "sector_etf",
+    "index": lambda kind: kind == "index",
+}
+
+
+def kind_counts(items: list[dict]) -> dict[str, int]:
+    counts = {key: 0 for key in KIND_FILTERS}
+    for item in items:
+        kind = item.get("kind") or "other"
+        for key, accept in KIND_FILTERS.items():
+            if accept(kind):
+                counts[key] += 1
+    counts["all"] = len(items)
+    return counts
+
+
+def apply_view(payload: dict, kind: str = "all", market_sort: bool = False,
+               liquid_only: bool = False, min_hits: int | None = None,
+               only_actionable: bool = False) -> dict:
+    """页面的筛选与排序都走这里，不在浏览器里重新判定口径。"""
+    accept = KIND_FILTERS.get(kind)
+    if accept is None:
+        raise ValueError(f"未知类型：{kind}")
+    base = list(payload.get("candidates") or [])
+    threshold = int(min_hits or 0)
+    chosen = [
+        item for item in base
+        if accept(item.get("kind") or "other")
+        and (not threshold or int(item.get("hits") or 0) >= threshold)
+        and (not liquid_only or item.get("liquid") is not False)
+        and (not only_actionable or (item.get("risk_computed") and (item.get("cap") or 0) > 0))
+    ]
+    mix = payload.get("asset_mix") or {}
+    weights = mix.get("weights") or {}
+    if market_sort:
+        rank = {name: -float(weight) for name, weight in weights.items()}
+        chosen.sort(key=lambda item: (rank.get(item.get("kind"), 0.0), _sort_key(item)))
+    else:
+        chosen.sort(key=_sort_key)
+    out = dict(payload)
+    out["candidates"] = chosen
+    out["candidate_total"] = len(base)
+    out["kind_counts"] = kind_counts(base)
+    out["view"] = {
+        "kind": kind,
+        "market_sort": bool(market_sort),
+        "liquid_only": bool(liquid_only),
+        "min_hits": threshold or int(payload.get("min_hits") or 0),
+        "only_actionable": bool(only_actionable),
+        "shown": len(chosen),
+    }
+    return out
+
+
 def _leading_misses(all_days: list[str], seen: set[str]) -> int:
     """从最新筛选日往回数，连续多少个筛选日没出现。
 
@@ -327,14 +386,40 @@ def build(conn, cfg: dict, days: int | None = None, min_hits: int | None = None)
     # 也就是说"防守时少出手、出手也优先用宽基"这句话在我们自己的信号上站得住。
     # 反过来不成立：三个档位都是显著为负，"进取时买个股更赚"没有证据，所以这里只排序、不推荐买入。
     mix = regime_mod.asset_mix(cfg, regime_mod.series(conn, cfg).get(latest_date))
-    rank = {kind: -weight for kind, weight in mix["weights"].items()}
     # 候选是池外的票，`item["type"]` 一直是空的——类型只有池内那几行才带。
     # 不查这一下，几百只 ETF 会全被归到"其它"，资产选择就形同虚设。
     kinds = {row["code"]: row["type"] for row in db.query(conn, "SELECT code, type FROM instruments")}
     for item in candidates:
         item["kind"] = regime_mod.kind_of(cfg, item["code"], item.get("type") or kinds.get(item["code"]))
         item["kind_label"] = regime_mod.KIND_LABEL.get(item["kind"], item["kind"])
-    candidates.sort(key=lambda item: (rank.get(item["kind"], 0), _sort_key(item)))
+        item["market_weight"] = (mix.get("weights") or {}).get(item["kind"])
+        reasons = [
+            f"反复命中：{item['hits']} 次 / {item['days']} 个筛选日",
+            f"形态：{'、'.join(item['criteria']) or '—'}",
+        ]
+        if item.get("avg_amount_60d") is None:
+            reasons.append("流动性：成交额缺失，按门槛放行")
+        else:
+            reasons.append(
+                f"流动性：近 60 日均额 {item['avg_amount_60d'] / 1e8:.2f} 亿"
+                + ("，低于门槛" if item.get("liquid") is False else "，达标"))
+        if item.get("excess_20d") is not None:
+            reasons.append(f"历史兑现：20 日超额 {item['excess_20d']:+.2f}%（{item['outcome_n']} 个样本）")
+        else:
+            reasons.append("历史兑现：还没有 20 日回填")
+        if item.get("risk_computed"):
+            reasons.append(
+                f"风险层：{'可建仓' if (item.get('cap') or 0) > 0 else '0 仓'}"
+                f"（上限 {item.get('cap') or 0:.0%}，止损 {item.get('stop_pct') or 0:+.1f}%）")
+        else:
+            reasons.append("风险层：未计算（只给排序靠前的一批现算）")
+        weight = (mix.get("weights") or {}).get(item["kind"])
+        reasons.append(
+            f"类型：{item['kind_label']}；市场层权重 {weight:.0%}" if weight is not None
+            else f"类型：{item['kind_label']}")
+        item["why"] = reasons
+    # 默认证据优先；市场层偏好由页面显式切换（apply_view）。
+    candidates.sort(key=_sort_key)
 
     members = [item for item in items if item["code"] in pooled]
     order = {code: index for index, code in enumerate(pooled)}
@@ -349,6 +434,7 @@ def build(conn, cfg: dict, days: int | None = None, min_hits: int | None = None)
         "min_hits": min_hits,
         "threshold": threshold,
         "candidates": candidates,
+        "kind_counts": kind_counts(candidates),
         "members": members,
         "pooled_missing": [code for code in pooled if not grouped[code]["hits"]],
         # 出池口径与闸门也回传，页面照着显示，不自己编

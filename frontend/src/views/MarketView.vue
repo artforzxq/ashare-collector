@@ -27,7 +27,8 @@ type MarketPayload = {
     median_pct: number
     total_amount: number
   } | null
-  distribution?: Array<{ label: string; count: number }>
+  distribution?: Array<{ label: string; count: number; direction?: 'down' | 'flat' | 'up' }>
+  amount_stats?: any
   gainers?: Array<{ code: string; name: string; pct_chg: number }>
   losers?: Array<{ code: string; name: string; pct_chg: number }>
   sentiment?: Record<string, unknown> | null
@@ -143,6 +144,7 @@ onMounted(loadMarket)
       :breadth="market?.breadth"
       :distribution="market?.distribution"
       :note="market?.note"
+      :amount-stats="market?.amount_stats"
     />
 
     <div class="market-pair">

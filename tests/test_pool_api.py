@@ -4,6 +4,7 @@
 这个接口只负责把结果和上下文（门槛、上次扫描、回填表现）凑到一处。
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,10 @@ class PoolApiTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _seed_screen(self):
+        db.upsert_rows(self.conn, "instruments", [
+            {"code": "SH600487", "name": "亨通光电", "type": "stock"},
+            {"code": "SZ000333", "name": "美的集团", "type": "stock"},
+        ], ["code"])
         rows = []
         for day in ("2026-09-17", "2026-09-18"):
             # 池外的票，两个筛选日都被命中 → 应该成为候选
@@ -83,6 +88,19 @@ class PoolApiTests(unittest.TestCase):
         self.assertEqual(payload["last_run"]["scanned"], 1803)
         self.assertEqual(payload["trade_date"], "2026-09-18")
         self.assertEqual(payload["window"], ["2026-09-18", "2026-09-17"])
+
+    def test_type_filter_is_served_by_the_api(self):
+        self._seed_screen()
+        status, _, body = server.dispatch(self.app, "GET", "/api/pool?kind=etf")
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["candidates"], [])
+        self.assertEqual(payload["kind_counts"]["stock"], 1)
+        status, _, body = server.dispatch(self.app, "GET", "/api/pool?kind=stock&liquid=1&min_hits=2")
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["candidates"])
+        self.assertEqual(payload["view"]["kind"], "stock")
 
     def test_member_that_never_shows_up_is_flagged(self):
         """池子里的票最近一次都没被筛到——这是"该不该挪出去"的第一条证据。"""

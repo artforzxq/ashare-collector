@@ -32,9 +32,31 @@ describe('MarketView', () => {
                 median_pct: 0.86,
                 total_amount: 1230000000000,
               },
+              amount_stats: {
+                value: 1230000000000,
+                coverage: 5100,
+                prev_date: '2026-10-21',
+                prev_value: 1100000000000,
+                prev_coverage: 5096,
+                default_window: 20,
+                d1: { ratio: 1.118, change_pct: 11.8, comparable: true, label: '偏放' },
+                windows: {
+                  '1': { days: 1, basis: '前一交易日', ratio: 1.118, change_pct: 11.8,
+                         percentile: null, label: '偏放', comparable: true },
+                  '5': { days: 5, basis: '5日均量', ratio: 1.08, change_pct: 8.0,
+                         percentile: 60, label: '常态', comparable: true },
+                  '20': { days: 20, basis: '中位数', ratio: 1.18, change_pct: 18.0,
+                          percentile: 72, label: '偏放', comparable: true },
+                },
+                history: [
+                  { trade_date: '2026-10-21', total_amount: 1100000000000, coverage: 5096 },
+                  { trade_date: '2026-10-22', total_amount: 1230000000000, coverage: 5100 },
+                ],
+              },
               distribution: [
-                { label: '+3% 以上', count: 320 },
-                { label: '-3% 以下', count: 85 },
+                { label: '涨 3~7%', count: 320, direction: 'up' },
+                { label: '平盘', count: 30, direction: 'flat' },
+                { label: '跌 0~3%', count: 85, direction: 'down' },
               ],
               gainers: [{ code: 'SH600000', name: '浦发银行', pct_chg: 6.2 }],
               losers: [{ code: 'SZ000001', name: '平安银行', pct_chg: -3.4 }],
@@ -98,10 +120,14 @@ describe('MarketView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('3200')
+    expect(wrapper.text()).toContain('较昨日')
+    expect(wrapper.text()).toContain('P72')
     expect(wrapper.text()).toContain('发酵')
     expect(wrapper.text()).toContain('计算机')
     expect(wrapper.text()).toContain('浦发银行')
     expect(wrapper.text()).toContain('存量博弈')
+    expect(wrapper.text()).toContain('绿色 · 下跌')
+    expect(wrapper.text()).toContain('零轴居中')
     wrapper.unmount()
   })
 })

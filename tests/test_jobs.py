@@ -56,6 +56,41 @@ class JobManagerTests(unittest.TestCase):
         _wait(manager)
         self.assertTrue(manager.start("c", "下一个任务", lambda: "y")["ok"])   # 结束后可以再跑
 
+    def test_history_survives_manager_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.db"
+            conn = db.connect(path)
+            db.init_db(conn, Path(__file__).resolve().parents[1] / "schema.sql")
+            conn.close()
+            schema = Path(__file__).resolve().parents[1] / "schema.sql"
+            first = jobs.JobManager(path, schema)
+            first.start("demo", "持久化任务", lambda: "完成")
+            _wait(first)
+            second = jobs.JobManager(path, schema)
+            state = second.state()
+            self.assertEqual(state["recent"][0]["key"], "demo")
+            self.assertEqual(state["recent"][0]["status"], "done")
+            self.assertRegex(state["recent"][0]["started_at"], r"^\d{4}-\d{2}-\d{2} ")
+
+    def test_running_row_is_marked_interrupted_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.db"
+            schema = Path(__file__).resolve().parents[1] / "schema.sql"
+            conn = db.connect(path)
+            db.init_db(conn, schema)
+            conn.execute(
+                """INSERT INTO job_runs
+                       (job_key, title, status, started_at, created_at)
+                   VALUES ('daily','每日任务','running','2026-10-22 15:30:00',
+                           '2026-10-22 15:30:00')"""
+            )
+            conn.commit()
+            conn.close()
+            manager = jobs.JobManager(path, schema)
+            last = manager.state()["recent"][0]
+            self.assertEqual(last["status"], "interrupted")
+            self.assertIn("中断", last["error"])
+
 
 class JobRouteTests(unittest.TestCase):
     """走 HTTP 路由那一层：页面按钮实际打的就是这两个接口。"""
