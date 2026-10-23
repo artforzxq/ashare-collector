@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
+import BacktestView from './views/BacktestView.vue'
+import FactorsView from './views/FactorsView.vue'
 import JournalView from './views/JournalView.vue'
 import InstrumentView from './views/InstrumentView.vue'
 import MarketView from './views/MarketView.vue'
@@ -52,7 +54,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/factors',
     name: 'factors',
-    component: PlaceholderView,
+    component: FactorsView,
     meta: {
       title: '因子台账',
       eyebrow: 'RESEARCH',
@@ -62,7 +64,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/backtest',
     name: 'backtest',
-    component: PlaceholderView,
+    component: BacktestView,
     meta: {
       title: '参数回测',
       eyebrow: 'RESEARCH',

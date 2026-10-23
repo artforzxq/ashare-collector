@@ -1640,6 +1640,138 @@ a {
   color: var(--warning) !important;
 }
 
+.research-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.research-status {
+  display: flex;
+  min-height: 106px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  flex-direction: column;
+}
+
+.research-status.is-positive {
+  border-top-color: var(--negative);
+}
+
+.research-status.is-warning {
+  border-top-color: var(--warning);
+}
+
+.research-status.is-danger {
+  border-top-color: var(--danger);
+}
+
+.research-status span {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.research-status strong {
+  margin-top: auto;
+  font-size: 22px;
+  letter-spacing: -0.04em;
+}
+
+.research-status small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8.5px;
+}
+
+.factor-ledger-table {
+  min-width: 1080px;
+}
+
+.empty-cell {
+  padding: 24px !important;
+  color: var(--faint);
+  text-align: center !important;
+}
+
+.shadow-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shadow-card {
+  box-shadow: none;
+}
+
+.compact-heading {
+  margin-bottom: 10px;
+}
+
+.progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-muted);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.shadow-stats {
+  display: flex;
+  margin: 10px 0 0;
+  flex-direction: column;
+}
+
+.shadow-stats div {
+  display: flex;
+  min-height: 29px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+}
+
+.shadow-stats dt {
+  color: var(--faint);
+  font-size: 8.5px;
+}
+
+.shadow-stats dd {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 9.5px;
+  text-align: right;
+}
+
+.heading-badges {
+  display: flex;
+  gap: 6px;
+}
+
+.current-row {
+  background: var(--accent-soft);
+}
+
+.accent-text {
+  color: var(--accent) !important;
+}
+
+@media (max-width: 1100px) {
+  .research-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .shadow-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .text-link {
   display: inline-flex;
   align-items: center;
