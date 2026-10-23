@@ -7,6 +7,7 @@ import MetricCard from '../components/MetricCard.vue'
 import PageHeader from '../components/PageHeader.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { ApiError, apiGet } from '../services/api'
+import { useAppStore } from '../stores/app'
 
 type HealthPayload = {
   process_started_at: string
@@ -15,23 +16,11 @@ type HealthPayload = {
   routes: string[]
 }
 
-type WatchlistItem = {
-  code: string
-  name: string
-  last_date: string | null
-  close: number | null
-  pct_chg: number | null
-  state: string | null
-}
-
-type WatchlistPayload = {
-  items: WatchlistItem[]
-}
-
 const health = ref<HealthPayload | null>(null)
-const watchlist = ref<WatchlistItem[]>([])
 const loading = ref(true)
 const error = ref('')
+const app = useAppStore()
+const watchlist = computed(() => app.items.value)
 
 const latestDate = computed(
   () =>
@@ -65,12 +54,11 @@ async function loadOverview() {
   loading.value = true
   error.value = ''
   try {
-    const [healthResult, watchlistResult] = await Promise.all([
+    const [healthResult] = await Promise.all([
       apiGet<HealthPayload>('/health'),
-      apiGet<WatchlistPayload>('/watchlist'),
+      app.refreshWatchlist(),
     ])
     health.value = healthResult
-    watchlist.value = watchlistResult.items || []
   } catch (cause) {
     error.value = cause instanceof ApiError ? cause.message : '无法读取本地服务'
   } finally {

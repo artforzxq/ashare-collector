@@ -94,6 +94,10 @@ function setSelectedCode(code: string) {
   selectedCode.value = code
 }
 
+function clearSearch() {
+  searchResults.value = []
+}
+
 function resetForTests() {
   items.value = []
   coverage.value = {}
@@ -116,6 +120,7 @@ export function useAppStore() {
     addInstrument,
     removeInstrument,
     setSelectedCode,
+    clearSearch,
     resetForTests,
   }
 }

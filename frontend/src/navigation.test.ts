@@ -17,4 +17,23 @@ describe('navigation', () => {
 
     expect(journal?.to).toBe('/journal')
   })
+
+  it('keeps every legacy work area represented', () => {
+    const destinations = new Set(
+      navigationSections.flatMap((section) => section.items.map((item) => item.to)),
+    )
+
+    expect([...destinations]).toEqual(
+      expect.arrayContaining([
+        '/instrument',
+        '/market',
+        '/factors',
+        '/backtest',
+        '/screen',
+        '/new-stocks',
+        '/journal',
+        '/system',
+      ]),
+    )
+  })
 })
