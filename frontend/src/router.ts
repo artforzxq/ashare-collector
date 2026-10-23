@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 import JournalView from './views/JournalView.vue'
 import InstrumentView from './views/InstrumentView.vue'
+import MarketView from './views/MarketView.vue'
 import OverviewView from './views/OverviewView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 
@@ -30,7 +31,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/market',
     name: 'market',
-    component: PlaceholderView,
+    component: MarketView,
     meta: {
       title: '市场总览',
       eyebrow: 'MARKET',
