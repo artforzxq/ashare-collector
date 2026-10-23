@@ -30,3 +30,21 @@ export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> 
   }
   return payload as T
 }
+
+export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_PREFIX}${path}`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  const payload = (await response.json().catch(() => null)) as (T & ErrorPayload) | null
+  if (!response.ok) {
+    const message = payload?.message || payload?.error || `请求失败（HTTP ${response.status}）`
+    throw new ApiError(message, response.status, path)
+  }
+  return payload as T
+}
